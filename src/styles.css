@@ -525,6 +525,48 @@ body {
   font-weight: 600;
 }
 
+/* ── Snap Mode Toggle ── */
+
+.snap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  margin-left: 2px;
+}
+
+.snap-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition);
+}
+
+.snap-btn:hover {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+}
+
+.snap-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.snap-btn svg {
+  flex-shrink: 0;
+}
+
 /* ── Measurement Panel ── */
 
 .measure-panel {
@@ -615,6 +657,49 @@ body {
   white-space: nowrap;
   pointer-events: none;
   transform: translate(-50%, -150%);
+}
+
+.measure-label-preview {
+  opacity: 0.8;
+  border-style: dashed;
+  animation: previewPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes previewPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+
+/* ── Snap Type Badge (in measurement list) ── */
+
+.measure-snap-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.measure-snap-badge.axis-x {
+  background: rgba(255, 68, 68, 0.15);
+  color: #ff6666;
+}
+
+.measure-snap-badge.axis-y {
+  background: rgba(68, 255, 68, 0.15);
+  color: #66ff66;
+}
+
+.measure-snap-badge.axis-z {
+  background: rgba(68, 68, 255, 0.15);
+  color: #6688ff;
+}
+
+.measure-snap-badge.perp {
+  background: rgba(255, 170, 0, 0.15);
+  color: #ffaa00;
 }
 
 /* ── Loading Overlay ── */

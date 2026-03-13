@@ -6,7 +6,7 @@ import { MeasureTool } from '../utils/measureTool';
 import { getModelBounds } from '../utils/loaders';
 
 const Viewer3D = forwardRef(function Viewer3D(
-  { onDrop, onMeasure, onContextAction, showGrid, autoRotate, pointSize },
+  { onDrop, onMeasure, onContextAction, onSnapModeChange, showGrid, autoRotate, pointSize },
   ref
 ) {
   const containerRef = useRef(null);
@@ -318,6 +318,13 @@ const Viewer3D = forwardRef(function Viewer3D(
     }
   }, [onMeasure]);
 
+  // Forward snap mode change callback
+  useEffect(() => {
+    if (measureToolRef.current) {
+      measureToolRef.current.onSnapModeChange = onSnapModeChange;
+    }
+  }, [onSnapModeChange]);
+
   // Close context menu on any click outside
   useEffect(() => {
     if (!contextMenu) return;
@@ -417,6 +424,10 @@ const Viewer3D = forwardRef(function Viewer3D(
 
       setMeasureUnit(unit) {
         measureToolRef.current.setUnit(unit);
+      },
+
+      setSnapMode(mode) {
+        measureToolRef.current.setSnapMode(mode);
       },
 
       clearMeasurements() {

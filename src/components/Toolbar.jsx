@@ -15,6 +15,8 @@ export default function Toolbar({
   pointSize,
   onPointSizeChange,
   onFullscreen,
+  snapMode,
+  onSnapModeChange,
 }) {
   return (
     <>
@@ -33,6 +35,42 @@ export default function Toolbar({
           </svg>
           <span>Measure</span>
         </button>
+
+        {/* Snap mode toggle — only visible when measure mode is active */}
+        {measureActive && (
+          <>
+            <div className="snap-toggle">
+              <button
+                className={`snap-btn ${snapMode === 'free' ? 'active' : ''}`}
+                onClick={() => onSnapModeChange('free')}
+                title="Free measurement"
+              >
+                Free
+              </button>
+              <button
+                className={`snap-btn ${snapMode === 'axis' ? 'active' : ''}`}
+                onClick={() => onSnapModeChange('axis')}
+                title="Snap to axis (Tab)"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M12 2v20M2 12h20" />
+                </svg>
+                Axis
+              </button>
+              <button
+                className={`snap-btn ${snapMode === 'perpendicular' ? 'active' : ''}`}
+                onClick={() => onSnapModeChange('perpendicular')}
+                title="Perpendicular measurement (Tab)"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M4 20h16M12 4v16" />
+                  <rect x="8" y="16" width="4" height="4" fill="none" />
+                </svg>
+                Perp
+              </button>
+            </div>
+          </>
+        )}
 
         <div className="toolbar-divider" />
 
@@ -122,6 +160,23 @@ export default function Toolbar({
             {measurements.map((m, i) => (
               <div key={i} className="measure-item">
                 <span className="measure-index">M{i + 1}</span>
+                {m.snapType && (
+                  <span
+                    className={`measure-snap-badge ${
+                      m.snapType === 'perp'
+                        ? 'perp'
+                        : m.snapType === 'X'
+                        ? 'axis-x'
+                        : m.snapType === 'Y'
+                        ? 'axis-y'
+                        : m.snapType === 'Z'
+                        ? 'axis-z'
+                        : ''
+                    }`}
+                  >
+                    {m.snapType === 'perp' ? '\u22A5' : m.snapType}
+                  </span>
+                )}
                 <span className="measure-value">{m.formatted}</span>
                 <button
                   className="btn-icon-sm"
@@ -140,7 +195,12 @@ export default function Toolbar({
       {/* Measure mode hint */}
       {measureActive && (
         <div className="measure-hint">
-          Click on the model to place measurement points. Press Esc to cancel.
+          {snapMode === 'free' &&
+            'Click on the model to place measurement points. Tab to switch snap mode. Esc to cancel.'}
+          {snapMode === 'axis' &&
+            'Axis snap: click first point, then move to snap along X/Y/Z axis. Tab to switch. Esc to cancel.'}
+          {snapMode === 'perpendicular' &&
+            'Perpendicular: click a surface to measure the shortest distance to the opposite surface. Tab to switch. Esc to cancel.'}
         </div>
       )}
     </>
