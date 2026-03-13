@@ -1,0 +1,8 @@
+node_modules/
+dist/
+public/test-model/
+public/storebaug/
+Forus/
+Storebaug/
+*.jpg
+*.png
