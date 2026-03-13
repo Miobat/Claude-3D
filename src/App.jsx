@@ -31,6 +31,7 @@ export default function App() {
   const [unit, setUnit] = useState('m');
   const [pointSize, setPointSize] = useState(0.01);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [snapMode, setSnapMode] = useState('free');
 
   // Load projects from DB on mount
   useEffect(() => {
@@ -68,9 +69,15 @@ export default function App() {
   useEffect(() => {
     viewerRef.current?.setMeasureActive(measureActive);
     if (!measureActive) {
-      // Keep measurements visible, just stop adding new ones
+      // Reset snap mode when leaving measure mode
+      setSnapMode('free');
     }
   }, [measureActive]);
+
+  // Sync snap mode to viewer
+  useEffect(() => {
+    viewerRef.current?.setSnapMode(snapMode);
+  }, [snapMode]);
 
   // Sync unit to viewer
   useEffect(() => {
@@ -490,6 +497,7 @@ export default function App() {
           onDrop={handleDrop}
           onMeasure={setMeasurements}
           onContextAction={handleContextAction}
+          onSnapModeChange={setSnapMode}
           showGrid={showGrid}
           autoRotate={autoRotate}
           pointSize={pointSize}
@@ -519,6 +527,11 @@ export default function App() {
           pointSize={pointSize}
           onPointSizeChange={setPointSize}
           onFullscreen={toggleFullscreen}
+          snapMode={snapMode}
+          onSnapModeChange={(mode) => {
+            setSnapMode(mode);
+            viewerRef.current?.setSnapMode(mode);
+          }}
         />
 
         {/* Loading overlay */}
