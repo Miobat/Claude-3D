@@ -1,6 +1,8 @@
 import Foundation
 import SceneKit
+#if !targetEnvironment(simulator)
 import ARKit
+#endif
 
 /// Processes raw mesh data into displayable and exportable formats
 class MeshProcessor {
@@ -99,6 +101,7 @@ class MeshProcessor {
         }
     }
 
+    #if !targetEnvironment(simulator)
     // MARK: - Point Cloud from Depth
 
     /// Create a point cloud from ARFrame depth data
@@ -148,6 +151,7 @@ class MeshProcessor {
 
         return points
     }
+    #endif
 
     // MARK: - Bounding Box
 

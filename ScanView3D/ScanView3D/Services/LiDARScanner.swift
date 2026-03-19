@@ -1,3 +1,4 @@
+#if !targetEnvironment(simulator)
 import ARKit
 import RealityKit
 import Combine
@@ -283,6 +284,7 @@ extension LiDARScanner: ARSessionDelegate {
         }
     }
 }
+#endif
 
 /// Combined mesh data from all scan anchors
 struct MeshData {

@@ -60,6 +60,11 @@ struct SettingsView: View {
                     HStack {
                         Text("LiDAR")
                         Spacer()
+                        #if targetEnvironment(simulator)
+                        Label("Simulated", systemImage: "desktopcomputer")
+                            .foregroundColor(.orange)
+                            .font(.subheadline)
+                        #else
                         if LiDARScanner.isLiDARAvailable {
                             Label("Available", systemImage: "checkmark.circle.fill")
                                 .foregroundColor(.green)
@@ -69,6 +74,7 @@ struct SettingsView: View {
                                 .foregroundColor(.red)
                                 .font(.subheadline)
                         }
+                        #endif
                     }
                 }
             }

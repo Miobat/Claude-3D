@@ -1,9 +1,16 @@
 import SwiftUI
+#if !targetEnvironment(simulator)
 import ARKit
+#endif
 
 /// Main scanning interface with AR camera view and controls
 struct ScannerView: View {
+    #if targetEnvironment(simulator)
+    @StateObject private var scanner = MockLiDARScanner()
+    #else
     @StateObject private var scanner = LiDARScanner()
+    #endif
+
     @EnvironmentObject var storageManager: StorageManager
     @State private var showingSaveDialog = false
     @State private var scanName = ""
@@ -20,9 +27,15 @@ struct ScannerView: View {
 
     var body: some View {
         ZStack {
+            #if targetEnvironment(simulator)
+            // Simulated scanning view
+            SimulatorScanView(scanner: scanner)
+                .ignoresSafeArea()
+            #else
             // AR Camera View
             ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay)
                 .ignoresSafeArea()
+            #endif
 
             // Scanning overlay UI
             VStack {
@@ -35,10 +48,12 @@ struct ScannerView: View {
                 bottomControls
             }
 
-            // LiDAR unavailable overlay
+            #if !targetEnvironment(simulator)
+            // LiDAR unavailable overlay (only on real device)
             if !LiDARScanner.isLiDARAvailable {
                 lidarUnavailableView
             }
+            #endif
         }
         .sheet(isPresented: $showingSaveDialog) {
             saveDialogSheet
@@ -82,8 +97,21 @@ struct ScannerView: View {
 
             Spacer()
 
+            #if targetEnvironment(simulator)
+            // Simulator badge
+            Text("SIMULATOR")
+                .font(.caption2)
+                .fontWeight(.bold)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.orange)
+                .cornerRadius(4)
+                .foregroundColor(.white)
+            #endif
+
             // Mesh toggle
             if scanner.isScanning {
+                #if !targetEnvironment(simulator)
                 Button {
                     showMeshOverlay.toggle()
                 } label: {
@@ -91,6 +119,7 @@ struct ScannerView: View {
                         .foregroundColor(.white)
                         .padding(8)
                 }
+                #endif
 
                 // Settings button
                 Button {
@@ -210,6 +239,7 @@ struct ScannerView: View {
 
     // MARK: - LiDAR Unavailable
 
+    #if !targetEnvironment(simulator)
     private var lidarUnavailableView: some View {
         VStack(spacing: 20) {
             Image(systemName: "sensor.fill")
@@ -229,6 +259,7 @@ struct ScannerView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(uiColor: .systemBackground))
     }
+    #endif
 
     // MARK: - Save Dialog
 
@@ -374,3 +405,118 @@ struct ScannerView: View {
         }
     }
 }
+
+// MARK: - Simulator Scan View
+
+#if targetEnvironment(simulator)
+
+/// Animated simulated scanning view for the iOS Simulator
+struct SimulatorScanView: View {
+    @ObservedObject var scanner: MockLiDARScanner
+    @State private var animationPhase: Double = 0
+
+    var body: some View {
+        ZStack {
+            // Dark background simulating camera feed
+            Color(uiColor: UIColor(red: 0.08, green: 0.08, blue: 0.1, alpha: 1.0))
+
+            if scanner.isScanning {
+                // Animated scanning visualization
+                scanningAnimation
+            } else if scanner.vertexCount > 0 {
+                // Show completion state
+                completionView
+            } else {
+                // Idle state
+                idleView
+            }
+        }
+        .onAppear {
+            withAnimation(.linear(duration: 4).repeatForever(autoreverses: false)) {
+                animationPhase = 1
+            }
+        }
+    }
+
+    private var scanningAnimation: some View {
+        ZStack {
+            // Grid overlay
+            GeometryReader { geo in
+                Canvas { context, size in
+                    let gridSpacing: CGFloat = 30
+                    let offset = CGFloat(animationPhase) * gridSpacing
+
+                    // Horizontal lines
+                    for y in stride(from: -gridSpacing + offset.truncatingRemainder(dividingBy: gridSpacing), through: size.height, by: gridSpacing) {
+                        var path = Path()
+                        path.move(to: CGPoint(x: 0, y: y))
+                        path.addLine(to: CGPoint(x: size.width, y: y))
+                        context.stroke(path, with: .color(.cyan.opacity(0.15)), lineWidth: 0.5)
+                    }
+
+                    // Vertical lines
+                    for x in stride(from: 0, through: size.width, by: gridSpacing) {
+                        var path = Path()
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: size.height))
+                        context.stroke(path, with: .color(.cyan.opacity(0.15)), lineWidth: 0.5)
+                    }
+
+                    // Scanning sweep line
+                    let sweepY = CGFloat(animationPhase) * size.height
+                    var sweepPath = Path()
+                    sweepPath.move(to: CGPoint(x: 0, y: sweepY))
+                    sweepPath.addLine(to: CGPoint(x: size.width, y: sweepY))
+                    context.stroke(sweepPath, with: .color(.cyan.opacity(0.6)), lineWidth: 2)
+                }
+            }
+
+            // Center crosshair
+            VStack(spacing: 8) {
+                Image(systemName: "viewfinder")
+                    .font(.system(size: 80))
+                    .foregroundColor(.cyan.opacity(0.5))
+
+                Text("Simulated LiDAR Scan")
+                    .font(.caption)
+                    .foregroundColor(.cyan.opacity(0.7))
+            }
+        }
+    }
+
+    private var completionView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 60))
+                .foregroundColor(.green)
+
+            Text("Scan Complete")
+                .font(.title3)
+                .fontWeight(.semibold)
+                .foregroundColor(.white)
+
+            Text("\(scanner.vertexCount.formatted()) vertices captured")
+                .font(.subheadline)
+                .foregroundColor(.gray)
+        }
+    }
+
+    private var idleView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "sensor.fill")
+                .font(.system(size: 50))
+                .foregroundColor(.cyan.opacity(0.5))
+
+            Text("Simulator Mode")
+                .font(.headline)
+                .foregroundColor(.white)
+
+            Text("Tap Start Scan to generate\na sample room mesh")
+                .font(.subheadline)
+                .foregroundColor(.gray)
+                .multilineTextAlignment(.center)
+        }
+    }
+}
+
+#endif

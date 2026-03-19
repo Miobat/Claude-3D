@@ -1,6 +1,8 @@
 import Foundation
 import SceneKit
+#if !targetEnvironment(simulator)
 import ARKit
+#endif
 
 // MARK: - SIMD3 Codable
 
@@ -95,6 +97,7 @@ extension simd_float4x4 {
     }
 }
 
+#if !targetEnvironment(simulator)
 // MARK: - ARMeshGeometry Vertex Access
 
 extension ARMeshGeometry {
@@ -131,6 +134,7 @@ extension ARMeshGeometry {
         return indices
     }
 }
+#endif
 
 // MARK: - View Modifiers
 

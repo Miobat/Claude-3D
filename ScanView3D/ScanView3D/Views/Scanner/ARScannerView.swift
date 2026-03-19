@@ -1,3 +1,4 @@
+#if !targetEnvironment(simulator)
 import SwiftUI
 import ARKit
 import RealityKit
@@ -151,3 +152,4 @@ class ARScannerViewController: UIViewController {
         }
     }
 }
+#endif
