@@ -25,6 +25,7 @@
 		A10016 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10016; };
 		A10017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10017; };
 		A10018 /* MockLiDARScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10019; };
+		A10020 /* AllScansView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10020; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		B10017 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B10018 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10019 /* MockLiDARScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockLiDARScanner.swift; sourceTree = "<group>"; };
+		B10020 /* AllScansView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllScansView.swift; sourceTree = "<group>"; };
 		D10001 /* ScanView3D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScanView3D.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -117,6 +119,7 @@
 			children = (
 				B10012 /* ModelViewerView.swift */,
 				B10013 /* SceneKitView.swift */,
+				B10020 /* AllScansView.swift */,
 			);
 			path = Viewer;
 			sourceTree = "<group>";
@@ -253,6 +256,7 @@
 				A10015 /* ProjectDetailView.swift in Sources */,
 				A10016 /* SettingsView.swift in Sources */,
 				A10018 /* MockLiDARScanner.swift in Sources */,
+				A10020 /* AllScansView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

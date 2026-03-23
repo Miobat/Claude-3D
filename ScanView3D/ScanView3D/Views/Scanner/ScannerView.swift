@@ -24,6 +24,7 @@ struct ScannerView: View {
     @State private var errorMessage = ""
     @State private var isSaving = false
     @State private var showMeshOverlay = true
+    @State private var exportFormat: StorageManager.ExportFormat = .obj
 
     var body: some View {
         ZStack {
@@ -170,7 +171,13 @@ struct ScannerView: View {
                     // Stop & Save
                     Button {
                         scanner.stopScanning()
-                        scanName = "Scan \(Date().formattedString)"
+                        scanName = Scan.autoName()
+                        // Auto-select most recent project or first project
+                        if selectedProject == nil {
+                            selectedProject = storageManager.projects
+                                .sorted(by: { $0.modifiedAt > $1.modifiedAt })
+                                .first
+                        }
                         showingSaveDialog = true
                     } label: {
                         VStack(spacing: 4) {
@@ -268,6 +275,7 @@ struct ScannerView: View {
             Form {
                 Section("Scan Name") {
                     TextField("Enter scan name", text: $scanName)
+                        .textInputAutocapitalization(.words)
                 }
 
                 Section("Save to Project") {
@@ -278,8 +286,13 @@ struct ScannerView: View {
                     } else {
                         Picker("Project", selection: $selectedProject) {
                             Text("Select a project").tag(nil as Project?)
-                            ForEach(storageManager.projects) { project in
-                                Text(project.name).tag(project as Project?)
+                            ForEach(storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })) { project in
+                                HStack {
+                                    Text(project.name)
+                                    Text("(\(project.scanCount) scans)")
+                                        .foregroundColor(.secondary)
+                                }
+                                .tag(project as Project?)
                             }
                         }
 
@@ -289,12 +302,34 @@ struct ScannerView: View {
                     }
                 }
 
+                Section("Export Format") {
+                    Picker("Format", selection: $exportFormat) {
+                        Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
+                        Text("PLY (Better Colors)").tag(StorageManager.ExportFormat.ply)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 if let meshData = scanner.getCombinedMeshData() {
                     Section("Scan Info") {
                         LabeledContent("Vertices", value: meshData.vertexCount.formatted())
                         LabeledContent("Faces", value: meshData.faceCount.formatted())
                         let dims = meshData.dimensions
                         LabeledContent("Size", value: String(format: "%.2f × %.2f × %.2f m", dims.x, dims.y, dims.z))
+                        if !meshData.colors.isEmpty {
+                            LabeledContent("Color Data", value: "Yes")
+                        }
+                    }
+                }
+
+                if isSaving {
+                    Section {
+                        HStack {
+                            ProgressView()
+                                .padding(.trailing, 8)
+                            Text("Saving scan...")
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
             }
@@ -387,7 +422,8 @@ struct ScannerView: View {
                 let _ = try storageManager.saveScan(
                     meshData: meshData,
                     name: scanName,
-                    toProject: project
+                    toProject: project,
+                    format: exportFormat
                 )
 
                 DispatchQueue.main.async {

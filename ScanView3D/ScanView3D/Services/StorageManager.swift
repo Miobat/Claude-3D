@@ -1,4 +1,5 @@
 import Foundation
+import SceneKit
 
 /// Manages persistent storage for projects and scan files
 class StorageManager: ObservableObject {
@@ -63,13 +64,18 @@ class StorageManager: ObservableObject {
         }
     }
 
+    @discardableResult
     func createProject(name: String) -> Project {
-        var project = Project(name: name)
+        let project = Project(name: name)
         projects.append(project)
 
         // Create project directory
         let projectDir = projectsDirectory.appendingPathComponent(project.id.uuidString)
         try? fileManager.createDirectory(at: projectDir, withIntermediateDirectories: true)
+
+        // Create scan directory for this project
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try? fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
         saveProjects()
         return project
@@ -88,9 +94,8 @@ class StorageManager: ObservableObject {
         try? fileManager.removeItem(at: projectDir)
 
         // Delete associated scan files
-        for scan in project.scans {
-            deleteScanFile(scan)
-        }
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try? fileManager.removeItem(at: scanDir)
 
         projects.removeAll { $0.id == project.id }
         saveProjects()
@@ -106,18 +111,29 @@ class StorageManager: ObservableObject {
 
     // MARK: - Scan Management
 
-    func saveScan(meshData: MeshData, name: String, toProject project: Project) throws -> Scan {
+    func saveScan(meshData: MeshData, name: String, toProject project: Project, format: ExportFormat = .obj) throws -> Scan {
         let scanId = UUID()
-        let fileName = "\(scanId.uuidString).obj"
+        let fileExtension = format == .ply ? "ply" : "obj"
+        let fileName = "\(scanId.uuidString).\(fileExtension)"
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
-        // Export as OBJ
-        let fileURL = try OBJExporter.export(
-            meshData: meshData,
-            fileName: scanId.uuidString,
-            directory: scanDir
-        )
+        // Export based on format
+        let fileURL: URL
+        switch format {
+        case .obj:
+            fileURL = try OBJExporter.export(
+                meshData: meshData,
+                fileName: scanId.uuidString,
+                directory: scanDir
+            )
+        case .ply:
+            fileURL = try OBJExporter.exportPLY(
+                meshData: meshData,
+                fileName: scanId.uuidString,
+                directory: scanDir
+            )
+        }
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: fileURL.path)[.size] as? Int64) ?? 0
 
@@ -132,9 +148,18 @@ class StorageManager: ObservableObject {
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
 
+        // Generate thumbnail
+        scan.thumbnailData = generateThumbnail(for: meshData)
+
         // Add scan to project
         if let index = projects.firstIndex(where: { $0.id == project.id }) {
             projects[index].addScan(scan)
+
+            // Update project thumbnail with latest scan
+            if scan.thumbnailData != nil {
+                projects[index].thumbnailData = scan.thumbnailData
+            }
+
             saveProjects()
         }
 
@@ -157,19 +182,98 @@ class StorageManager: ObservableObject {
 
         if let index = projects.firstIndex(where: { $0.id == project.id }) {
             projects[index].scans.removeAll { $0.id == scan.id }
+            projects[index].modifiedAt = Date()
             saveProjects()
         }
     }
 
-    private func deleteScanFile(_ scan: Scan) {
-        // Try to find and delete the scan file from any project directory
-        if let enumerator = fileManager.enumerator(at: scansDirectory, includingPropertiesForKeys: nil) {
-            while let url = enumerator.nextObject() as? URL {
-                if url.lastPathComponent == scan.fileName {
-                    try? fileManager.removeItem(at: url)
-                    break
-                }
+    func renameScan(_ scan: Scan, in project: Project, newName: String) {
+        if let projIndex = projects.firstIndex(where: { $0.id == project.id }),
+           let scanIndex = projects[projIndex].scans.firstIndex(where: { $0.id == scan.id }) {
+            projects[projIndex].scans[scanIndex].name = newName
+            projects[projIndex].modifiedAt = Date()
+            saveProjects()
+        }
+    }
+
+    /// Move a scan from one project to another
+    func moveScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) {
+        let sourceURL = getScanFileURL(scan: scan, project: sourceProject)
+        let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
+        try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let destURL = destDir.appendingPathComponent(scan.fileName)
+
+        // Move the file
+        do {
+            try fileManager.moveItem(at: sourceURL, to: destURL)
+
+            // Move MTL too if exists
+            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
+            if fileManager.fileExists(atPath: mtlSource.path) {
+                let mtlDest = destURL.deletingPathExtension().appendingPathExtension("mtl")
+                try fileManager.moveItem(at: mtlSource, to: mtlDest)
             }
+        } catch {
+            // If move fails, try copy
+            try? fileManager.copyItem(at: sourceURL, to: destURL)
+            try? fileManager.removeItem(at: sourceURL)
+        }
+
+        // Update project metadata
+        if let srcIndex = projects.firstIndex(where: { $0.id == sourceProject.id }) {
+            projects[srcIndex].scans.removeAll { $0.id == scan.id }
+            projects[srcIndex].modifiedAt = Date()
+        }
+        if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
+            projects[dstIndex].addScan(scan)
+        }
+        saveProjects()
+    }
+
+    /// Duplicate a scan within the same or different project
+    func duplicateScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) -> Scan? {
+        let sourceURL = getScanFileURL(scan: scan, project: sourceProject)
+        guard fileManager.fileExists(atPath: sourceURL.path) else { return nil }
+
+        let newScanId = UUID()
+        let fileExtension = (scan.fileName as NSString).pathExtension
+        let newFileName = "\(newScanId.uuidString).\(fileExtension)"
+        let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
+        try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let destURL = destDir.appendingPathComponent(newFileName)
+
+        do {
+            try fileManager.copyItem(at: sourceURL, to: destURL)
+
+            // Copy MTL too
+            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
+            if fileManager.fileExists(atPath: mtlSource.path) {
+                let mtlDest = destURL.deletingPathExtension().appendingPathExtension("mtl")
+                try fileManager.copyItem(at: mtlSource, to: mtlDest)
+            }
+
+            var newScan = Scan(
+                name: "\(scan.name) (Copy)",
+                fileName: newFileName,
+                vertexCount: scan.vertexCount,
+                faceCount: scan.faceCount,
+                fileSize: scan.fileSize
+            )
+            newScan.hasTexture = scan.hasTexture
+            newScan.hasColor = scan.hasColor
+            newScan.boundingBoxMin = scan.boundingBoxMin
+            newScan.boundingBoxMax = scan.boundingBoxMax
+            newScan.thumbnailData = scan.thumbnailData
+
+            if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
+                projects[dstIndex].addScan(newScan)
+                saveProjects()
+            }
+
+            return newScan
+        } catch {
+            print("Error duplicating scan: \(error)")
+            return nil
         }
     }
 
@@ -177,7 +281,8 @@ class StorageManager: ObservableObject {
 
     func importOBJFile(from sourceURL: URL, name: String, toProject project: Project) throws -> Scan {
         let scanId = UUID()
-        let fileName = "\(scanId.uuidString).obj"
+        let fileExtension = sourceURL.pathExtension.lowercased()
+        let fileName = "\(scanId.uuidString).\(fileExtension)"
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
@@ -224,13 +329,108 @@ class StorageManager: ObservableObject {
         let exportDir = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory)
         try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
-        let exportName = "\(scan.name.replacingOccurrences(of: " ", with: "_")).obj"
+        let sanitizedName = scan.name
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "/", with: "-")
+        let fileExtension = (scan.fileName as NSString).pathExtension
+        let exportName = "\(sanitizedName).\(fileExtension)"
         let exportURL = exportDir.appendingPathComponent(exportName)
 
         // Remove existing export if any
         try? fileManager.removeItem(at: exportURL)
         try? fileManager.copyItem(at: sourceURL, to: exportURL)
 
+        // Also copy MTL if OBJ
+        if fileExtension == "obj" {
+            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
+            if fileManager.fileExists(atPath: mtlSource.path) {
+                let mtlExport = exportDir.appendingPathComponent("\(sanitizedName).mtl")
+                try? fileManager.removeItem(at: mtlExport)
+                try? fileManager.copyItem(at: mtlSource, to: mtlExport)
+            }
+        }
+
         return exportURL
+    }
+
+    /// Export all scans from a project into a folder
+    func exportProject(_ project: Project) -> URL? {
+        let exportDir = documentsDirectory
+            .appendingPathComponent(AppConstants.exportDirectory)
+            .appendingPathComponent(project.name.replacingOccurrences(of: " ", with: "_"))
+        try? fileManager.removeItem(at: exportDir)
+        try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
+
+        for scan in project.scans {
+            let sourceURL = getScanFileURL(scan: scan, project: project)
+            guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
+
+            let sanitizedName = scan.name
+                .replacingOccurrences(of: " ", with: "_")
+                .replacingOccurrences(of: "/", with: "-")
+            let ext = (scan.fileName as NSString).pathExtension
+            let destURL = exportDir.appendingPathComponent("\(sanitizedName).\(ext)")
+            try? fileManager.copyItem(at: sourceURL, to: destURL)
+
+            // Copy MTL if exists
+            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
+            if fileManager.fileExists(atPath: mtlSource.path) {
+                let mtlDest = exportDir.appendingPathComponent("\(sanitizedName).mtl")
+                try? fileManager.copyItem(at: mtlSource, to: mtlDest)
+            }
+        }
+
+        return exportDir
+    }
+
+    // MARK: - Thumbnail Generation
+
+    private func generateThumbnail(for meshData: MeshData) -> Data? {
+        let node = MeshProcessor.createSceneKitNode(from: meshData)
+
+        let scene = SCNScene()
+        scene.rootNode.addChildNode(node)
+
+        // Add lighting
+        let ambientLight = SCNNode()
+        ambientLight.light = SCNLight()
+        ambientLight.light!.type = .ambient
+        ambientLight.light!.intensity = 500
+        scene.rootNode.addChildNode(ambientLight)
+
+        let dirLight = SCNNode()
+        dirLight.light = SCNLight()
+        dirLight.light!.type = .directional
+        dirLight.light!.intensity = 800
+        dirLight.position = SCNVector3(5, 10, 5)
+        dirLight.look(at: SCNVector3(0, 0, 0))
+        scene.rootNode.addChildNode(dirLight)
+
+        // Camera
+        let cameraNode = SCNNode()
+        cameraNode.camera = SCNCamera()
+        let (minBound, maxBound) = node.boundingBox
+        let center = MeshProcessor.calculateCenter(min: minBound, max: maxBound)
+        let distance = MeshProcessor.calculateViewDistance(min: minBound, max: maxBound)
+        cameraNode.position = SCNVector3(center.x + distance * 0.3, center.y + distance * 0.4, center.z + distance * 0.8)
+        cameraNode.look(at: center)
+        scene.rootNode.addChildNode(cameraNode)
+        scene.background?.contents = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
+
+        // Render thumbnail
+        let renderer = SCNRenderer(device: nil, options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = cameraNode
+
+        let size = CGSize(width: 120, height: 120)
+        let image = renderer.snapshot(atTime: 0, with: size, antialiasingMode: .multisampling4X)
+        return image.jpegData(compressionQuality: 0.7)
+    }
+
+    // MARK: - Helpers
+
+    enum ExportFormat {
+        case obj
+        case ply
     }
 }

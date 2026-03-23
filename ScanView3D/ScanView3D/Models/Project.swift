@@ -28,6 +28,17 @@ struct Project: Identifiable, Codable {
         scans.reduce(0) { $0 + $1.faceCount }
     }
 
+    var totalFileSize: Int64 {
+        scans.reduce(0) { $0 + $1.fileSize }
+    }
+
+    var formattedTotalSize: String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: totalFileSize)
+    }
+
     mutating func addScan(_ scan: Scan) {
         scans.append(scan)
         modifiedAt = Date()
@@ -52,6 +63,8 @@ struct Scan: Identifiable, Codable {
     var hasColor: Bool
     var boundingBoxMin: SIMD3<Float>?
     var boundingBoxMax: SIMD3<Float>?
+    var thumbnailData: Data?
+    var notes: String?
 
     init(name: String, fileName: String, vertexCount: Int = 0, faceCount: Int = 0, fileSize: Int64 = 0) {
         self.id = UUID()
@@ -76,6 +89,19 @@ struct Scan: Identifiable, Codable {
         guard let min = boundingBoxMin, let max = boundingBoxMax else { return nil }
         let size = max - min
         return String(format: "%.2f × %.2f × %.2f m", size.x, size.y, size.z)
+    }
+
+    var shortDimensions: String? {
+        guard let min = boundingBoxMin, let max = boundingBoxMax else { return nil }
+        let size = max - min
+        return String(format: "%.1f×%.1f×%.1fm", size.x, size.y, size.z)
+    }
+
+    /// Generate a descriptive auto-name based on date/time
+    static func autoName(prefix: String = "Scan") -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm"
+        return "\(prefix) \(formatter.string(from: Date()))"
     }
 }
 

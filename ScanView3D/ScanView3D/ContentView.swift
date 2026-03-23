@@ -21,12 +21,19 @@ struct ContentView: View {
                 }
                 .tag(1)
 
+            // All Scans / Viewer Tab
+            AllScansView()
+                .tabItem {
+                    Label("All Scans", systemImage: "cube.fill")
+                }
+                .tag(2)
+
             // Settings Tab
             SettingsView()
                 .tabItem {
                     Label("Settings", systemImage: "gearshape.fill")
                 }
-                .tag(2)
+                .tag(3)
         }
         .environmentObject(storageManager)
         .tint(.blue)

@@ -8,6 +8,7 @@ struct ProjectListView: View {
     @State private var showingImporter = false
     @State private var editingProject: Project?
     @State private var renameName = ""
+    @State private var importTargetProject: Project?
 
     var body: some View {
         NavigationView {
@@ -29,9 +30,10 @@ struct ProjectListView: View {
                         }
 
                         Button {
+                            importTargetProject = nil
                             showingImporter = true
                         } label: {
-                            Label("Import OBJ File", systemImage: "square.and.arrow.down")
+                            Label("Import File", systemImage: "square.and.arrow.down")
                         }
                     } label: {
                         Image(systemName: "plus")
@@ -67,8 +69,8 @@ struct ProjectListView: View {
             }
             .fileImporter(
                 isPresented: $showingImporter,
-                allowedContentTypes: [.init(filenameExtension: "obj")!],
-                allowsMultipleSelection: false
+                allowedContentTypes: [.init(filenameExtension: "obj")!, .init(filenameExtension: "ply")!],
+                allowsMultipleSelection: true
             ) { result in
                 handleImport(result)
             }
@@ -87,7 +89,7 @@ struct ProjectListView: View {
                 .font(.title2)
                 .fontWeight(.bold)
 
-            Text("Create a project to organize your 3D scans,\nor import existing OBJ files.")
+            Text("Create a project to organize your 3D scans,\nor import existing OBJ/PLY files.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -104,7 +106,7 @@ struct ProjectListView: View {
                 Button {
                     showingImporter = true
                 } label: {
-                    Label("Import OBJ File", systemImage: "square.and.arrow.down")
+                    Label("Import File", systemImage: "square.and.arrow.down")
                         .frame(maxWidth: 250)
                 }
                 .buttonStyle(.bordered)
@@ -118,7 +120,7 @@ struct ProjectListView: View {
 
     private var projectList: some View {
         List {
-            ForEach(storageManager.projects) { project in
+            ForEach(storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })) { project in
                 NavigationLink(destination: ProjectDetailView(project: project)) {
                     ProjectRow(project: project)
                 }
@@ -130,6 +132,23 @@ struct ProjectListView: View {
                         Label("Rename", systemImage: "pencil")
                     }
 
+                    Button {
+                        importTargetProject = project
+                        showingImporter = true
+                    } label: {
+                        Label("Import File Here", systemImage: "square.and.arrow.down")
+                    }
+
+                    if !project.scans.isEmpty {
+                        Button {
+                            exportProject(project)
+                        } label: {
+                            Label("Export All Scans", systemImage: "square.and.arrow.up")
+                        }
+                    }
+
+                    Divider()
+
                     Button(role: .destructive) {
                         storageManager.deleteProject(project)
                     } label: {
@@ -138,8 +157,9 @@ struct ProjectListView: View {
                 }
             }
             .onDelete { indexSet in
+                let sorted = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })
                 for index in indexSet {
-                    storageManager.deleteProject(storageManager.projects[index])
+                    storageManager.deleteProject(sorted[index])
                 }
             }
         }
@@ -150,25 +170,38 @@ struct ProjectListView: View {
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            guard let url = urls.first else { return }
-
-            // Create a default project if none exist
+            // Use target project, first project, or create new one
             let project: Project
-            if let first = storageManager.projects.first {
+            if let target = importTargetProject {
+                project = target
+            } else if let first = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt }).first {
                 project = first
             } else {
                 project = storageManager.createProject(name: "Imported Scans")
             }
 
-            let name = url.deletingPathExtension().lastPathComponent
-            do {
-                let _ = try storageManager.importOBJFile(from: url, name: name, toProject: project)
-            } catch {
-                print("Import error: \(error)")
+            for url in urls {
+                let name = url.deletingPathExtension().lastPathComponent
+                do {
+                    let _ = try storageManager.importOBJFile(from: url, name: name, toProject: project)
+                } catch {
+                    print("Import error: \(error)")
+                }
             }
+            importTargetProject = nil
 
         case .failure(let error):
             print("File picker error: \(error)")
+        }
+    }
+
+    private func exportProject(_ project: Project) {
+        if let url = storageManager.exportProject(project) {
+            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                rootVC.present(activityVC, animated: true)
+            }
         }
     }
 }
@@ -182,7 +215,7 @@ struct ProjectRow: View {
         HStack(spacing: 12) {
             // Thumbnail or icon
             ZStack {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 10)
                     .fill(Color.accentColor.opacity(0.15))
                     .frame(width: AppConstants.Layout.thumbnailSize, height: AppConstants.Layout.thumbnailSize)
 
@@ -192,7 +225,7 @@ struct ProjectRow: View {
                         .resizable()
                         .scaledToFill()
                         .frame(width: AppConstants.Layout.thumbnailSize, height: AppConstants.Layout.thumbnailSize)
-                        .cornerRadius(8)
+                        .cornerRadius(10)
                 } else {
                     Image(systemName: "cube.fill")
                         .font(.system(size: 24))
@@ -210,8 +243,8 @@ struct ProjectRow: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
 
-                    if project.totalVertices > 0 {
-                        Label("\(project.totalVertices.formatted()) verts", systemImage: "circle.fill")
+                    if project.totalFileSize > 0 {
+                        Text(project.formattedTotalSize)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -223,6 +256,17 @@ struct ProjectRow: View {
             }
 
             Spacer()
+
+            // Scan count badge
+            if project.scanCount > 0 {
+                Text("\(project.scanCount)")
+                    .font(.caption)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+                    .frame(width: 26, height: 26)
+                    .background(Color.accentColor)
+                    .clipShape(Circle())
+            }
         }
         .padding(.vertical, 4)
     }
