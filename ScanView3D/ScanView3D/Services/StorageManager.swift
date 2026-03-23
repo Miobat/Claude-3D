@@ -50,7 +50,7 @@ class StorageManager: ObservableObject {
             let data = try Data(contentsOf: projectsFile)
             projects = try JSONDecoder().decode([Project].self, from: data)
         } catch {
-            print("Error loading projects: \(error)")
+            DebugLogger.shared.error("Error loading projects: \(error)", category: "Storage")
             projects = []
         }
     }
@@ -60,7 +60,7 @@ class StorageManager: ObservableObject {
             let data = try JSONEncoder().encode(projects)
             try data.write(to: projectsFile, options: .atomicWrite)
         } catch {
-            print("Error saving projects: \(error)")
+            DebugLogger.shared.error("Error saving projects: \(error)", category: "Storage")
         }
     }
 
@@ -272,7 +272,7 @@ class StorageManager: ObservableObject {
 
             return newScan
         } catch {
-            print("Error duplicating scan: \(error)")
+            DebugLogger.shared.error("Error duplicating scan: \(error)", category: "Storage")
             return nil
         }
     }

@@ -185,13 +185,13 @@ struct ProjectListView: View {
                 do {
                     let _ = try storageManager.importOBJFile(from: url, name: name, toProject: project)
                 } catch {
-                    print("Import error: \(error)")
+                    DebugLogger.shared.error("Import error: \(error)", category: "Import")
                 }
             }
             importTargetProject = nil
 
         case .failure(let error):
-            print("File picker error: \(error)")
+            DebugLogger.shared.error("File picker error: \(error)", category: "Import")
         }
     }
 

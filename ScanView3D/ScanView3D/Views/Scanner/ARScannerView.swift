@@ -139,7 +139,7 @@ class ARScannerViewController: UIViewController {
             let entity = ModelEntity(mesh: meshResource, materials: [material])
             return entity
         } catch {
-            print("Error creating mesh entity: \(error)")
+            DebugLogger.shared.error("Error creating mesh entity: \(error)", category: "Scanner")
             return nil
         }
     }

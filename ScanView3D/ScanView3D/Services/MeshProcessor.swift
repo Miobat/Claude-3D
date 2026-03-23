@@ -96,7 +96,7 @@ class MeshProcessor {
 
             return containerNode
         } catch {
-            print("Error loading OBJ: \(error)")
+            DebugLogger.shared.error("Error loading OBJ: \(error)", category: "Mesh")
             return nil
         }
     }

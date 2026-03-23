@@ -52,6 +52,23 @@ struct SettingsView: View {
                     }
                 }
 
+                // Debug
+                Section("Developer") {
+                    NavigationLink {
+                        DebugLogView()
+                    } label: {
+                        HStack {
+                            Image(systemName: "ladybug.fill")
+                                .foregroundColor(.orange)
+                            Text("Debug Log")
+                            Spacer()
+                            Text("\(DebugLogger.shared.entries.count)")
+                                .foregroundColor(.secondary)
+                                .font(.subheadline)
+                        }
+                    }
+                }
+
                 // About
                 Section("About") {
                     LabeledContent("App", value: AppConstants.appName)

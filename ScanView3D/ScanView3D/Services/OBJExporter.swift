@@ -124,7 +124,7 @@ class OBJExporter {
                 try mtlContent.write(to: mtlURL, atomically: true, encoding: .utf8)
             } catch {
                 // MTL failure is non-critical
-                print("Warning: Could not write MTL file: \(error)")
+                DebugLogger.shared.warn("Could not write MTL file: \(error)", category: "Export")
             }
         }
 
