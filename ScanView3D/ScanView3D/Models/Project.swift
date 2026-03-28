@@ -1,7 +1,14 @@
 import Foundation
 
 /// Represents a scanning project containing multiple scans
-struct Project: Identifiable, Codable {
+struct Project: Identifiable, Codable, Hashable {
+    static func == (lhs: Project, rhs: Project) -> Bool {
+        lhs.id == rhs.id
+    }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
     let id: UUID
     var name: String
     var createdAt: Date

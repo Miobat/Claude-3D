@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import SceneKit
 #if !targetEnvironment(simulator)
 import ARKit
@@ -6,7 +7,7 @@ import ARKit
 
 // MARK: - SIMD3 Codable
 
-extension SIMD3: @retroactive Codable where Scalar == Float {
+extension SIMD3: Codable where Scalar == Float {
     enum CodingKeys: String, CodingKey {
         case x, y, z
     }
@@ -122,7 +123,7 @@ extension ARMeshGeometry {
 
         let bytesPerIndex = faces.bytesPerIndex
         for i in 0..<indexCountPerPrimitive {
-            let offset = faces.offset + (baseIndex + i) * bytesPerIndex
+            let offset = (baseIndex + i) * bytesPerIndex
             let pointer = faces.buffer.contents().advanced(by: offset)
 
             if bytesPerIndex == 4 {

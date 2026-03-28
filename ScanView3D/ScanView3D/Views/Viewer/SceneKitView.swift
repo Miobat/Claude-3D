@@ -58,7 +58,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         if showGrid && gridNode == nil {
             addGrid(to: sceneView.scene!)
         } else if !showGrid {
-            gridNode?.removeFromParent()
+            gridNode?.removeFromParentNode()
         }
 
         // Update wireframe

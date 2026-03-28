@@ -26,6 +26,8 @@
 		A10017 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B10017; };
 		A10018 /* MockLiDARScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10019; };
 		A10020 /* AllScansView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10020; };
+		A10021 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10021; };
+		A10022 /* DebugLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10022; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +51,8 @@
 		B10018 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10019 /* MockLiDARScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MockLiDARScanner.swift; sourceTree = "<group>"; };
 		B10020 /* AllScansView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllScansView.swift; sourceTree = "<group>"; };
+		B10021 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
+		B10022 /* DebugLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogView.swift; sourceTree = "<group>"; };
 		D10001 /* ScanView3D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScanView3D.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -150,6 +154,7 @@
 			children = (
 				B10004 /* Constants.swift */,
 				B10005 /* Extensions.swift */,
+				B10021 /* DebugLogger.swift */,
 			);
 			path = Utilities;
 			sourceTree = "<group>";
@@ -166,6 +171,7 @@
 			isa = PBXGroup;
 			children = (
 				B10016 /* SettingsView.swift */,
+				B10022 /* DebugLogView.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -257,6 +263,8 @@
 				A10016 /* SettingsView.swift in Sources */,
 				A10018 /* MockLiDARScanner.swift in Sources */,
 				A10020 /* AllScansView.swift in Sources */,
+			A10021 /* DebugLogger.swift in Sources */,
+			A10022 /* DebugLogView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
