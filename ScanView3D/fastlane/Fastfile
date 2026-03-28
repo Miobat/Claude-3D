@@ -71,7 +71,7 @@ platform :ios do
       project: "ScanView3D.xcodeproj",
       scheme: "ScanView3D",
       export_method: "app-store",
-      destination: "generic/platform=iOS",
+      sdk: "iphoneos",
       export_options: {
         provisioningProfiles: {
           "com.michael.scanview3d" => ENV["PROVISIONING_PROFILE_NAME"]
