@@ -26,77 +26,84 @@ struct DebugLogView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Filter bar
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(levels, id: \.self) { level in
-                        Button {
-                            filterLevel = level
-                        } label: {
-                            Text(level)
-                                .font(.caption.bold())
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(filterLevel == level ? colorForLevel(level) : Color.gray.opacity(0.2))
-                                .foregroundColor(filterLevel == level ? .white : .primary)
-                                .cornerRadius(8)
-                        }
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-            }
-
+            filterBar
             Divider()
-
-            if filteredEntries.isEmpty {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.largeTitle)
-                        .foregroundColor(.secondary)
-                    Text("No log entries")
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-            } else {
-                List(filteredEntries) { entry in
-                    LogEntryRow(entry: entry)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
-                }
-                .listStyle(.plain)
-            }
+            logContent
         }
         .searchable(text: $searchText, prompt: "Search logs...")
         .navigationTitle("Debug Log")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    Button {
-                        showingShareSheet = true
-                    } label: {
-                        Label("Export Logs", systemImage: "square.and.arrow.up")
-                    }
-
-                    Button(role: .destructive) {
-                        showingClearConfirm = true
-                    } label: {
-                        Label("Clear Logs", systemImage: "trash")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
+                toolbarMenu
             }
         }
         .alert("Clear All Logs?", isPresented: $showingClearConfirm) {
-            Button("Clear", role: .destructive) {
-                logger.clear()
-            }
+            Button("Clear", role: .destructive) { logger.clear() }
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: $showingShareSheet) {
-            ShareSheet(text: logger.exportText())
+            DebugShareSheet(text: logger.exportText())
+        }
+    }
+
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(levels, id: \.self) { level in
+                    Button {
+                        filterLevel = level
+                    } label: {
+                        Text(level)
+                            .font(.caption.bold())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(filterLevel == level ? colorForLevel(level) : Color.gray.opacity(0.2))
+                            .foregroundColor(filterLevel == level ? .white : .primary)
+                            .cornerRadius(8)
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var logContent: some View {
+        if filteredEntries.isEmpty {
+            Spacer()
+            VStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.largeTitle)
+                    .foregroundColor(.secondary)
+                Text("No log entries")
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        } else {
+            List(filteredEntries) { entry in
+                LogEntryRow(entry: entry)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    private var toolbarMenu: some View {
+        Menu {
+            Button {
+                showingShareSheet = true
+            } label: {
+                Label("Export Logs", systemImage: "square.and.arrow.up")
+            }
+            Button(role: .destructive) {
+                showingClearConfirm = true
+            } label: {
+                Label("Clear Logs", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
         }
     }
 
@@ -159,7 +166,7 @@ private struct LogEntryRow: View {
 
 // MARK: - Share Sheet
 
-private struct ShareSheet: UIViewControllerRepresentable {
+private struct DebugShareSheet: UIViewControllerRepresentable {
     let text: String
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
