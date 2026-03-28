@@ -1,0 +1,98 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Build and upload to TestFlight"
+  lane :beta do
+    setup_ci
+
+    # Install the App Store Connect API key
+    api_key = app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_content: ENV["APP_STORE_CONNECT_KEY_CONTENT"],
+      is_key_content_base64: true,
+      in_house: false
+    )
+
+    # Sync certificates and provisioning profiles
+    match(
+      type: "appstore",
+      app_identifier: "com.michael.scanview3d",
+      git_url: ENV["MATCH_GIT_URL"],
+      git_basic_authorization: ENV["MATCH_GIT_BASIC_AUTH"],
+      api_key: api_key,
+      readonly: true
+    )
+
+    # Increment build number using timestamp for uniqueness
+    increment_build_number(
+      build_number: Time.now.strftime("%Y%m%d%H%M"),
+      xcodeproj: "ScanView3D.xcodeproj"
+    )
+
+    # Build the app
+    build_app(
+      project: "ScanView3D.xcodeproj",
+      scheme: "ScanView3D",
+      export_method: "app-store",
+      destination: "generic/platform=iOS",
+      xcargs: "-allowProvisioningUpdates"
+    )
+
+    # Upload to TestFlight
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true
+    )
+  end
+
+  desc "Build and upload using manual signing (no match)"
+  lane :beta_manual do
+    setup_ci
+
+    # Install the App Store Connect API key
+    api_key = app_store_connect_api_key(
+      key_id: ENV["APP_STORE_CONNECT_KEY_ID"],
+      issuer_id: ENV["APP_STORE_CONNECT_ISSUER_ID"],
+      key_content: ENV["APP_STORE_CONNECT_KEY_CONTENT"],
+      is_key_content_base64: true,
+      in_house: false
+    )
+
+    # Import certificate from environment
+    import_certificate(
+      certificate_path: ENV["CERTIFICATE_PATH"],
+      certificate_password: ENV["CERTIFICATE_PASSWORD"],
+      keychain_name: ENV["KEYCHAIN_NAME"] || "fastlane_tmp_keychain",
+      keychain_password: ENV["KEYCHAIN_PASSWORD"] || ""
+    )
+
+    # Install provisioning profile
+    install_provisioning_profile(path: ENV["PROVISIONING_PROFILE_PATH"])
+
+    # Increment build number
+    increment_build_number(
+      build_number: Time.now.strftime("%Y%m%d%H%M"),
+      xcodeproj: "ScanView3D.xcodeproj"
+    )
+
+    # Build the app
+    build_app(
+      project: "ScanView3D.xcodeproj",
+      scheme: "ScanView3D",
+      export_method: "app-store",
+      destination: "generic/platform=iOS",
+      export_options: {
+        provisioningProfiles: {
+          "com.michael.scanview3d" => ENV["PROVISIONING_PROFILE_NAME"]
+        }
+      }
+    )
+
+    # Upload to TestFlight
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end
