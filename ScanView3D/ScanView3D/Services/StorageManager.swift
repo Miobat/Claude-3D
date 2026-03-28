@@ -415,7 +415,7 @@ class StorageManager: ObservableObject {
         cameraNode.position = SCNVector3(center.x + distance * 0.3, center.y + distance * 0.4, center.z + distance * 0.8)
         cameraNode.look(at: center)
         scene.rootNode.addChildNode(cameraNode)
-        scene.background?.contents = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
+        scene.background.contents = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
 
         // Render thumbnail
         let renderer = SCNRenderer(device: nil, options: nil)
