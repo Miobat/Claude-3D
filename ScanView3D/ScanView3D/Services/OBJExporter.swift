@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// Exports mesh data to Wavefront OBJ and PLY formats with texture support
+/// Exports mesh data to Wavefront OBJ and PLY formats
 class OBJExporter {
 
     enum ExportError: Error, LocalizedError {
@@ -21,8 +21,7 @@ class OBJExporter {
         }
     }
 
-    /// Export MeshData to OBJ file format with optional texture atlas
-    /// Returns the URL of the saved OBJ file
+    /// Export MeshData to OBJ file format with vertex colors
     static func export(
         meshData: MeshData,
         fileName: String,
@@ -36,26 +35,33 @@ class OBJExporter {
         }
 
         let exportDir = directory ?? getDefaultExportDirectory()
-
-        // Ensure directory exists
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
         let sanitizedName = sanitizeFileName(fileName)
         let objURL = exportDir.appendingPathComponent("\(sanitizedName).obj")
         let mtlURL = exportDir.appendingPathComponent("\(sanitizedName).mtl")
 
-        let hasTexture = textureAtlas != nil
-        let hasUVs = hasTexture && textureAtlas!.uvCoordinates.count == meshData.vertices.count
-
-        // Save texture image if available
+        // Validate texture atlas - check if UVs are actually usable
+        var validTextureAtlas: TextureAtlasResult?
         var textureFileName: String?
+
         if let atlas = textureAtlas {
-            textureFileName = "\(sanitizedName)_texture.jpg"
-            let textureURL = exportDir.appendingPathComponent(textureFileName!)
-            if let jpegData = atlas.atlasImage.jpegData(compressionQuality: 0.85) {
-                try jpegData.write(to: textureURL)
+            // Count how many vertices have valid (non-zero) UVs
+            let validUVCount = atlas.uvCoordinates.filter { $0.x > 0.001 || $0.y > 0.001 }.count
+            let validRatio = Float(validUVCount) / Float(max(atlas.uvCoordinates.count, 1))
+
+            // Only use texture if at least 40% of vertices have valid UVs
+            if validRatio > 0.4 && atlas.uvCoordinates.count == meshData.vertices.count {
+                validTextureAtlas = atlas
+                textureFileName = "\(sanitizedName)_texture.jpg"
+                let textureURL = exportDir.appendingPathComponent(textureFileName!)
+                if let jpegData = atlas.atlasImage.jpegData(compressionQuality: 0.85) {
+                    try? jpegData.write(to: textureURL)
+                }
             }
         }
+
+        let hasValidTexture = validTextureAtlas != nil
 
         // Build OBJ content
         var objContent = ""
@@ -63,18 +69,14 @@ class OBJExporter {
         objContent += "# Exported: \(Date().formattedString)\n"
         objContent += "# Vertices: \(meshData.vertexCount)\n"
         objContent += "# Faces: \(meshData.faceCount)\n"
-        if hasTexture {
-            objContent += "# Texture: \(textureFileName ?? "none")\n"
-        }
         objContent += "\n"
-
         objContent += "mtllib \(sanitizedName).mtl\n"
         objContent += "o \(sanitizedName)\n\n"
 
-        // Write vertices with optional vertex colors
+        // Write vertices with vertex colors (always include for fallback)
         for i in 0..<meshData.vertices.count {
             let v = meshData.vertices[i]
-            if includeColors && i < meshData.colors.count && !hasTexture {
+            if includeColors && i < meshData.colors.count {
                 let c = meshData.colors[i]
                 objContent += String(format: "v %.6f %.6f %.6f %.4f %.4f %.4f\n",
                                     v.x, v.y, v.z, c.x, c.y, c.z)
@@ -84,10 +86,9 @@ class OBJExporter {
         }
         objContent += "\n"
 
-        // Write texture coordinates if we have UV mapping
-        if hasUVs, let atlas = textureAtlas {
+        // Write texture coordinates only if we have valid texture
+        if hasValidTexture, let atlas = validTextureAtlas {
             for uv in atlas.uvCoordinates {
-                // OBJ UV: origin at bottom-left, flip V
                 objContent += String(format: "vt %.6f %.6f\n", uv.x, 1.0 - uv.y)
             }
             objContent += "\n"
@@ -101,54 +102,57 @@ class OBJExporter {
             objContent += "\n"
         }
 
-        // Write faces (1-indexed in OBJ format)
+        // Write faces
         objContent += "usemtl scan_material\n"
 
         let hasNormals = includeNormals && !meshData.normals.isEmpty
         for face in meshData.faces {
-            if face.count == 3 {
-                if hasUVs && hasNormals {
-                    // f v/vt/vn format
+            guard face.count == 3 else { continue }
+
+            if hasValidTexture, let atlas = validTextureAtlas {
+                // Check if ALL vertices of this face have valid UVs
+                let allValid = face.allSatisfy { idx in
+                    let uv = atlas.uvCoordinates[Int(idx)]
+                    return uv.x > 0.001 || uv.y > 0.001
+                }
+
+                if allValid && hasNormals {
                     objContent += String(format: "f %d/%d/%d %d/%d/%d %d/%d/%d\n",
-                                        face[0] + 1, face[0] + 1, face[0] + 1,
-                                        face[1] + 1, face[1] + 1, face[1] + 1,
-                                        face[2] + 1, face[2] + 1, face[2] + 1)
-                } else if hasUVs {
-                    // f v/vt format
-                    objContent += String(format: "f %d/%d %d/%d %d/%d\n",
-                                        face[0] + 1, face[0] + 1,
-                                        face[1] + 1, face[1] + 1,
-                                        face[2] + 1, face[2] + 1)
+                                        face[0]+1, face[0]+1, face[0]+1,
+                                        face[1]+1, face[1]+1, face[1]+1,
+                                        face[2]+1, face[2]+1, face[2]+1)
                 } else if hasNormals {
-                    // f v//vn format
+                    // No valid texture - use vertex/normal only
                     objContent += String(format: "f %d//%d %d//%d %d//%d\n",
-                                        face[0] + 1, face[0] + 1,
-                                        face[1] + 1, face[1] + 1,
-                                        face[2] + 1, face[2] + 1)
+                                        face[0]+1, face[0]+1,
+                                        face[1]+1, face[1]+1,
+                                        face[2]+1, face[2]+1)
                 } else {
                     objContent += String(format: "f %d %d %d\n",
-                                        face[0] + 1, face[1] + 1, face[2] + 1)
+                                        face[0]+1, face[1]+1, face[2]+1)
                 }
+            } else if hasNormals {
+                objContent += String(format: "f %d//%d %d//%d %d//%d\n",
+                                    face[0]+1, face[0]+1,
+                                    face[1]+1, face[1]+1,
+                                    face[2]+1, face[2]+1)
+            } else {
+                objContent += String(format: "f %d %d %d\n",
+                                    face[0]+1, face[1]+1, face[2]+1)
             }
         }
 
-        // Write OBJ file
-        do {
-            try objContent.write(to: objURL, atomically: true, encoding: .utf8)
-        } catch {
-            throw ExportError.fileWriteError(error.localizedDescription)
-        }
+        try objContent.write(to: objURL, atomically: true, encoding: .utf8)
 
         // Write MTL file
         var mtlContent = """
         # ScanView 3D - Material Library
-        # Exported: \(Date().formattedString)
 
         newmtl scan_material
         Ka 0.2 0.2 0.2
         Kd 0.8 0.8 0.8
-        Ks 0.1 0.1 0.1
-        Ns 10.0
+        Ks 0.05 0.05 0.05
+        Ns 5.0
         d 1.0
         illum 2
 
@@ -158,17 +162,12 @@ class OBJExporter {
             mtlContent += "map_Kd \(texName)\n"
         }
 
-        do {
-            try mtlContent.write(to: mtlURL, atomically: true, encoding: .utf8)
-        } catch {
-            // MTL failure is non-critical
-            DebugLogger.shared.warn("Could not write MTL file: \(error)", category: "Export")
-        }
+        try? mtlContent.write(to: mtlURL, atomically: true, encoding: .utf8)
 
         return objURL
     }
 
-    /// Export MeshData to PLY format with camera-sampled colors
+    /// Export MeshData to PLY format with vertex colors
     static func exportPLY(
         meshData: MeshData,
         fileName: String,
@@ -186,7 +185,6 @@ class OBJExporter {
 
         var content = ""
 
-        // PLY header
         content += "ply\n"
         content += "format ascii 1.0\n"
         content += "comment ScanView 3D Export\n"
@@ -209,7 +207,6 @@ class OBJExporter {
         content += "property list uchar uint vertex_indices\n"
         content += "end_header\n"
 
-        // Vertex data
         for i in 0..<meshData.vertexCount {
             let v = meshData.vertices[i]
             let n = i < meshData.normals.count ? meshData.normals[i] : SIMD3<Float>(0, 1, 0)
@@ -228,19 +225,13 @@ class OBJExporter {
             }
         }
 
-        // Face data
         for face in meshData.faces {
             if face.count == 3 {
                 content += "3 \(face[0]) \(face[1]) \(face[2])\n"
             }
         }
 
-        do {
-            try content.write(to: plyURL, atomically: true, encoding: .utf8)
-        } catch {
-            throw ExportError.fileWriteError(error.localizedDescription)
-        }
-
+        try content.write(to: plyURL, atomically: true, encoding: .utf8)
         return plyURL
     }
 
