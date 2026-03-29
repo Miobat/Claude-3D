@@ -13,6 +13,7 @@ class MockLiDARScanner: ObservableObject {
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var detectedPlaneCount: Int = 0
     @Published var isPreviewing = false
     @Published var memoryUsageMB: Double = 0
     @Published var estimatedFileSizeMB: Double = 0
@@ -116,6 +117,10 @@ class MockLiDARScanner: ObservableObject {
 
     func getCombinedMeshData() -> MeshData? {
         return meshData ?? Self.generateSampleRoomMesh(range: currentRange)
+    }
+
+    func getPlaneBasedMeshData() -> MeshData? {
+        return nil // No real planes in simulator
     }
 
     func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {

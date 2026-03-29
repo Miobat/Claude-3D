@@ -111,6 +111,10 @@ struct ScannerView: View {
                             Label("\(scanner.capturedFrameCount)", systemImage: "camera.fill")
                                 .font(.caption2)
                         }
+                        if scanner.detectedPlaneCount > 0 {
+                            Label("\(scanner.detectedPlaneCount)", systemImage: "square.stack.3d.up")
+                                .font(.caption2)
+                        }
                     }
                 }
             }
@@ -724,9 +728,26 @@ struct ScannerView: View {
     // MARK: - Actions
 
     private func saveScan() {
-        guard let project = selectedProject,
-              let rawMeshData = scanner.getCombinedMeshData() else {
-            errorMessage = "No scan data or project selected"
+        guard let project = selectedProject else {
+            errorMessage = "No project selected"
+            showingError = true
+            return
+        }
+
+        // For Area mode, try plane-based reconstruction first
+        let rawMeshData: MeshData?
+        #if !targetEnvironment(simulator)
+        if settings.meshMode == .area, let planeData = scanner.getPlaneBasedMeshData() {
+            rawMeshData = planeData
+        } else {
+            rawMeshData = scanner.getCombinedMeshData()
+        }
+        #else
+        rawMeshData = scanner.getCombinedMeshData()
+        #endif
+
+        guard let rawMesh = rawMeshData else {
+            errorMessage = "No scan data available"
             showingError = true
             return
         }
@@ -736,8 +757,7 @@ struct ScannerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Post-process the mesh to clean up quality
-                let meshData = MeshProcessor.postProcess(rawMeshData, level: processingLevel)
+                let meshData = MeshProcessor.postProcess(rawMesh, level: processingLevel)
 
                 DispatchQueue.main.async { self.savingProgress = "Building texture..." }
 
