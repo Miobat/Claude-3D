@@ -25,48 +25,50 @@ struct ScannerView: View {
     @State private var isSaving = false
     @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
-    @State private var activeControlPanel: ControlPanel? = nil
-
-    enum ControlPanel {
-        case range
-        case quality
-    }
 
     var body: some View {
         ZStack {
             #if targetEnvironment(simulator)
-            // Simulated scanning view
             SimulatorScanView(scanner: scanner)
                 .ignoresSafeArea()
             #else
-            // AR Camera View
+            // AR Camera View - always shown for preview
             ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay)
                 .ignoresSafeArea()
             #endif
 
             // Scanning overlay UI
             VStack(spacing: 0) {
-                // Top status bar
                 topStatusBar
 
                 Spacer()
 
-                // Control panels (range/quality sliders)
-                if !scanner.isScanning {
-                    prescanControls
-                } else {
+                // Memory/capacity gauge during scanning
+                if scanner.isScanning {
+                    scanCapacityGauge
                     scanningInfoBar
+                } else {
+                    prescanControls
                 }
 
-                // Bottom controls
                 bottomControls
             }
 
             #if !targetEnvironment(simulator)
-            // LiDAR unavailable overlay (only on real device)
             if !LiDARScanner.isLiDARAvailable {
                 lidarUnavailableView
             }
+            #endif
+        }
+        .onAppear {
+            // Start camera preview immediately so user sees the camera feed
+            #if !targetEnvironment(simulator)
+            scanner.startPreview()
+            #endif
+        }
+        .onDisappear {
+            #if !targetEnvironment(simulator)
+            scanner.stopPreview()
             #endif
         }
         .sheet(isPresented: $showingSaveDialog) {
@@ -92,7 +94,6 @@ struct ScannerView: View {
 
     private var topStatusBar: some View {
         HStack {
-            // Scan info
             VStack(alignment: .leading, spacing: 4) {
                 Text(scanner.scanProgress)
                     .font(.caption)
@@ -116,7 +117,6 @@ struct ScannerView: View {
             Spacer()
 
             #if targetEnvironment(simulator)
-            // Simulator badge
             Text("SIMULATOR")
                 .font(.caption2)
                 .fontWeight(.bold)
@@ -127,7 +127,6 @@ struct ScannerView: View {
                 .foregroundColor(.white)
             #endif
 
-            // Mesh toggle
             if scanner.isScanning {
                 #if !targetEnvironment(simulator)
                 Button {
@@ -139,7 +138,6 @@ struct ScannerView: View {
                 }
                 #endif
 
-                // Settings button
                 Button {
                     showingSettings = true
                 } label: {
@@ -159,6 +157,50 @@ struct ScannerView: View {
             )
             .ignoresSafeArea()
         )
+    }
+
+    // MARK: - Scan Capacity Gauge
+
+    private var scanCapacityGauge: some View {
+        VStack(spacing: 4) {
+            // Progress bar
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.white.opacity(0.2))
+                        .frame(height: 6)
+
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(capacityColor)
+                        .frame(width: geo.size.width * min(scanner.scanCapacityPercent / 100.0, 1.0), height: 6)
+                }
+            }
+            .frame(height: 6)
+
+            HStack {
+                Text(String(format: "%.0f MB est.", scanner.estimatedFileSizeMB))
+                    .font(.system(size: 9))
+                    .foregroundColor(.gray)
+                Spacer()
+                if scanner.scanCapacityPercent > 80 {
+                    Text("Memory pressure high")
+                        .font(.system(size: 9))
+                        .foregroundColor(.orange)
+                } else {
+                    Text(String(format: "%.0f%% capacity", scanner.scanCapacityPercent))
+                        .font(.system(size: 9))
+                        .foregroundColor(.gray)
+                }
+            }
+        }
+        .padding(.horizontal, AppConstants.Layout.padding)
+        .padding(.bottom, 4)
+    }
+
+    private var capacityColor: Color {
+        if scanner.scanCapacityPercent > 80 { return .red }
+        if scanner.scanCapacityPercent > 60 { return .orange }
+        return .green
     }
 
     // MARK: - Pre-Scan Controls (Range & Quality)
@@ -289,7 +331,6 @@ struct ScannerView: View {
 
     private var scanningInfoBar: some View {
         HStack(spacing: 16) {
-            // Range badge
             HStack(spacing: 4) {
                 Image(systemName: settings.scanRange.icon)
                     .font(.caption2)
@@ -302,7 +343,6 @@ struct ScannerView: View {
             .padding(.vertical, 4)
             .background(Capsule().fill(Color.cyan.opacity(0.2)))
 
-            // Quality badge
             HStack(spacing: 4) {
                 Image(systemName: settings.scanQuality.icon)
                     .font(.caption2)
@@ -315,7 +355,6 @@ struct ScannerView: View {
             .padding(.vertical, 4)
             .background(Capsule().fill(Color.orange.opacity(0.2)))
 
-            // Texture badge
             if settings.captureTexture {
                 HStack(spacing: 4) {
                     Image(systemName: "camera.fill")
@@ -337,10 +376,8 @@ struct ScannerView: View {
 
     private var bottomControls: some View {
         VStack(spacing: 16) {
-            // Main action buttons
             HStack(spacing: 40) {
                 if scanner.isScanning {
-                    // Pause/Resume
                     Button {
                         if scanner.isPaused {
                             scanner.resumeScanning()
@@ -357,11 +394,9 @@ struct ScannerView: View {
                         .foregroundColor(.white)
                     }
 
-                    // Stop & Save
                     Button {
                         scanner.stopScanning()
                         scanName = Scan.autoName()
-                        // Auto-select most recent project or first project
                         if selectedProject == nil {
                             selectedProject = storageManager.projects
                                 .sorted(by: { $0.modifiedAt > $1.modifiedAt })
@@ -384,9 +419,12 @@ struct ScannerView: View {
                         .foregroundColor(.white)
                     }
 
-                    // Reset
                     Button {
                         scanner.resetScanning()
+                        // Restart preview after reset
+                        #if !targetEnvironment(simulator)
+                        scanner.startPreview()
+                        #endif
                     } label: {
                         VStack(spacing: 4) {
                             Image(systemName: "arrow.counterclockwise.circle.fill")
@@ -397,7 +435,6 @@ struct ScannerView: View {
                         .foregroundColor(.white)
                     }
                 } else {
-                    // Start scanning button
                     Button {
                         scanner.startScanning(
                             detail: settings.meshDetail,
@@ -523,6 +560,7 @@ struct ScannerView: View {
                         LabeledContent("Photo Frames", value: "\(scanner.capturedFrameCount)")
                         LabeledContent("Range", value: settings.scanRange.rawValue)
                         LabeledContent("Quality", value: settings.scanQuality.rawValue)
+                        LabeledContent("Est. File Size", value: String(format: "%.1f MB", scanner.estimatedFileSizeMB))
                     }
                 }
 
@@ -623,7 +661,6 @@ struct ScannerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Build texture atlas for OBJ format if we have camera data
                 var textureAtlas: TextureAtlasResult?
                 if exportFormat == .obj && settings.captureTexture {
                     textureAtlas = scanner.buildTextureAtlas(meshData: meshData)
@@ -657,24 +694,19 @@ struct ScannerView: View {
 
 #if targetEnvironment(simulator)
 
-/// Animated simulated scanning view for the iOS Simulator
 struct SimulatorScanView: View {
     @ObservedObject var scanner: MockLiDARScanner
     @State private var animationPhase: Double = 0
 
     var body: some View {
         ZStack {
-            // Dark background simulating camera feed
             Color(uiColor: UIColor(red: 0.08, green: 0.08, blue: 0.1, alpha: 1.0))
 
             if scanner.isScanning {
-                // Animated scanning visualization
                 scanningAnimation
             } else if scanner.vertexCount > 0 {
-                // Show completion state
                 completionView
             } else {
-                // Idle state
                 idleView
             }
         }
@@ -687,13 +719,11 @@ struct SimulatorScanView: View {
 
     private var scanningAnimation: some View {
         ZStack {
-            // Grid overlay
             GeometryReader { geo in
                 Canvas { context, size in
                     let gridSpacing: CGFloat = 30
                     let offset = CGFloat(animationPhase) * gridSpacing
 
-                    // Horizontal lines
                     for y in stride(from: -gridSpacing + offset.truncatingRemainder(dividingBy: gridSpacing), through: size.height, by: gridSpacing) {
                         var path = Path()
                         path.move(to: CGPoint(x: 0, y: y))
@@ -701,7 +731,6 @@ struct SimulatorScanView: View {
                         context.stroke(path, with: .color(.cyan.opacity(0.15)), lineWidth: 0.5)
                     }
 
-                    // Vertical lines
                     for x in stride(from: 0, through: size.width, by: gridSpacing) {
                         var path = Path()
                         path.move(to: CGPoint(x: x, y: 0))
@@ -709,7 +738,6 @@ struct SimulatorScanView: View {
                         context.stroke(path, with: .color(.cyan.opacity(0.15)), lineWidth: 0.5)
                     }
 
-                    // Scanning sweep line
                     let sweepY = CGFloat(animationPhase) * size.height
                     var sweepPath = Path()
                     sweepPath.move(to: CGPoint(x: 0, y: sweepY))
@@ -718,7 +746,6 @@ struct SimulatorScanView: View {
                 }
             }
 
-            // Center crosshair
             VStack(spacing: 8) {
                 Image(systemName: "viewfinder")
                     .font(.system(size: 80))

@@ -16,6 +16,10 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var isPreviewing = false
+    @Published var memoryUsageMB: Double = 0
+    @Published var estimatedFileSizeMB: Double = 0
+    @Published var scanCapacityPercent: Double = 0
 
     // MARK: - Properties
 
@@ -26,6 +30,13 @@ class LiDARScanner: NSObject, ObservableObject {
     private var scanQuality: ScanSettings.ScanQuality = .standard
     let textureMapper = TextureMapper()
     private var frameCaptureTimer: Timer?
+    private var memoryMonitorTimer: Timer?
+    private var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
+    private var textureCapturePaused = false
+
+    // Memory limits
+    private let maxMemoryUsageMB: Double = 400
+    private let criticalMemoryMB: Double = 150 // available memory threshold
 
     // MARK: - Initialization
 
@@ -43,6 +54,26 @@ class LiDARScanner: NSObject, ObservableObject {
 
     static var isLiDARWithClassificationAvailable: Bool {
         ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+    }
+
+    // MARK: - Camera Preview
+
+    func startPreview() {
+        guard !isPreviewing && !isScanning else { return }
+        guard LiDARScanner.isLiDARAvailable else { return }
+
+        let configuration = ARWorldTrackingConfiguration()
+        configuration.planeDetection = [.horizontal, .vertical]
+        // No mesh reconstruction in preview - just camera feed
+        arSession.run(configuration)
+        isPreviewing = true
+        scanProgress = "Point camera at area to scan"
+    }
+
+    func stopPreview() {
+        guard isPreviewing && !isScanning else { return }
+        arSession.pause()
+        isPreviewing = false
     }
 
     // MARK: - Session Control
@@ -63,11 +94,23 @@ class LiDARScanner: NSObject, ObservableObject {
         self.scanRange = range
         self.scanQuality = quality
         self.confidenceThreshold = quality.confidenceThreshold
+        self.textureCapturePaused = false
 
         // Configure texture mapper
         textureMapper.configure(quality: quality)
         textureMapper.reset()
         capturedFrameCount = 0
+        memoryUsageMB = 0
+        estimatedFileSizeMB = 0
+        scanCapacityPercent = 0
+
+        // Record scan origin from current camera position
+        if let frame = arSession.currentFrame {
+            let t = frame.camera.transform
+            scanOrigin = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        } else {
+            scanOrigin = SIMD3<Float>(0, 0, 0)
+        }
 
         let configuration = ARWorldTrackingConfiguration()
 
@@ -94,6 +137,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
         arSession.run(configuration, options: [.removeExistingAnchors, .resetTracking])
 
+        isPreviewing = false
         isScanning = true
         isPaused = false
         scanProgress = "Scanning... Move slowly around the area"
@@ -101,6 +145,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
         // Start periodic frame capture for texture mapping
         startFrameCapture()
+        startMemoryMonitor()
     }
 
     func pauseScanning() {
@@ -124,6 +169,7 @@ class LiDARScanner: NSObject, ObservableObject {
         isPaused = false
         scanProgress = "Scan complete"
         stopFrameCapture()
+        stopMemoryMonitor()
     }
 
     func resetScanning() {
@@ -132,6 +178,9 @@ class LiDARScanner: NSObject, ObservableObject {
         vertexCount = 0
         faceCount = 0
         capturedFrameCount = 0
+        memoryUsageMB = 0
+        estimatedFileSizeMB = 0
+        scanCapacityPercent = 0
         textureMapper.reset()
         scanProgress = "Ready to scan"
     }
@@ -140,8 +189,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
     private func startFrameCapture() {
         stopFrameCapture()
-        // Use a timer to periodically check for new frames
-        frameCaptureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        frameCaptureTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             self?.captureCurrentFrame()
         }
     }
@@ -152,7 +200,7 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     private func captureCurrentFrame() {
-        guard isScanning && !isPaused,
+        guard isScanning && !isPaused && !textureCapturePaused,
               captureTexture,
               let frame = arSession.currentFrame else { return }
         textureMapper.captureFrame(from: frame)
@@ -161,20 +209,80 @@ class LiDARScanner: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Memory Monitoring
+
+    private func startMemoryMonitor() {
+        stopMemoryMonitor()
+        memoryMonitorTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.updateMemoryStats()
+        }
+    }
+
+    private func stopMemoryMonitor() {
+        memoryMonitorTimer?.invalidate()
+        memoryMonitorTimer = nil
+    }
+
+    private func updateMemoryStats() {
+        let textureMemoryMB = textureMapper.estimatedMemoryUsageMB
+        let meshMemoryMB = Double(vertexCount * 48 + faceCount * 12) / (1024.0 * 1024.0) // rough estimate
+        let totalMB = textureMemoryMB + meshMemoryMB
+
+        // Estimate file size: vertices * ~80 bytes (pos + normal + color + uv) + faces * ~30 bytes
+        let estFileMB = Double(vertexCount * 80 + faceCount * 30) / (1024.0 * 1024.0)
+        // Add texture atlas size estimate
+        let textureSizeMB = textureMapper.estimatedAtlasSizeMB
+
+        // Available memory check
+        let availableMemory = Self.availableMemoryMB()
+
+        DispatchQueue.main.async {
+            self.memoryUsageMB = totalMB
+            self.estimatedFileSizeMB = estFileMB + textureSizeMB
+
+            // Capacity is based on memory pressure
+            let memoryPressure = totalMB / self.maxMemoryUsageMB
+            self.scanCapacityPercent = min(memoryPressure * 100, 100)
+
+            // Auto-pause texture capture if memory is getting tight
+            if availableMemory < self.criticalMemoryMB || totalMB > self.maxMemoryUsageMB {
+                if !self.textureCapturePaused {
+                    self.textureCapturePaused = true
+                    self.scanProgress = "Memory limit - texture capture paused"
+                    DebugLogger.shared.warn("Texture capture paused: available=\(Int(availableMemory))MB, used=\(Int(totalMB))MB", category: "Scanner")
+                }
+            }
+
+            // Critical: auto-stop if about to crash
+            if availableMemory < 80 {
+                self.scanProgress = "Low memory - stopping scan"
+                DebugLogger.shared.error("Critical memory: \(Int(availableMemory))MB available, force stopping", category: "Scanner")
+                self.stopScanning()
+            }
+        }
+    }
+
+    static func availableMemoryMB() -> Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        if result == KERN_SUCCESS {
+            let usedMB = Double(info.resident_size) / (1024.0 * 1024.0)
+            let totalMB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0)
+            return totalMB - usedMB
+        }
+        return 500 // fallback assumption
+    }
+
     // MARK: - Mesh Data Access
 
     /// Returns all mesh data combined from all anchors, filtered by scan range
     func getCombinedMeshData() -> MeshData? {
         guard !meshAnchors.isEmpty else { return nil }
-
-        // Get camera position for range filtering
-        let cameraPosition: SIMD3<Float>
-        if let frame = arSession.currentFrame {
-            let t = frame.camera.transform
-            cameraPosition = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-        } else {
-            cameraPosition = SIMD3<Float>(0, 0, 0)
-        }
 
         let maxDist = scanRange.maxDistance
 
@@ -188,10 +296,10 @@ class LiDARScanner: NSObject, ObservableObject {
             let geometry = anchor.geometry
             let transform = anchor.transform
 
-            // Check if anchor center is within range
+            // Check if anchor center is within range from scan origin
             let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-            let anchorDist = length(anchorPos - cameraPosition)
-            if anchorDist > maxDist + 2.0 { continue } // Skip anchors clearly out of range
+            let anchorDist = length(anchorPos - scanOrigin)
+            if anchorDist > maxDist + 2.0 { continue }
 
             var localVertices: [SIMD3<Float>] = []
             var localNormals: [SIMD3<Float>] = []
@@ -204,13 +312,12 @@ class LiDARScanner: NSObject, ObservableObject {
                 let worldVertex4 = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
                 let worldVertex = SIMD3<Float>(worldVertex4.x, worldVertex4.y, worldVertex4.z)
 
-                let dist = length(worldVertex - cameraPosition)
+                let dist = length(worldVertex - scanOrigin)
                 if dist <= maxDist {
                     localIndexMap[i] = UInt32(localVertices.count)
                     localVertices.append(worldVertex)
                     vertexInRange.append(true)
 
-                    // Transform normals
                     let localNormal = geometry.normal(at: UInt32(i))
                     let rotationMatrix = simd_float3x3(
                         SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
@@ -220,7 +327,6 @@ class LiDARScanner: NSObject, ObservableObject {
                     let worldNormal = rotationMatrix * localNormal
                     localNormals.append(worldNormal)
 
-                    // Get vertex color from classification if available
                     if let classification = anchor.geometry.classification {
                         let classIndex = classification.buffer.contents()
                             .advanced(by: classification.offset + classification.stride * Int(i))
@@ -234,7 +340,6 @@ class LiDARScanner: NSObject, ObservableObject {
                 }
             }
 
-            // Process faces - only include faces where all vertices are in range
             for f in 0..<geometry.faces.count {
                 let indices = geometry.vertexIndicesOf(face: f)
                 let allInRange = indices.allSatisfy { idx in
@@ -253,16 +358,14 @@ class LiDARScanner: NSObject, ObservableObject {
 
         guard !allVertices.isEmpty else { return nil }
 
-        // If we have camera texture data, replace classification colors with camera colors
+        // Replace classification colors with camera colors if available
         if captureTexture && textureMapper.frameCount > 0 {
             let cameraColors = textureMapper.sampleVertexColors(vertices: allVertices, normals: allNormals)
             allColors = cameraColors
         }
 
-        // Calculate bounding box
         var minBound = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
         var maxBound = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-
         for vertex in allVertices {
             minBound = min(minBound, vertex)
             maxBound = max(maxBound, vertex)
@@ -291,6 +394,27 @@ class LiDARScanner: NSObject, ObservableObject {
         return arSession.currentFrame
     }
 
+    // MARK: - Filtered counts for display
+
+    /// Get vertex/face counts respecting the range filter
+    func getFilteredCounts() -> (vertices: Int, faces: Int) {
+        var totalVertices = 0
+        var totalFaces = 0
+        let maxDist = scanRange.maxDistance
+
+        for anchor in meshAnchors {
+            let transform = anchor.transform
+            let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+            let anchorDist = length(anchorPos - scanOrigin)
+            if anchorDist <= maxDist + 2.0 {
+                totalVertices += anchor.geometry.vertices.count
+                totalFaces += anchor.geometry.faces.count
+            }
+        }
+
+        return (totalVertices, totalFaces)
+    }
+
     // MARK: - Helpers
 
     private func colorForClassification(_ classIndex: UInt8) -> SIMD4<Float> {
@@ -315,14 +439,9 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     private func updateMeshCounts() {
-        var totalVertices = 0
-        var totalFaces = 0
-        for anchor in meshAnchors {
-            totalVertices += anchor.geometry.vertices.count
-            totalFaces += anchor.geometry.faces.count
-        }
-        self.vertexCount = totalVertices
-        self.faceCount = totalFaces
+        let filtered = getFilteredCounts()
+        self.vertexCount = filtered.vertices
+        self.faceCount = filtered.faces
     }
 }
 

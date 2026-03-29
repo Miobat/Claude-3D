@@ -13,6 +13,10 @@ class MockLiDARScanner: ObservableObject {
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var isPreviewing = false
+    @Published var memoryUsageMB: Double = 0
+    @Published var estimatedFileSizeMB: Double = 0
+    @Published var scanCapacityPercent: Double = 0
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
@@ -24,6 +28,15 @@ class MockLiDARScanner: ObservableObject {
     static var isLiDARWithClassificationAvailable: Bool { true }
 
     let textureMapper = TextureMapper()
+
+    func startPreview() {
+        isPreviewing = true
+        scanProgress = "Point camera at area to scan"
+    }
+
+    func stopPreview() {
+        isPreviewing = false
+    }
 
     func startScanning(
         detail: ScanSettings.MeshDetail = .medium,

@@ -18,6 +18,7 @@ struct ModelViewerView: View {
     @State private var showWireframe = false
     @State private var showPointCloud = false
     @State private var pointSize: CGFloat = 2.0
+    @State private var showJoysticks = false
 
     // Measurement
     @State private var measurementPoints: [SCNVector3] = []
@@ -63,10 +64,16 @@ struct ModelViewerView: View {
                 errorOverlay(error)
             }
 
-            // Toolbar overlay
+            // Toolbar and joysticks overlay
             if !isLoading && loadError == nil {
                 VStack {
                     Spacer()
+
+                    // Joystick overlay
+                    if showJoysticks {
+                        joystickOverlay
+                    }
+
                     toolbarView
                 }
             }
@@ -75,14 +82,12 @@ struct ModelViewerView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                // Share button
                 Button {
                     exportAndShare()
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }
 
-                // Info button
                 Menu {
                     if let node = modelNode {
                         let (minBound, maxBound) = node.boundingBox
@@ -149,6 +154,37 @@ struct ModelViewerView: View {
         .background(Color(uiColor: .systemBackground))
     }
 
+    // MARK: - Joystick Overlay
+
+    private var joystickOverlay: some View {
+        HStack {
+            // Left joystick: Move/Pan
+            VirtualJoystick(label: "Move") { dx, dy in
+                NotificationCenter.default.post(
+                    name: .joystickMove,
+                    object: nil,
+                    userInfo: ["dx": dx, "dy": dy]
+                )
+            }
+            .frame(width: 120, height: 120)
+            .padding(.leading, 20)
+
+            Spacer()
+
+            // Right joystick: Rotate/Look
+            VirtualJoystick(label: "Look") { dx, dy in
+                NotificationCenter.default.post(
+                    name: .joystickLook,
+                    object: nil,
+                    userInfo: ["dx": dx, "dy": dy]
+                )
+            }
+            .frame(width: 120, height: 120)
+            .padding(.trailing, 20)
+        }
+        .padding(.bottom, 8)
+    }
+
     // MARK: - Toolbar
 
     private var toolbarView: some View {
@@ -212,7 +248,7 @@ struct ModelViewerView: View {
                 Button {
                     showGrid.toggle()
                 } label: {
-                    Image(systemName: showGrid ? "grid" : "grid")
+                    Image(systemName: "grid")
                         .foregroundColor(showGrid ? .accentColor : .gray)
                         .font(.system(size: 20))
                 }
@@ -225,9 +261,19 @@ struct ModelViewerView: View {
                         .font(.system(size: 20))
                 }
 
+                // Joystick toggle
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showJoysticks.toggle()
+                    }
+                } label: {
+                    Image(systemName: "gamecontroller.fill")
+                        .foregroundColor(showJoysticks ? .accentColor : .gray)
+                        .font(.system(size: 20))
+                }
+
                 // Reset view
                 Button {
-                    // Reset camera will be handled via notification
                     NotificationCenter.default.post(name: .resetCameraView, object: nil)
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
@@ -262,6 +308,90 @@ struct ModelViewerView: View {
     }
 }
 
+// MARK: - Virtual Joystick
+
+struct VirtualJoystick: View {
+    let label: String
+    let onMove: (CGFloat, CGFloat) -> Void
+
+    @State private var knobOffset: CGSize = .zero
+    @State private var isDragging = false
+    @GestureState private var dragOffset: CGSize = .zero
+
+    private let joystickRadius: CGFloat = 50
+    private let knobRadius: CGFloat = 22
+
+    var body: some View {
+        ZStack {
+            // Base circle
+            Circle()
+                .fill(Color.black.opacity(0.3))
+                .frame(width: joystickRadius * 2, height: joystickRadius * 2)
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(0.3), lineWidth: 1.5)
+                )
+
+            // Direction indicators
+            ForEach(0..<4) { i in
+                let angle = Double(i) * .pi / 2
+                Circle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 6, height: 6)
+                    .offset(
+                        x: cos(angle) * (joystickRadius - 12),
+                        y: sin(angle) * (joystickRadius - 12)
+                    )
+            }
+
+            // Knob
+            Circle()
+                .fill(Color.white.opacity(isDragging ? 0.8 : 0.5))
+                .frame(width: knobRadius * 2, height: knobRadius * 2)
+                .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                .offset(effectiveOffset)
+                .gesture(
+                    DragGesture()
+                        .updating($dragOffset) { value, state, _ in
+                            state = value.translation
+                        }
+                        .onChanged { value in
+                            isDragging = true
+                            let clamped = clampToRadius(value.translation)
+                            let dx = clamped.width / joystickRadius
+                            let dy = clamped.height / joystickRadius
+                            onMove(dx, dy)
+                        }
+                        .onEnded { _ in
+                            isDragging = false
+                            knobOffset = .zero
+                            onMove(0, 0)
+                        }
+                )
+
+            // Label
+            Text(label)
+                .font(.system(size: 8, weight: .medium))
+                .foregroundColor(.white.opacity(0.4))
+                .offset(y: joystickRadius + 10)
+        }
+    }
+
+    private var effectiveOffset: CGSize {
+        isDragging ? clampToRadius(dragOffset) : .zero
+    }
+
+    private func clampToRadius(_ offset: CGSize) -> CGSize {
+        let distance = sqrt(offset.width * offset.width + offset.height * offset.height)
+        let maxDist = joystickRadius - knobRadius
+        if distance > maxDist {
+            let scale = maxDist / distance
+            return CGSize(width: offset.width * scale, height: offset.height * scale)
+        }
+        return offset
+    }
+}
+
 // MARK: - Measurement Label
 
 struct MeasurementLabel: Identifiable {
@@ -274,6 +404,8 @@ struct MeasurementLabel: Identifiable {
 
 extension Notification.Name {
     static let resetCameraView = Notification.Name("resetCameraView")
+    static let joystickMove = Notification.Name("joystickMove")
+    static let joystickLook = Notification.Name("joystickLook")
 }
 
 // MARK: - Share Sheet
