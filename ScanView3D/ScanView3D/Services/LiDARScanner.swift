@@ -10,12 +10,14 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var isScanning = false
     @Published var isPaused = false
     @Published var meshAnchors: [ARMeshAnchor] = []
+    @Published var planeAnchors: [ARPlaneAnchor] = []
     @Published var scanProgress: String = "Ready to scan"
     @Published var vertexCount: Int = 0
     @Published var faceCount: Int = 0
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var detectedPlaneCount: Int = 0
     @Published var isPreviewing = false
     @Published var memoryUsageMB: Double = 0
     @Published var estimatedFileSizeMB: Double = 0
@@ -178,6 +180,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func resetScanning() {
         stopScanning()
         meshAnchors.removeAll()
+        planeAnchors.removeAll()
         vertexCount = 0
         faceCount = 0
         capturedFrameCount = 0
@@ -391,6 +394,107 @@ class LiDARScanner: NSObject, ObservableObject {
         )
     }
 
+    /// Build clean room geometry from detected planes (for Area mode)
+    func getPlaneBasedMeshData() -> MeshData? {
+        guard !planeAnchors.isEmpty else { return nil }
+
+        let maxDist = currentRange.maxDistance
+        var allVertices: [SIMD3<Float>] = []
+        var allNormals: [SIMD3<Float>] = []
+        var allFaces: [[UInt32]] = []
+        var allColors: [SIMD4<Float>] = []
+
+        for plane in planeAnchors {
+            let transform = plane.transform
+            let planeCenter = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+
+            // Range check
+            let dist = length(planeCenter - scanOrigin)
+            if dist > maxDist { continue }
+
+            // Get plane extent
+            let extent = plane.extent
+            let hw = extent.x / 2.0
+            let hz = extent.z / 2.0
+
+            // Color based on plane classification
+            let color: SIMD4<Float>
+            switch plane.classification {
+            case .floor:
+                color = SIMD4<Float>(0.6, 0.6, 0.65, 1.0)
+            case .ceiling:
+                color = SIMD4<Float>(0.85, 0.85, 0.9, 1.0)
+            case .wall:
+                color = SIMD4<Float>(0.9, 0.9, 0.85, 1.0)
+            case .door:
+                color = SIMD4<Float>(0.55, 0.35, 0.15, 1.0)
+            case .window:
+                color = SIMD4<Float>(0.5, 0.7, 0.9, 1.0)
+            default:
+                // Skip non-structural planes
+                continue
+            }
+
+            // Build a subdivided quad for the plane (subdivisions help with lighting)
+            let subdivisions = 4
+            let baseIndex = UInt32(allVertices.count)
+
+            // Get plane normal in world space
+            let localNormal = SIMD3<Float>(0, 1, 0) // ARKit planes face up in local space
+            let rotationMatrix = simd_float3x3(
+                SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+                SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+                SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+            )
+            let worldNormal = normalize(rotationMatrix * localNormal)
+
+            // Generate vertices in a grid
+            for row in 0...subdivisions {
+                for col in 0...subdivisions {
+                    let lx = -hw + (2.0 * hw) * Float(col) / Float(subdivisions)
+                    let lz = -hz + (2.0 * hz) * Float(row) / Float(subdivisions)
+                    let localPos = SIMD4<Float>(plane.center.x + lx, plane.center.y, plane.center.z + lz, 1.0)
+                    let worldPos = transform * localPos
+
+                    allVertices.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
+                    allNormals.append(worldNormal)
+                    allColors.append(color)
+                }
+            }
+
+            // Generate faces
+            let stride = UInt32(subdivisions + 1)
+            for row in 0..<UInt32(subdivisions) {
+                for col in 0..<UInt32(subdivisions) {
+                    let tl = baseIndex + row * stride + col
+                    let tr = tl + 1
+                    let bl = tl + stride
+                    let br = bl + 1
+                    allFaces.append([tl, bl, tr])
+                    allFaces.append([tr, bl, br])
+                }
+            }
+        }
+
+        guard !allVertices.isEmpty else { return nil }
+
+        var minB = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxB = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for v in allVertices {
+            minB = min(minB, v)
+            maxB = max(maxB, v)
+        }
+
+        return MeshData(
+            vertices: allVertices,
+            normals: allNormals,
+            faces: allFaces,
+            colors: allColors,
+            boundingBoxMin: minB,
+            boundingBoxMax: maxB
+        )
+    }
+
     /// Build texture atlas for current mesh data
     func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
         return textureMapper.buildTextureAtlas(
@@ -460,36 +564,55 @@ class LiDARScanner: NSObject, ObservableObject {
 extension LiDARScanner: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         let newMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        if !newMeshAnchors.isEmpty {
-            DispatchQueue.main.async {
+        let newPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
+        DispatchQueue.main.async {
+            if !newMeshAnchors.isEmpty {
                 self.meshAnchors.append(contentsOf: newMeshAnchors)
                 self.updateMeshCounts()
+            }
+            if !newPlaneAnchors.isEmpty {
+                self.planeAnchors.append(contentsOf: newPlaneAnchors)
+                self.detectedPlaneCount = self.planeAnchors.count
             }
         }
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         let updatedMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        if !updatedMeshAnchors.isEmpty {
-            DispatchQueue.main.async {
-                for updated in updatedMeshAnchors {
-                    if let index = self.meshAnchors.firstIndex(where: { $0.identifier == updated.identifier }) {
-                        self.meshAnchors[index] = updated
-                    }
+        let updatedPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
+        DispatchQueue.main.async {
+            for updated in updatedMeshAnchors {
+                if let index = self.meshAnchors.firstIndex(where: { $0.identifier == updated.identifier }) {
+                    self.meshAnchors[index] = updated
                 }
-                self.updateMeshCounts()
             }
+            for updated in updatedPlaneAnchors {
+                if let index = self.planeAnchors.firstIndex(where: { $0.identifier == updated.identifier }) {
+                    self.planeAnchors[index] = updated
+                } else {
+                    self.planeAnchors.append(updated)
+                }
+            }
+            if !updatedMeshAnchors.isEmpty { self.updateMeshCounts() }
+            if !updatedPlaneAnchors.isEmpty { self.detectedPlaneCount = self.planeAnchors.count }
         }
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
         let removedMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        if !removedMeshAnchors.isEmpty {
-            DispatchQueue.main.async {
+        let removedPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
+        DispatchQueue.main.async {
+            if !removedMeshAnchors.isEmpty {
                 self.meshAnchors.removeAll { anchor in
                     removedMeshAnchors.contains { $0.identifier == anchor.identifier }
                 }
                 self.updateMeshCounts()
+            }
+            if !removedPlaneAnchors.isEmpty {
+                self.planeAnchors.removeAll { anchor in
+                    removedPlaneAnchors.contains { $0.identifier == anchor.identifier }
+                }
+                self.detectedPlaneCount = self.planeAnchors.count
             }
         }
     }
