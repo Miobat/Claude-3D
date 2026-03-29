@@ -13,25 +13,27 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         arView.session = scanner.arSession
         arView.automaticallyConfigureSession = false
 
-        // Enable debug options for mesh visualization
-        if showMeshOverlay {
-            arView.debugOptions.insert(.showSceneUnderstanding)
-        }
+        // Disable default scene understanding debug vis - we'll draw our own range-limited mesh
+        arView.debugOptions = []
 
         // Configure rendering
         arView.environment.sceneUnderstanding.options = [.occlusion, .receivesLighting]
         arView.renderOptions = [.disableMotionBlur]
 
         context.coordinator.arView = arView
+        context.coordinator.scanner = scanner
 
         return arView
     }
 
     func updateUIView(_ arView: ARView, context: Context) {
-        if showMeshOverlay {
-            arView.debugOptions.insert(.showSceneUnderstanding)
-        } else {
-            arView.debugOptions.remove(.showSceneUnderstanding)
+        context.coordinator.showMeshOverlay = showMeshOverlay
+
+        if showMeshOverlay && scanner.isScanning {
+            // Update mesh visualization with range filtering
+            context.coordinator.updateRangeFilteredMesh()
+        } else if !showMeshOverlay {
+            context.coordinator.clearMeshVisualization()
         }
     }
 
@@ -41,114 +43,94 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
 
     class Coordinator {
         var arView: ARView?
-    }
-}
+        var scanner: LiDARScanner?
+        var showMeshOverlay = true
+        private var meshAnchors: [UUID: AnchorEntity] = [:]
+        private var lastUpdateTime: TimeInterval = 0
+        private let updateInterval: TimeInterval = 0.3
 
-/// Standalone AR scanning view controller for more advanced control
-class ARScannerViewController: UIViewController {
-    var arView: ARView!
-    var scanner: LiDARScanner?
-    var meshVisualizationEnabled = true
+        func updateRangeFilteredMesh() {
+            guard let arView = arView, let scanner = scanner else { return }
 
-    private var meshNodes: [UUID: ModelEntity] = [:]
+            let now = CACurrentMediaTime()
+            guard now - lastUpdateTime >= updateInterval else { return }
+            lastUpdateTime = now
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
+            let scanOrigin = scanner.scanOrigin
+            let maxDist = scanner.currentRange.maxDistance
 
-        arView = ARView(frame: view.bounds)
-        arView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        view.addSubview(arView)
+            // Track which anchors are still valid
+            var activeIDs = Set<UUID>()
 
-        if let scanner = scanner {
-            arView.session = scanner.arSession
-            arView.automaticallyConfigureSession = false
-        }
+            for anchor in scanner.meshAnchors {
+                let anchorPos = SIMD3<Float>(
+                    anchor.transform.columns.3.x,
+                    anchor.transform.columns.3.y,
+                    anchor.transform.columns.3.z
+                )
+                let dist = length(anchorPos - scanOrigin)
 
-        // Add coaching overlay to guide user
-        let coachingOverlay = ARCoachingOverlayView()
-        coachingOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        coachingOverlay.session = arView.session
-        coachingOverlay.goal = .anyPlane
-        arView.addSubview(coachingOverlay)
-    }
+                if dist <= maxDist + 1.0 && showMeshOverlay {
+                    activeIDs.insert(anchor.identifier)
 
-    func updateMeshVisualization(anchors: [ARMeshAnchor]) {
-        guard meshVisualizationEnabled else { return }
-
-        for anchor in anchors {
-            if let existingEntity = meshNodes[anchor.identifier] {
-                // Update existing mesh entity
-                updateMeshEntity(existingEntity, with: anchor)
-            } else {
-                // Create new mesh entity
-                if let entity = createMeshEntity(from: anchor) {
-                    meshNodes[anchor.identifier] = entity
-
-                    let anchorEntity = AnchorEntity(world: anchor.transform)
-                    anchorEntity.addChild(entity)
-                    arView.scene.addAnchor(anchorEntity)
+                    if meshAnchors[anchor.identifier] == nil {
+                        // Create new mesh entity for this anchor
+                        if let entity = createMeshEntity(from: anchor, tint: UIColor.cyan.withAlphaComponent(0.15)) {
+                            let anchorEntity = AnchorEntity(world: anchor.transform)
+                            anchorEntity.addChild(entity)
+                            arView.scene.addAnchor(anchorEntity)
+                            meshAnchors[anchor.identifier] = anchorEntity
+                        }
+                    }
                 }
             }
-        }
-    }
 
-    func removeMeshVisualization(for anchorIDs: [UUID]) {
-        for id in anchorIDs {
-            if let entity = meshNodes[id] {
-                entity.removeFromParent()
-                meshNodes.removeValue(forKey: id)
+            // Remove anchors that are out of range
+            let toRemove = meshAnchors.keys.filter { !activeIDs.contains($0) }
+            for id in toRemove {
+                meshAnchors[id]?.removeFromParent()
+                meshAnchors.removeValue(forKey: id)
             }
         }
-    }
 
-    private func createMeshEntity(from anchor: ARMeshAnchor) -> ModelEntity? {
-        let geometry = anchor.geometry
-
-        // Create mesh descriptor
-        var descriptor = MeshDescriptor(name: "mesh_\(anchor.identifier)")
-
-        // Vertices
-        var positions: [SIMD3<Float>] = []
-        for i in 0..<geometry.vertices.count {
-            positions.append(geometry.vertex(at: UInt32(i)))
+        func clearMeshVisualization() {
+            for (_, entity) in meshAnchors {
+                entity.removeFromParent()
+            }
+            meshAnchors.removeAll()
         }
-        descriptor.positions = MeshBuffers.Positions(positions)
 
-        // Normals
-        var normals: [SIMD3<Float>] = []
-        for i in 0..<geometry.normals.count {
-            normals.append(geometry.normal(at: UInt32(i)))
-        }
-        descriptor.normals = MeshBuffers.Normals(normals)
+        private func createMeshEntity(from anchor: ARMeshAnchor, tint: UIColor) -> ModelEntity? {
+            let geometry = anchor.geometry
+            var descriptor = MeshDescriptor(name: "mesh_\(anchor.identifier)")
 
-        // Face indices
-        var indices: [UInt32] = []
-        for f in 0..<geometry.faces.count {
-            let faceIndices = geometry.vertexIndicesOf(face: f)
-            indices.append(contentsOf: faceIndices)
-        }
-        descriptor.primitives = .triangles(indices)
+            var positions: [SIMD3<Float>] = []
+            for i in 0..<geometry.vertices.count {
+                positions.append(geometry.vertex(at: UInt32(i)))
+            }
+            descriptor.positions = MeshBuffers.Positions(positions)
 
-        do {
-            let meshResource = try MeshResource.generate(from: [descriptor])
+            var normals: [SIMD3<Float>] = []
+            for i in 0..<geometry.normals.count {
+                normals.append(geometry.normal(at: UInt32(i)))
+            }
+            descriptor.normals = MeshBuffers.Normals(normals)
 
-            // Semi-transparent material for mesh overlay
-            var material = SimpleMaterial()
-            material.color = .init(tint: UIColor(white: 0.8, alpha: 0.3))
+            var indices: [UInt32] = []
+            for f in 0..<geometry.faces.count {
+                let faceIndices = geometry.vertexIndicesOf(face: f)
+                indices.append(contentsOf: faceIndices)
+            }
+            descriptor.primitives = .triangles(indices)
 
-            let entity = ModelEntity(mesh: meshResource, materials: [material])
-            return entity
-        } catch {
-            DebugLogger.shared.error("Error creating mesh entity: \(error)", category: "Scanner")
-            return nil
-        }
-    }
-
-    private func updateMeshEntity(_ entity: ModelEntity, with anchor: ARMeshAnchor) {
-        // For simplicity, recreate the mesh
-        // In production, you'd want incremental updates
-        if let newEntity = createMeshEntity(from: anchor) {
-            entity.model = newEntity.model
+            do {
+                let meshResource = try MeshResource.generate(from: [descriptor])
+                var material = SimpleMaterial()
+                material.color = .init(tint: tint)
+                return ModelEntity(mesh: meshResource, materials: [material])
+            } catch {
+                return nil
+            }
         }
     }
 }

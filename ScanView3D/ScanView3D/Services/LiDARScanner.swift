@@ -26,12 +26,13 @@ class LiDARScanner: NSObject, ObservableObject {
     private(set) var arSession: ARSession
     private var meshDetail: ScanSettings.MeshDetail = .medium
     private var captureTexture: Bool = true
-    private var scanRange: ScanSettings.ScanRange = .room
+    private(set) var currentRange: ScanSettings.ScanRange = .room
     private var scanQuality: ScanSettings.ScanQuality = .standard
+    private(set) var meshMode: ScanSettings.MeshMode = .free
     let textureMapper = TextureMapper()
     private var frameCaptureTimer: Timer?
     private var memoryMonitorTimer: Timer?
-    private var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
+    private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
     private var textureCapturePaused = false
 
     // Memory limits
@@ -82,7 +83,8 @@ class LiDARScanner: NSObject, ObservableObject {
         detail: ScanSettings.MeshDetail = .medium,
         captureTexture: Bool = true,
         range: ScanSettings.ScanRange = .room,
-        quality: ScanSettings.ScanQuality = .standard
+        quality: ScanSettings.ScanQuality = .standard,
+        meshMode: ScanSettings.MeshMode = .free
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -91,8 +93,9 @@ class LiDARScanner: NSObject, ObservableObject {
 
         self.meshDetail = detail
         self.captureTexture = captureTexture
-        self.scanRange = range
+        self.currentRange = range
         self.scanQuality = quality
+        self.meshMode = meshMode
         self.confidenceThreshold = quality.confidenceThreshold
         self.textureCapturePaused = false
 
@@ -284,7 +287,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func getCombinedMeshData() -> MeshData? {
         guard !meshAnchors.isEmpty else { return nil }
 
-        let maxDist = scanRange.maxDistance
+        let maxDist = currentRange.maxDistance
 
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
@@ -327,14 +330,21 @@ class LiDARScanner: NSObject, ObservableObject {
                     let worldNormal = rotationMatrix * localNormal
                     localNormals.append(worldNormal)
 
+                    // Get classification for mesh mode filtering
+                    var classIndex: UInt8 = 0
                     if let classification = anchor.geometry.classification {
-                        let classIndex = classification.buffer.contents()
+                        classIndex = classification.buffer.contents()
                             .advanced(by: classification.offset + classification.stride * Int(i))
                             .assumingMemoryBound(to: UInt8.self).pointee
-                        localColors.append(colorForClassification(classIndex))
-                    } else {
-                        localColors.append(SIMD4<Float>(0.7, 0.7, 0.7, 1.0))
                     }
+
+                    // Apply mesh mode filter
+                    if !meshMode.shouldIncludeVertex(classification: classIndex) {
+                        vertexInRange.append(false)
+                        continue
+                    }
+
+                    localColors.append(colorForClassification(classIndex))
                 } else {
                     vertexInRange.append(false)
                 }
@@ -400,7 +410,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func getFilteredCounts() -> (vertices: Int, faces: Int) {
         var totalVertices = 0
         var totalFaces = 0
-        let maxDist = scanRange.maxDistance
+        let maxDist = currentRange.maxDistance
 
         for anchor in meshAnchors {
             let transform = anchor.transform

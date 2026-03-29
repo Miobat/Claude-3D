@@ -21,8 +21,10 @@ class MockLiDARScanner: ObservableObject {
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
     private var meshData: MeshData?
-    private var scanRange: ScanSettings.ScanRange = .room
+    private(set) var currentRange: ScanSettings.ScanRange = .room
     private var scanQuality: ScanSettings.ScanQuality = .standard
+    private(set) var meshMode: ScanSettings.MeshMode = .free
+    private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
 
     static var isLiDARAvailable: Bool { true }
     static var isLiDARWithClassificationAvailable: Bool { true }
@@ -42,10 +44,12 @@ class MockLiDARScanner: ObservableObject {
         detail: ScanSettings.MeshDetail = .medium,
         captureTexture: Bool = true,
         range: ScanSettings.ScanRange = .room,
-        quality: ScanSettings.ScanQuality = .standard
+        quality: ScanSettings.ScanQuality = .standard,
+        meshMode: ScanSettings.MeshMode = .free
     ) {
-        self.scanRange = range
+        self.currentRange = range
         self.scanQuality = quality
+        self.meshMode = meshMode
         isScanning = true
         isPaused = false
         scanError = nil
@@ -94,7 +98,7 @@ class MockLiDARScanner: ObservableObject {
         isPaused = false
 
         if meshData == nil {
-            meshData = Self.generateSampleRoomMesh(range: scanRange)
+            meshData = Self.generateSampleRoomMesh(range: currentRange)
             vertexCount = meshData!.vertexCount
             faceCount = meshData!.faceCount
         }
@@ -111,7 +115,7 @@ class MockLiDARScanner: ObservableObject {
     }
 
     func getCombinedMeshData() -> MeshData? {
-        return meshData ?? Self.generateSampleRoomMesh(range: scanRange)
+        return meshData ?? Self.generateSampleRoomMesh(range: currentRange)
     }
 
     func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
