@@ -177,28 +177,38 @@ struct ScanSettings: Codable {
 
         var textureCaptureInterval: TimeInterval {
             switch self {
-            case .preview: return 1.5
-            case .standard: return 0.8
-            case .high: return 0.5
-            case .ultra: return 0.3
+            case .preview: return 3.0
+            case .standard: return 2.0
+            case .high: return 1.5
+            case .ultra: return 1.0
             }
         }
 
         var maxTextureFrames: Int {
             switch self {
-            case .preview: return 15
-            case .standard: return 30
-            case .high: return 50
-            case .ultra: return 80
+            case .preview: return 10
+            case .standard: return 15
+            case .high: return 20
+            case .ultra: return 25
             }
         }
 
         var textureAtlasTileSize: Int {
             switch self {
             case .preview: return 512
-            case .standard: return 768
-            case .high: return 1024
-            case .ultra: return 1024
+            case .standard: return 512
+            case .high: return 768
+            case .ultra: return 768
+            }
+        }
+
+        /// Width to downscale captured camera frames to (saves memory)
+        var textureDownscaleWidth: Int {
+            switch self {
+            case .preview: return 480
+            case .standard: return 640
+            case .high: return 960
+            case .ultra: return 1280
             }
         }
 

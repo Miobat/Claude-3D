@@ -24,7 +24,14 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         sceneView.allowsCameraControl = true
         sceneView.antialiasingMode = .multisampling4X
 
-        // Setup scene
+        // Reduce default camera control sensitivity
+        sceneView.defaultCameraController.interactionMode = .orbitTurntable
+        sceneView.defaultCameraController.inertiaEnabled = true
+        sceneView.defaultCameraController.inertiaFriction = 0.2
+        // Reduce rotation/translation speed for less sensitive touch controls
+        sceneView.defaultCameraController.rotationSensitivity = 0.4
+        sceneView.defaultCameraController.translationSensitivity = 0.3
+
         setupLighting(sceneView.scene!)
         setupCamera(sceneView)
 
@@ -32,13 +39,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             addGrid(to: sceneView.scene!)
         }
 
-        // Add tap gesture for measurements
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         sceneView.addGestureRecognizer(tapGesture)
 
         context.coordinator.sceneView = sceneView
 
-        // Load model
         loadModel(sceneView: sceneView, context: context)
 
         // Listen for camera reset
@@ -49,11 +54,24 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             object: nil
         )
 
+        // Listen for joystick input
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleJoystickMove(_:)),
+            name: .joystickMove,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleJoystickLook(_:)),
+            name: .joystickLook,
+            object: nil
+        )
+
         return sceneView
     }
 
     func updateUIView(_ sceneView: SCNView, context: Context) {
-        // Update grid visibility
         let gridNode = sceneView.scene?.rootNode.childNode(withName: "grid", recursively: false)
         if showGrid && gridNode == nil {
             addGrid(to: sceneView.scene!)
@@ -61,7 +79,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             gridNode?.removeFromParentNode()
         }
 
-        // Update wireframe
         if let model = modelNode {
             model.enumerateChildNodes { child, _ in
                 child.geometry?.firstMaterial?.fillMode = showWireframe ? .lines : .fill
@@ -69,7 +86,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             model.geometry?.firstMaterial?.fillMode = showWireframe ? .lines : .fill
         }
 
-        // Update coordinator state
         context.coordinator.activeTool = activeTool
         context.coordinator.measurementUnit = measurementUnit
     }
@@ -81,7 +97,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     // MARK: - Scene Setup
 
     private func setupLighting(_ scene: SCNScene) {
-        // Ambient light
         let ambientNode = SCNNode()
         ambientNode.light = SCNLight()
         ambientNode.light!.type = .ambient
@@ -89,7 +104,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         ambientNode.light!.intensity = 500
         scene.rootNode.addChildNode(ambientNode)
 
-        // Key light
         let keyLightNode = SCNNode()
         keyLightNode.light = SCNLight()
         keyLightNode.light!.type = .directional
@@ -100,7 +114,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         keyLightNode.look(at: SCNVector3.init(0, 0, 0))
         scene.rootNode.addChildNode(keyLightNode)
 
-        // Fill light
         let fillLightNode = SCNNode()
         fillLightNode.light = SCNLight()
         fillLightNode.light!.type = .directional
@@ -110,7 +123,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         fillLightNode.look(at: SCNVector3.init(0, 0, 0))
         scene.rootNode.addChildNode(fillLightNode)
 
-        // Bottom fill
         let bottomLightNode = SCNNode()
         bottomLightNode.light = SCNLight()
         bottomLightNode.light!.type = .directional
@@ -144,7 +156,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         for i in -lineCount...lineCount {
             let pos = Float(i) * gridSpacing
 
-            // X-axis lines
             let xGeometry = SCNCylinder(radius: 0.002, height: CGFloat(gridSize))
             xGeometry.firstMaterial?.diffuse.contents = UIColor(white: 0.3, alpha: 0.3)
             let xNode = SCNNode(geometry: xGeometry)
@@ -152,7 +163,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             xNode.eulerAngles = SCNVector3(0, 0, Float.pi / 2)
             gridNode.addChildNode(xNode)
 
-            // Z-axis lines
             let zGeometry = SCNCylinder(radius: 0.002, height: CGFloat(gridSize))
             zGeometry.firstMaterial?.diffuse.contents = UIColor(white: 0.3, alpha: 0.3)
             let zNode = SCNNode(geometry: zGeometry)
@@ -175,7 +185,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     sceneView.scene?.rootNode.addChildNode(node)
                     self.modelNode = node
 
-                    // Frame the model
                     let (minBound, maxBound) = node.boundingBox
                     let center = MeshProcessor.calculateCenter(min: minBound, max: maxBound)
                     let distance = MeshProcessor.calculateViewDistance(min: minBound, max: maxBound)
@@ -210,8 +219,21 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         var modelCenter: SCNVector3 = SCNVector3(0, 0, 0)
         var viewDistance: Float = 5.0
 
+        // Joystick state
+        private var joystickMoveTimer: Timer?
+        private var joystickLookTimer: Timer?
+        private var currentMoveDX: CGFloat = 0
+        private var currentMoveDY: CGFloat = 0
+        private var currentLookDX: CGFloat = 0
+        private var currentLookDY: CGFloat = 0
+
         init(parent: SceneKitViewRepresentable) {
             self.parent = parent
+        }
+
+        deinit {
+            joystickMoveTimer?.invalidate()
+            joystickLookTimer?.invalidate()
         }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
@@ -228,10 +250,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
             parent.measurementPoints.append(point)
 
-            // Add measurement marker
             addMeasurementMarker(at: point, in: sceneView.scene!)
 
-            // If we have a pair of points, create measurement
             if parent.measurementPoints.count >= 2 {
                 let lastIndex = parent.measurementPoints.count - 1
                 let p1 = parent.measurementPoints[lastIndex - 1]
@@ -240,10 +260,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 let convertedDistance = measurementUnit.convert(fromMeters: distance)
                 let text = String(format: "%.3f %@", convertedDistance, measurementUnit.abbreviation)
 
-                // Add line between points
                 addMeasurementLine(from: p1, to: p2, in: sceneView.scene!)
 
-                // Add label
                 let midPoint = SCNVector3(
                     (p1.x + p2.x) / 2,
                     (p1.y + p2.y) / 2 + 0.05,
@@ -266,6 +284,92 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 modelCenter.z + viewDistance
             )
             cameraNode.look(at: modelCenter)
+
+            SCNTransaction.commit()
+        }
+
+        // MARK: - Joystick Handlers
+
+        @objc func handleJoystickMove(_ notification: Notification) {
+            guard let userInfo = notification.userInfo,
+                  let dx = userInfo["dx"] as? CGFloat,
+                  let dy = userInfo["dy"] as? CGFloat else { return }
+
+            currentMoveDX = dx
+            currentMoveDY = dy
+
+            if dx == 0 && dy == 0 {
+                joystickMoveTimer?.invalidate()
+                joystickMoveTimer = nil
+            } else if joystickMoveTimer == nil {
+                joystickMoveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                    self?.applyMoveInput()
+                }
+            }
+        }
+
+        @objc func handleJoystickLook(_ notification: Notification) {
+            guard let userInfo = notification.userInfo,
+                  let dx = userInfo["dx"] as? CGFloat,
+                  let dy = userInfo["dy"] as? CGFloat else { return }
+
+            currentLookDX = dx
+            currentLookDY = dy
+
+            if dx == 0 && dy == 0 {
+                joystickLookTimer?.invalidate()
+                joystickLookTimer = nil
+            } else if joystickLookTimer == nil {
+                joystickLookTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                    self?.applyLookInput()
+                }
+            }
+        }
+
+        private func applyMoveInput() {
+            guard let sceneView = sceneView,
+                  let cameraNode = sceneView.pointOfView else { return }
+
+            let speed: Float = viewDistance * 0.02 // Scale speed to model size
+
+            // Get camera's right and up vectors for relative movement
+            let right = SCNVector3(
+                cameraNode.transform.m11,
+                cameraNode.transform.m12,
+                cameraNode.transform.m13
+            )
+            let up = SCNVector3(0, 1, 0) // Keep up as world up for more intuitive movement
+
+            let dx = Float(currentMoveDX) * speed
+            let dy = Float(-currentMoveDY) * speed // Invert Y for natural feel
+
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
+            cameraNode.position = SCNVector3(
+                cameraNode.position.x + right.x * dx + up.x * dy,
+                cameraNode.position.y + right.y * dx + up.y * dy,
+                cameraNode.position.z + right.z * dx + up.z * dy
+            )
+            SCNTransaction.commit()
+        }
+
+        private func applyLookInput() {
+            guard let sceneView = sceneView,
+                  let cameraNode = sceneView.pointOfView else { return }
+
+            let rotSpeed: Float = 0.02
+
+            let dx = Float(currentLookDX) * rotSpeed
+            let dy = Float(currentLookDY) * rotSpeed
+
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0
+
+            // Rotate around Y axis (horizontal look)
+            cameraNode.eulerAngles.y -= dx
+            // Rotate around X axis (vertical look), clamped
+            let newPitch = cameraNode.eulerAngles.x - dy
+            cameraNode.eulerAngles.x = max(-.pi / 2.5, min(.pi / 2.5, newPitch))
 
             SCNTransaction.commit()
         }
