@@ -27,10 +27,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // Reduce default camera control sensitivity
         sceneView.defaultCameraController.interactionMode = .orbitTurntable
         sceneView.defaultCameraController.inertiaEnabled = true
-        sceneView.defaultCameraController.inertiaFriction = 0.2
-        // Reduce rotation/translation speed for less sensitive touch controls
-        sceneView.defaultCameraController.rotationSensitivity = 0.4
-        sceneView.defaultCameraController.translationSensitivity = 0.3
+        sceneView.defaultCameraController.inertiaFriction = 0.15
+        sceneView.defaultCameraController.maximumVerticalAngle = 80
 
         setupLighting(sceneView.scene!)
         setupCamera(sceneView)
