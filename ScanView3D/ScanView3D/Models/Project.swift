@@ -121,6 +121,64 @@ struct ScanSettings: Codable {
     var autoSave: Bool = true
     var scanRange: ScanRange = .room
     var scanQuality: ScanQuality = .standard
+    var meshMode: MeshMode = .free
+
+    // MARK: - Mesh Mode
+
+    enum MeshMode: String, Codable, CaseIterable {
+        case free = "Free"
+        case hybrid = "Hybrid"
+        case structure = "Structure"
+        case area = "Area"
+
+        var description: String {
+            switch self {
+            case .free: return "Raw mesh, all surfaces captured as-is"
+            case .hybrid: return "Align to detected objects while keeping detail"
+            case .structure: return "Walls, floors, ceiling, doors, windows"
+            case .area: return "Outline only - floor, walls, ceiling"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .free: return "scribble.variable"
+            case .hybrid: return "square.on.square.dashed"
+            case .structure: return "building"
+            case .area: return "square.dashed"
+            }
+        }
+
+        /// Which ARMeshClassification types to include in this mode
+        func shouldIncludeVertex(classification: UInt8) -> Bool {
+            switch self {
+            case .free:
+                return true // Everything
+            case .hybrid:
+                return true // Everything, but structure gets priority (handled at export)
+            case .structure:
+                // Only structural elements + furniture
+                guard let cls = ARMeshClassificationCompat(rawValue: Int(classification)) else { return true }
+                switch cls {
+                case .wall, .floor, .ceiling, .door, .window, .table, .seat:
+                    return true
+                case .none:
+                    return false // Skip unclassified clutter
+                }
+            case .area:
+                // Only room shell - floor, walls, ceiling
+                guard let cls = ARMeshClassificationCompat(rawValue: Int(classification)) else { return true }
+                switch cls {
+                case .wall, .floor, .ceiling:
+                    return true
+                case .door, .window:
+                    return true // Include openings as part of room shell
+                case .none, .table, .seat:
+                    return false
+                }
+            }
+        }
+    }
 
     // MARK: - Scan Range
 
@@ -273,4 +331,17 @@ struct ScanSettings: Codable {
             }
         }
     }
+}
+
+/// Platform-independent mesh classification matching ARMeshClassification raw values
+/// This allows MeshMode filtering to work without importing ARKit (simulator compatibility)
+enum ARMeshClassificationCompat: Int {
+    case none = 0
+    case wall = 1
+    case floor = 2
+    case ceiling = 3
+    case table = 4
+    case seat = 5
+    case window = 6
+    case door = 7
 }

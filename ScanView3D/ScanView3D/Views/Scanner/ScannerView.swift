@@ -304,6 +304,55 @@ struct ScannerView: View {
                     .foregroundColor(.gray)
             }
 
+            // Mesh mode selector
+            VStack(spacing: 6) {
+                HStack {
+                    Image(systemName: "cube.fill")
+                        .foregroundColor(.purple)
+                    Text("MESH MODE")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.purple)
+                    Spacer()
+                    Text(settings.meshMode.rawValue)
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                }
+
+                HStack(spacing: 8) {
+                    ForEach(ScanSettings.MeshMode.allCases, id: \.self) { mode in
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                settings.meshMode = mode
+                            }
+                        } label: {
+                            VStack(spacing: 2) {
+                                Image(systemName: mode.icon)
+                                    .font(.system(size: 16))
+                                Text(mode.rawValue)
+                                    .font(.system(size: 9, weight: .medium))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(settings.meshMode == mode ? Color.purple.opacity(0.3) : Color.white.opacity(0.1))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(settings.meshMode == mode ? Color.purple : Color.clear, lineWidth: 1.5)
+                            )
+                        }
+                        .foregroundColor(settings.meshMode == mode ? .white : .gray)
+                    }
+                }
+
+                Text(settings.meshMode.description)
+                    .font(.system(size: 10))
+                    .foregroundColor(.gray)
+            }
+
             // Texture capture toggle
             HStack {
                 Image(systemName: "camera.fill")
@@ -354,6 +403,21 @@ struct ScannerView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(Capsule().fill(Color.orange.opacity(0.2)))
+
+            // Mesh mode badge (only show if not Free)
+            if settings.meshMode != .free {
+                HStack(spacing: 4) {
+                    Image(systemName: settings.meshMode.icon)
+                        .font(.caption2)
+                    Text(settings.meshMode.rawValue)
+                        .font(.caption2)
+                        .fontWeight(.medium)
+                }
+                .foregroundColor(.purple)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.purple.opacity(0.2)))
+            }
 
             if settings.captureTexture {
                 HStack(spacing: 4) {
@@ -440,7 +504,8 @@ struct ScannerView: View {
                             detail: settings.meshDetail,
                             captureTexture: settings.captureTexture,
                             range: settings.scanRange,
-                            quality: settings.scanQuality
+                            quality: settings.scanQuality,
+                            meshMode: settings.meshMode
                         )
                     } label: {
                         VStack(spacing: 4) {

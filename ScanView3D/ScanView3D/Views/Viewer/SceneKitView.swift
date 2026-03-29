@@ -328,25 +328,32 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             guard let sceneView = sceneView,
                   let cameraNode = sceneView.pointOfView else { return }
 
-            let speed: Float = viewDistance * 0.02 // Scale speed to model size
+            let speed: Float = viewDistance * 0.02
 
-            // Get camera's right and up vectors for relative movement
+            // Left/Right: move along camera's local X axis (strafe)
             let right = SCNVector3(
                 cameraNode.transform.m11,
                 cameraNode.transform.m12,
                 cameraNode.transform.m13
             )
-            let up = SCNVector3(0, 1, 0) // Keep up as world up for more intuitive movement
 
-            let dx = Float(currentMoveDX) * speed
-            let dy = Float(-currentMoveDY) * speed // Invert Y for natural feel
+            // Forward/Backward (up on joystick = forward into scene):
+            // Use camera's local -Z axis (the direction camera looks)
+            let forward = SCNVector3(
+                -cameraNode.transform.m31,
+                -cameraNode.transform.m32,
+                -cameraNode.transform.m33
+            )
+
+            let dx = Float(currentMoveDX) * speed  // left/right strafe
+            let dz = Float(-currentMoveDY) * speed  // up on stick = move forward into scene
 
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
             cameraNode.position = SCNVector3(
-                cameraNode.position.x + right.x * dx + up.x * dy,
-                cameraNode.position.y + right.y * dx + up.y * dy,
-                cameraNode.position.z + right.z * dx + up.z * dy
+                cameraNode.position.x + right.x * dx + forward.x * dz,
+                cameraNode.position.y + right.y * dx + forward.y * dz,
+                cameraNode.position.z + right.z * dx + forward.z * dz
             )
             SCNTransaction.commit()
         }
