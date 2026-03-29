@@ -209,124 +209,53 @@ struct ScannerView: View {
         return .green
     }
 
-    // MARK: - Pre-Scan Controls (Range & Quality)
+    // MARK: - Pre-Scan Controls
 
     private var prescanControls: some View {
-        VStack(spacing: 12) {
-            // Range selector
-            VStack(spacing: 6) {
+        VStack(spacing: 10) {
+            // Range slider (continuous)
+            VStack(spacing: 4) {
                 HStack {
-                    Image(systemName: "scope")
-                        .foregroundColor(.cyan)
-                    Text("SCAN RANGE")
+                    Text("RANGE")
                         .font(.caption2)
                         .fontWeight(.bold)
                         .foregroundColor(.cyan)
                     Spacer()
-                    Text(settings.scanRange.rawValue)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.white)
+                    Text(String(format: "%.1f m", settings.rangeValue))
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(.cyan)
                 }
-
-                HStack(spacing: 8) {
-                    ForEach(ScanSettings.ScanRange.allCases, id: \.self) { range in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                settings.scanRange = range
-                            }
-                        } label: {
-                            VStack(spacing: 2) {
-                                Image(systemName: range.icon)
-                                    .font(.system(size: 16))
-                                Text(range.rawValue)
-                                    .font(.system(size: 9, weight: .medium))
-                                Text(String(format: "%.1fm", range.maxDistance))
-                                    .font(.system(size: 8))
-                                    .foregroundColor(settings.scanRange == range ? .white.opacity(0.8) : .gray)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(settings.scanRange == range ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(settings.scanRange == range ? Color.cyan : Color.clear, lineWidth: 1.5)
-                            )
-                        }
-                        .foregroundColor(settings.scanRange == range ? .white : .gray)
-                    }
-                }
+                Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
+                    .tint(.cyan)
             }
 
-            // Quality selector
-            VStack(spacing: 6) {
+            // Confidence selector
+            VStack(spacing: 4) {
                 HStack {
-                    Image(systemName: "sparkles")
-                        .foregroundColor(.orange)
-                    Text("SCAN QUALITY")
+                    Text("CONFIDENCE")
                         .font(.caption2)
                         .fontWeight(.bold)
                         .foregroundColor(.orange)
                     Spacer()
-                    Text(settings.scanQuality.rawValue)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.white)
                 }
-
-                HStack(spacing: 8) {
-                    ForEach(ScanSettings.ScanQuality.allCases, id: \.self) { quality in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                settings.scanQuality = quality
-                            }
-                        } label: {
-                            VStack(spacing: 2) {
-                                Image(systemName: quality.icon)
-                                    .font(.system(size: 16))
-                                Text(quality.rawValue)
-                                    .font(.system(size: 9, weight: .medium))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(settings.scanQuality == quality ? Color.orange.opacity(0.3) : Color.white.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(settings.scanQuality == quality ? Color.orange : Color.clear, lineWidth: 1.5)
-                            )
-                        }
-                        .foregroundColor(settings.scanQuality == quality ? .white : .gray)
-                    }
+                Picker("", selection: $settings.confidenceLevel) {
+                    Text("Low").tag(0)
+                    Text("Medium").tag(1)
+                    Text("High").tag(2)
                 }
-
-                Text(settings.scanQuality.description)
-                    .font(.system(size: 10))
-                    .foregroundColor(.gray)
+                .pickerStyle(.segmented)
             }
 
-            // Mesh mode selector
-            VStack(spacing: 6) {
+            // Mesh mode
+            VStack(spacing: 4) {
                 HStack {
-                    Image(systemName: "cube.fill")
-                        .foregroundColor(.purple)
                     Text("MESH MODE")
                         .font(.caption2)
                         .fontWeight(.bold)
                         .foregroundColor(.purple)
                     Spacer()
-                    Text(settings.meshMode.rawValue)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.white)
                 }
-
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     ForEach(ScanSettings.MeshMode.allCases, id: \.self) { mode in
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -335,12 +264,12 @@ struct ScannerView: View {
                         } label: {
                             VStack(spacing: 2) {
                                 Image(systemName: mode.icon)
-                                    .font(.system(size: 16))
+                                    .font(.system(size: 14))
                                 Text(mode.rawValue)
-                                    .font(.system(size: 9, weight: .medium))
+                                    .font(.system(size: 8, weight: .medium))
                             }
                             .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
+                            .padding(.vertical, 5)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
                                     .fill(settings.meshMode == mode ? Color.purple.opacity(0.3) : Color.white.opacity(0.1))
@@ -353,17 +282,14 @@ struct ScannerView: View {
                         .foregroundColor(settings.meshMode == mode ? .white : .gray)
                     }
                 }
-
-                Text(settings.meshMode.description)
-                    .font(.system(size: 10))
-                    .foregroundColor(.gray)
             }
 
-            // Texture capture toggle
+            // Photo texture toggle
             HStack {
                 Image(systemName: "camera.fill")
                     .foregroundColor(settings.captureTexture ? .green : .gray)
-                Text("Photo Texture Capture")
+                    .font(.caption)
+                Text("Photo Texture")
                     .font(.caption)
                     .foregroundColor(.white)
                 Spacer()
@@ -371,13 +297,12 @@ struct ScannerView: View {
                     .labelsHidden()
                     .tint(.green)
             }
-            .padding(.horizontal, 4)
         }
         .padding(.horizontal, AppConstants.Layout.padding)
-        .padding(.vertical, 12)
+        .padding(.vertical, 10)
         .background(
             RoundedRectangle(cornerRadius: 16)
-                .fill(Color.black.opacity(0.7))
+                .fill(Color.black.opacity(0.75))
         )
         .padding(.horizontal, 12)
     }
@@ -387,9 +312,9 @@ struct ScannerView: View {
     private var scanningInfoBar: some View {
         HStack(spacing: 16) {
             HStack(spacing: 4) {
-                Image(systemName: settings.scanRange.icon)
+                Image(systemName: "scope")
                     .font(.caption2)
-                Text(settings.scanRange.rawValue)
+                Text(String(format: "%.1fm", settings.rangeValue))
                     .font(.caption2)
                     .fontWeight(.medium)
             }
@@ -511,7 +436,9 @@ struct ScannerView: View {
                             captureTexture: settings.captureTexture,
                             range: settings.scanRange,
                             quality: settings.scanQuality,
-                            meshMode: settings.meshMode
+                            meshMode: settings.meshMode,
+                            rangeMeters: settings.rangeValue,
+                            confidenceLevel: settings.confidenceLevel
                         )
                     } label: {
                         VStack(spacing: 4) {

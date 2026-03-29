@@ -10,7 +10,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     @Binding var isLoading: Bool
     @Binding var loadError: String?
     @Binding var showGrid: Bool
-    @Binding var showWireframe: Bool
+    @Binding var showBoundingBox: Bool
+    @Binding var vizMode: ModelViewerView.VisualizationMode
     @Binding var activeTool: ModelViewerView.ViewerTool
     @Binding var measurementPoints: [SCNVector3]
     @Binding var measurementLabels: [MeasurementLabel]
@@ -24,7 +25,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         sceneView.allowsCameraControl = true
         sceneView.antialiasingMode = .multisampling4X
 
-        // Reduce default camera control sensitivity
         sceneView.defaultCameraController.interactionMode = .orbitTurntable
         sceneView.defaultCameraController.inertiaEnabled = true
         sceneView.defaultCameraController.inertiaFriction = 0.15
@@ -33,64 +33,41 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         setupLighting(sceneView.scene!)
         setupCamera(sceneView)
 
-        if showGrid {
-            addGrid(to: sceneView.scene!)
-        }
-
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         sceneView.addGestureRecognizer(tapGesture)
 
         context.coordinator.sceneView = sceneView
-
         loadModel(sceneView: sceneView, context: context)
 
-        // Listen for camera reset
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.resetCamera),
-            name: .resetCameraView,
-            object: nil
-        )
-
-        // Listen for joystick input
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.handleJoystickMove(_:)),
-            name: .joystickMove,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            context.coordinator,
-            selector: #selector(Coordinator.handleJoystickLook(_:)),
-            name: .joystickLook,
-            object: nil
-        )
+        // Register for all notifications
+        let nc = NotificationCenter.default
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.resetCamera), name: .resetCameraView, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleJoystickMove(_:)), name: .joystickMove, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleJoystickLook(_:)), name: .joystickLook, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraView(_:)), name: .setCameraView, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraProjection(_:)), name: .setCameraProjection, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetVisualizationMode(_:)), name: .setVisualizationMode, object: nil)
 
         return sceneView
     }
 
     func updateUIView(_ sceneView: SCNView, context: Context) {
+        // Grid
         let gridNode = sceneView.scene?.rootNode.childNode(withName: "grid", recursively: false)
-        if showGrid && gridNode == nil {
-            addGrid(to: sceneView.scene!)
-        } else if !showGrid {
-            gridNode?.removeFromParentNode()
-        }
+        if showGrid && gridNode == nil { addGrid(to: sceneView.scene!) }
+        else if !showGrid { gridNode?.removeFromParentNode() }
 
-        if let model = modelNode {
-            model.enumerateChildNodes { child, _ in
-                child.geometry?.firstMaterial?.fillMode = showWireframe ? .lines : .fill
-            }
-            model.geometry?.firstMaterial?.fillMode = showWireframe ? .lines : .fill
-        }
+        // Bounding box
+        let bbNode = sceneView.scene?.rootNode.childNode(withName: "boundingBox", recursively: false)
+        if showBoundingBox && bbNode == nil, let model = modelNode {
+            addBoundingBox(to: sceneView.scene!, for: model)
+        } else if !showBoundingBox { bbNode?.removeFromParentNode() }
 
         context.coordinator.activeTool = activeTool
         context.coordinator.measurementUnit = measurementUnit
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     // MARK: - Scene Setup
 
@@ -109,7 +86,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         keyLightNode.light!.intensity = 800
         keyLightNode.light!.castsShadow = true
         keyLightNode.position = SCNVector3(5, 10, 5)
-        keyLightNode.look(at: SCNVector3.init(0, 0, 0))
+        keyLightNode.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(keyLightNode)
 
         let fillLightNode = SCNNode()
@@ -118,7 +95,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         fillLightNode.light!.color = UIColor(white: 0.8, alpha: 1.0)
         fillLightNode.light!.intensity = 400
         fillLightNode.position = SCNVector3(-5, 5, -5)
-        fillLightNode.look(at: SCNVector3.init(0, 0, 0))
+        fillLightNode.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(fillLightNode)
 
         let bottomLightNode = SCNNode()
@@ -126,7 +103,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         bottomLightNode.light!.type = .directional
         bottomLightNode.light!.intensity = 200
         bottomLightNode.position = SCNVector3(0, -5, 0)
-        bottomLightNode.look(at: SCNVector3.init(0, 0, 0))
+        bottomLightNode.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(bottomLightNode)
     }
 
@@ -137,6 +114,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         cameraNode.camera!.zNear = 0.01
         cameraNode.camera!.zFar = 1000
         cameraNode.camera!.fieldOfView = 60
+        cameraNode.camera!.usesOrthographicProjection = false
         cameraNode.position = SCNVector3(0, 2, 5)
         cameraNode.look(at: SCNVector3(0, 0, 0))
         sceneView.scene?.rootNode.addChildNode(cameraNode)
@@ -146,14 +124,12 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     private func addGrid(to scene: SCNScene) {
         let gridNode = SCNNode()
         gridNode.name = "grid"
-
         let gridSize: Float = 20
         let gridSpacing: Float = 0.5
         let lineCount = Int(gridSize / gridSpacing)
 
         for i in -lineCount...lineCount {
             let pos = Float(i) * gridSpacing
-
             let xGeometry = SCNCylinder(radius: 0.002, height: CGFloat(gridSize))
             xGeometry.firstMaterial?.diffuse.contents = UIColor(white: 0.3, alpha: 0.3)
             let xNode = SCNNode(geometry: xGeometry)
@@ -168,8 +144,24 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             zNode.eulerAngles = SCNVector3(Float.pi / 2, 0, 0)
             gridNode.addChildNode(zNode)
         }
-
         scene.rootNode.addChildNode(gridNode)
+    }
+
+    private func addBoundingBox(to scene: SCNScene, for model: SCNNode) {
+        let (minB, maxB) = model.boundingBox
+        let size = SCNVector3(maxB.x - minB.x, maxB.y - minB.y, maxB.z - minB.z)
+        let center = SCNVector3((minB.x + maxB.x) / 2, (minB.y + maxB.y) / 2, (minB.z + maxB.z) / 2)
+
+        let box = SCNBox(width: CGFloat(size.x), height: CGFloat(size.y), length: CGFloat(size.z), chamferRadius: 0)
+        box.firstMaterial?.diffuse.contents = UIColor.clear
+        box.firstMaterial?.fillMode = .lines
+        box.firstMaterial?.emission.contents = UIColor.cyan.withAlphaComponent(0.5)
+        box.firstMaterial?.isDoubleSided = true
+
+        let boxNode = SCNNode(geometry: box)
+        boxNode.name = "boundingBox"
+        boxNode.position = center
+        scene.rootNode.addChildNode(boxNode)
     }
 
     private func loadModel(sceneView: SCNView, context: Context) {
@@ -188,11 +180,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     let distance = MeshProcessor.calculateViewDistance(min: minBound, max: maxBound)
 
                     if let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false) {
-                        cameraNode.position = SCNVector3(
-                            center.x,
-                            center.y + distance * 0.3,
-                            center.z + distance
-                        )
+                        cameraNode.position = SCNVector3(center.x, center.y + distance * 0.3, center.z + distance)
                         cameraNode.look(at: center)
                     }
 
@@ -200,7 +188,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     context.coordinator.viewDistance = distance
                     self.isLoading = false
                 } else {
-                    self.loadError = "Failed to load OBJ file"
+                    self.loadError = "Failed to load model file"
                     self.isLoading = false
                 }
             }
@@ -217,7 +205,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         var modelCenter: SCNVector3 = SCNVector3(0, 0, 0)
         var viewDistance: Float = 5.0
 
-        // Joystick state
         private var joystickMoveTimer: Timer?
         private var joystickLookTimer: Timer?
         private var currentMoveDX: CGFloat = 0
@@ -225,14 +212,109 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         private var currentLookDX: CGFloat = 0
         private var currentLookDY: CGFloat = 0
 
-        init(parent: SceneKitViewRepresentable) {
-            self.parent = parent
-        }
+        init(parent: SceneKitViewRepresentable) { self.parent = parent }
 
         deinit {
             joystickMoveTimer?.invalidate()
             joystickLookTimer?.invalidate()
         }
+
+        // MARK: - Camera View Presets
+
+        @objc func handleSetCameraView(_ notification: Notification) {
+            guard let sceneView = sceneView,
+                  let viewStr = notification.userInfo?["view"] as? String,
+                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
+
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0.5
+
+            switch viewStr {
+            case "top":
+                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 1.5, modelCenter.z)
+                cameraNode.look(at: modelCenter)
+            case "front":
+                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y, modelCenter.z + viewDistance)
+                cameraNode.look(at: modelCenter)
+            case "side":
+                cameraNode.position = SCNVector3(modelCenter.x + viewDistance, modelCenter.y, modelCenter.z)
+                cameraNode.look(at: modelCenter)
+            default: break
+            }
+
+            SCNTransaction.commit()
+        }
+
+        // MARK: - Camera Projection
+
+        @objc func handleSetCameraProjection(_ notification: Notification) {
+            guard let sceneView = sceneView,
+                  let projStr = notification.userInfo?["projection"] as? String,
+                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false),
+                  let camera = cameraNode.camera else { return }
+
+            SCNTransaction.begin()
+            SCNTransaction.animationDuration = 0.5
+
+            switch projStr {
+            case "Ortho":
+                camera.usesOrthographicProjection = true
+                camera.orthographicScale = Double(viewDistance)
+            case "FloorPlan":
+                camera.usesOrthographicProjection = true
+                camera.orthographicScale = Double(viewDistance * 1.2)
+                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 2, modelCenter.z)
+                cameraNode.look(at: modelCenter)
+            default: // Perspective
+                camera.usesOrthographicProjection = false
+                camera.fieldOfView = 60
+            }
+
+            SCNTransaction.commit()
+        }
+
+        // MARK: - Visualization Mode
+
+        @objc func handleSetVisualizationMode(_ notification: Notification) {
+            guard let modeStr = notification.userInfo?["mode"] as? String,
+                  let model = parent.modelNode else { return }
+
+            func applyToNode(_ node: SCNNode) {
+                guard let geometry = node.geometry else { return }
+                for material in geometry.materials {
+                    switch modeStr {
+                    case "Flat":
+                        material.diffuse.contents = UIColor(white: 0.85, alpha: 1.0)
+                        material.fillMode = .fill
+                        material.lightingModel = .physicallyBased
+                    case "Normals":
+                        material.diffuse.contents = UIColor.white
+                        material.fillMode = .fill
+                        material.lightingModel = .constant
+                        // Normal visualization - use the normal data for coloring
+                        material.emission.contents = UIColor(red: 0.5, green: 0.5, blue: 1.0, alpha: 1.0)
+                    case "Wireframe":
+                        material.fillMode = .lines
+                        material.diffuse.contents = UIColor.cyan
+                        material.lightingModel = .constant
+                    default: // Textured
+                        material.fillMode = .fill
+                        material.lightingModel = .physicallyBased
+                        material.emission.contents = UIColor.black
+                        // Restore original colors if available
+                        if material.diffuse.contents is UIColor {
+                            material.diffuse.contents = UIColor.white
+                        }
+                    }
+                    material.isDoubleSided = true
+                }
+            }
+
+            applyToNode(model)
+            model.enumerateChildNodes { child, _ in applyToNode(child) }
+        }
+
+        // MARK: - Tap / Measure
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard activeTool == .measure, let sceneView = sceneView else { return }
@@ -245,9 +327,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
             guard let hit = hitResults.first else { return }
             let point = hit.worldCoordinates
-
             parent.measurementPoints.append(point)
-
             addMeasurementMarker(at: point, in: sceneView.scene!)
 
             if parent.measurementPoints.count >= 2 {
@@ -257,14 +337,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 let distance = p1.distance(to: p2)
                 let convertedDistance = measurementUnit.convert(fromMeters: distance)
                 let text = String(format: "%.3f %@", convertedDistance, measurementUnit.abbreviation)
-
                 addMeasurementLine(from: p1, to: p2, in: sceneView.scene!)
-
-                let midPoint = SCNVector3(
-                    (p1.x + p2.x) / 2,
-                    (p1.y + p2.y) / 2 + 0.05,
-                    (p1.z + p2.z) / 2
-                )
+                let midPoint = SCNVector3((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 + 0.05, (p1.z + p2.z) / 2)
                 parent.measurementLabels.append(MeasurementLabel(text: text, position: midPoint))
             }
         }
@@ -275,14 +349,10 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0.5
-
-            cameraNode.position = SCNVector3(
-                modelCenter.x,
-                modelCenter.y + viewDistance * 0.3,
-                modelCenter.z + viewDistance
-            )
+            cameraNode.camera?.usesOrthographicProjection = false
+            cameraNode.camera?.fieldOfView = 60
+            cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 0.3, modelCenter.z + viewDistance)
             cameraNode.look(at: modelCenter)
-
             SCNTransaction.commit()
         }
 
@@ -292,17 +362,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             guard let userInfo = notification.userInfo,
                   let dx = userInfo["dx"] as? CGFloat,
                   let dy = userInfo["dy"] as? CGFloat else { return }
-
-            currentMoveDX = dx
-            currentMoveDY = dy
-
+            currentMoveDX = dx; currentMoveDY = dy
             if dx == 0 && dy == 0 {
-                joystickMoveTimer?.invalidate()
-                joystickMoveTimer = nil
+                joystickMoveTimer?.invalidate(); joystickMoveTimer = nil
             } else if joystickMoveTimer == nil {
-                joystickMoveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                    self?.applyMoveInput()
-                }
+                joystickMoveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.applyMoveInput() }
             }
         }
 
@@ -310,43 +374,21 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             guard let userInfo = notification.userInfo,
                   let dx = userInfo["dx"] as? CGFloat,
                   let dy = userInfo["dy"] as? CGFloat else { return }
-
-            currentLookDX = dx
-            currentLookDY = dy
-
+            currentLookDX = dx; currentLookDY = dy
             if dx == 0 && dy == 0 {
-                joystickLookTimer?.invalidate()
-                joystickLookTimer = nil
+                joystickLookTimer?.invalidate(); joystickLookTimer = nil
             } else if joystickLookTimer == nil {
-                joystickLookTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                    self?.applyLookInput()
-                }
+                joystickLookTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.applyLookInput() }
             }
         }
 
         private func applyMoveInput() {
-            guard let sceneView = sceneView,
-                  let cameraNode = sceneView.pointOfView else { return }
-
+            guard let cameraNode = sceneView?.pointOfView else { return }
             let speed: Float = viewDistance * 0.02
-
-            // Left/Right: move along camera's local X axis (strafe)
-            let right = SCNVector3(
-                cameraNode.transform.m11,
-                cameraNode.transform.m12,
-                cameraNode.transform.m13
-            )
-
-            // Forward/Backward (up on joystick = forward into scene):
-            // Use camera's local -Z axis (the direction camera looks)
-            let forward = SCNVector3(
-                -cameraNode.transform.m31,
-                -cameraNode.transform.m32,
-                -cameraNode.transform.m33
-            )
-
-            let dx = Float(currentMoveDX) * speed  // left/right strafe
-            let dz = Float(-currentMoveDY) * speed  // up on stick = move forward into scene
+            let right = SCNVector3(cameraNode.transform.m11, cameraNode.transform.m12, cameraNode.transform.m13)
+            let forward = SCNVector3(-cameraNode.transform.m31, -cameraNode.transform.m32, -cameraNode.transform.m33)
+            let dx = Float(currentMoveDX) * speed
+            let dz = Float(-currentMoveDY) * speed
 
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
@@ -359,25 +401,18 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         private func applyLookInput() {
-            guard let sceneView = sceneView,
-                  let cameraNode = sceneView.pointOfView else { return }
-
+            guard let cameraNode = sceneView?.pointOfView else { return }
             let rotSpeed: Float = 0.02
-
-            let dx = Float(currentLookDX) * rotSpeed
-            let dy = Float(currentLookDY) * rotSpeed
 
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
-
-            // Rotate around Y axis (horizontal look)
-            cameraNode.eulerAngles.y -= dx
-            // Rotate around X axis (vertical look), clamped
-            let newPitch = cameraNode.eulerAngles.x - dy
+            cameraNode.eulerAngles.y -= Float(currentLookDX) * rotSpeed
+            let newPitch = cameraNode.eulerAngles.x - Float(currentLookDY) * rotSpeed
             cameraNode.eulerAngles.x = max(-.pi / 2.5, min(.pi / 2.5, newPitch))
-
             SCNTransaction.commit()
         }
+
+        // MARK: - Measurement Helpers
 
         private func addMeasurementMarker(at position: SCNVector3, in scene: SCNScene) {
             let sphere = SCNSphere(radius: 0.01)
@@ -394,18 +429,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let source = SCNGeometrySource(vertices: vertices)
             let indices: [Int32] = [0, 1]
             let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
-            let element = SCNGeometryElement(
-                data: indexData,
-                primitiveType: .line,
-                primitiveCount: 1,
-                bytesPerIndex: MemoryLayout<Int32>.size
-            )
-
+            let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
             let geometry = SCNGeometry(sources: [source], elements: [element])
             geometry.firstMaterial?.diffuse.contents = UIColor.yellow
             geometry.firstMaterial?.emission.contents = UIColor.yellow
             geometry.firstMaterial?.isDoubleSided = true
-
             let lineNode = SCNNode(geometry: geometry)
             lineNode.name = "measurementLine"
             scene.rootNode.addChildNode(lineNode)

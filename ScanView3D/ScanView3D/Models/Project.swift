@@ -122,6 +122,8 @@ struct ScanSettings: Codable {
     var scanRange: ScanRange = .room
     var scanQuality: ScanQuality = .standard
     var meshMode: MeshMode = .free
+    var rangeValue: Float = 3.0       // Continuous range in meters (0.3 - 5.0)
+    var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
 
     // MARK: - Mesh Mode
 

@@ -507,4 +507,35 @@ class StorageManager: ObservableObject {
         case obj
         case ply
     }
+
+    /// Export a scan file to USDZ format for AR sharing
+    func exportAsUSDZ(scan: Scan, project: Project) -> URL? {
+        let sourceURL = getScanFileURL(scan: scan, project: project)
+        guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
+
+        let exportDir = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory)
+        try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
+
+        let sanitizedName = scan.name
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "/", with: "-")
+        let usdzURL = exportDir.appendingPathComponent("\(sanitizedName).usdz")
+
+        // Load as SceneKit scene and export to USDZ
+        do {
+            let scene = try SCNScene(url: sourceURL, options: [.checkConsistency: true])
+
+            // Ensure materials are double-sided
+            scene.rootNode.enumerateChildNodes { node, _ in
+                node.geometry?.materials.forEach { $0.isDoubleSided = true }
+            }
+
+            try? fileManager.removeItem(at: usdzURL)
+            let success = scene.write(to: usdzURL, delegate: nil)
+            return success ? usdzURL : nil
+        } catch {
+            DebugLogger.shared.error("USDZ export failed: \(error)", category: "Export")
+            return nil
+        }
+    }
 }

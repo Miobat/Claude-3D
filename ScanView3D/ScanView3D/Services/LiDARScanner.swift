@@ -29,6 +29,7 @@ class LiDARScanner: NSObject, ObservableObject {
     private var meshDetail: ScanSettings.MeshDetail = .medium
     private var captureTexture: Bool = true
     private(set) var currentRange: ScanSettings.ScanRange = .room
+    private(set) var rangeMeters: Float = 3.0
     private var scanQuality: ScanSettings.ScanQuality = .standard
     private(set) var meshMode: ScanSettings.MeshMode = .free
     let textureMapper = TextureMapper()
@@ -86,7 +87,9 @@ class LiDARScanner: NSObject, ObservableObject {
         captureTexture: Bool = true,
         range: ScanSettings.ScanRange = .room,
         quality: ScanSettings.ScanQuality = .standard,
-        meshMode: ScanSettings.MeshMode = .free
+        meshMode: ScanSettings.MeshMode = .free,
+        rangeMeters: Float = 3.0,
+        confidenceLevel: Int = 1
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -95,10 +98,11 @@ class LiDARScanner: NSObject, ObservableObject {
 
         self.meshDetail = detail
         self.captureTexture = captureTexture
+        self.rangeMeters = rangeMeters
         self.currentRange = range
         self.scanQuality = quality
         self.meshMode = meshMode
-        self.confidenceThreshold = quality.confidenceThreshold
+        self.confidenceThreshold = [0.3, 0.5, 0.7][min(confidenceLevel, 2)]
         self.textureCapturePaused = false
 
         // Configure texture mapper
@@ -290,7 +294,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func getCombinedMeshData() -> MeshData? {
         guard !meshAnchors.isEmpty else { return nil }
 
-        let maxDist = currentRange.maxDistance
+        let maxDist = rangeMeters
 
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
@@ -398,7 +402,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func getPlaneBasedMeshData() -> MeshData? {
         guard !planeAnchors.isEmpty else { return nil }
 
-        let maxDist = currentRange.maxDistance
+        let maxDist = rangeMeters
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
         var allFaces: [[UInt32]] = []
@@ -514,7 +518,7 @@ class LiDARScanner: NSObject, ObservableObject {
     func getFilteredCounts() -> (vertices: Int, faces: Int) {
         var totalVertices = 0
         var totalFaces = 0
-        let maxDist = currentRange.maxDistance
+        let maxDist = rangeMeters
 
         for anchor in meshAnchors {
             let transform = anchor.transform
