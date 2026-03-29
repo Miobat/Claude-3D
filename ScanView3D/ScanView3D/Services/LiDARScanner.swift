@@ -15,12 +15,17 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var faceCount: Int = 0
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
+    @Published var capturedFrameCount: Int = 0
 
     // MARK: - Properties
 
     private(set) var arSession: ARSession
     private var meshDetail: ScanSettings.MeshDetail = .medium
     private var captureTexture: Bool = true
+    private var scanRange: ScanSettings.ScanRange = .room
+    private var scanQuality: ScanSettings.ScanQuality = .standard
+    let textureMapper = TextureMapper()
+    private var frameCaptureTimer: Timer?
 
     // MARK: - Initialization
 
@@ -42,7 +47,12 @@ class LiDARScanner: NSObject, ObservableObject {
 
     // MARK: - Session Control
 
-    func startScanning(detail: ScanSettings.MeshDetail = .medium, captureTexture: Bool = true) {
+    func startScanning(
+        detail: ScanSettings.MeshDetail = .medium,
+        captureTexture: Bool = true,
+        range: ScanSettings.ScanRange = .room,
+        quality: ScanSettings.ScanQuality = .standard
+    ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
             return
@@ -50,6 +60,14 @@ class LiDARScanner: NSObject, ObservableObject {
 
         self.meshDetail = detail
         self.captureTexture = captureTexture
+        self.scanRange = range
+        self.scanQuality = quality
+        self.confidenceThreshold = quality.confidenceThreshold
+
+        // Configure texture mapper
+        textureMapper.configure(quality: quality)
+        textureMapper.reset()
+        capturedFrameCount = 0
 
         let configuration = ARWorldTrackingConfiguration()
 
@@ -60,10 +78,8 @@ class LiDARScanner: NSObject, ObservableObject {
             configuration.sceneReconstruction = .mesh
         }
 
-        // Configure environment texturing for color capture
-        if captureTexture {
-            configuration.environmentTexturing = .automatic
-        }
+        // Always enable environment texturing for camera capture
+        configuration.environmentTexturing = .automatic
 
         // Enable plane detection for better mesh alignment
         configuration.planeDetection = [.horizontal, .vertical]
@@ -82,12 +98,16 @@ class LiDARScanner: NSObject, ObservableObject {
         isPaused = false
         scanProgress = "Scanning... Move slowly around the area"
         scanError = nil
+
+        // Start periodic frame capture for texture mapping
+        startFrameCapture()
     }
 
     func pauseScanning() {
         arSession.pause()
         isPaused = true
         scanProgress = "Scanning paused"
+        stopFrameCapture()
     }
 
     func resumeScanning() {
@@ -95,6 +115,7 @@ class LiDARScanner: NSObject, ObservableObject {
         arSession.run(config)
         isPaused = false
         scanProgress = "Scanning resumed..."
+        startFrameCapture()
     }
 
     func stopScanning() {
@@ -102,6 +123,7 @@ class LiDARScanner: NSObject, ObservableObject {
         isScanning = false
         isPaused = false
         scanProgress = "Scan complete"
+        stopFrameCapture()
     }
 
     func resetScanning() {
@@ -109,14 +131,52 @@ class LiDARScanner: NSObject, ObservableObject {
         meshAnchors.removeAll()
         vertexCount = 0
         faceCount = 0
+        capturedFrameCount = 0
+        textureMapper.reset()
         scanProgress = "Ready to scan"
+    }
+
+    // MARK: - Frame Capture
+
+    private func startFrameCapture() {
+        stopFrameCapture()
+        // Use a timer to periodically check for new frames
+        frameCaptureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            self?.captureCurrentFrame()
+        }
+    }
+
+    private func stopFrameCapture() {
+        frameCaptureTimer?.invalidate()
+        frameCaptureTimer = nil
+    }
+
+    private func captureCurrentFrame() {
+        guard isScanning && !isPaused,
+              captureTexture,
+              let frame = arSession.currentFrame else { return }
+        textureMapper.captureFrame(from: frame)
+        DispatchQueue.main.async {
+            self.capturedFrameCount = self.textureMapper.frameCount
+        }
     }
 
     // MARK: - Mesh Data Access
 
-    /// Returns all mesh data combined from all anchors
+    /// Returns all mesh data combined from all anchors, filtered by scan range
     func getCombinedMeshData() -> MeshData? {
         guard !meshAnchors.isEmpty else { return nil }
+
+        // Get camera position for range filtering
+        let cameraPosition: SIMD3<Float>
+        if let frame = arSession.currentFrame {
+            let t = frame.camera.transform
+            cameraPosition = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        } else {
+            cameraPosition = SIMD3<Float>(0, 0, 0)
+        }
+
+        let maxDist = scanRange.maxDistance
 
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
@@ -128,41 +188,75 @@ class LiDARScanner: NSObject, ObservableObject {
             let geometry = anchor.geometry
             let transform = anchor.transform
 
-            // Transform vertices to world space
+            // Check if anchor center is within range
+            let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+            let anchorDist = length(anchorPos - cameraPosition)
+            if anchorDist > maxDist + 2.0 { continue } // Skip anchors clearly out of range
+
+            var localVertices: [SIMD3<Float>] = []
+            var localNormals: [SIMD3<Float>] = []
+            var localColors: [SIMD4<Float>] = []
+            var vertexInRange = [Bool]()
+            var localIndexMap = [UInt32](repeating: 0, count: geometry.vertices.count)
+
             for i in 0..<geometry.vertices.count {
                 let localVertex = geometry.vertex(at: UInt32(i))
-                let worldVertex = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
-                allVertices.append(SIMD3<Float>(worldVertex.x, worldVertex.y, worldVertex.z))
+                let worldVertex4 = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
+                let worldVertex = SIMD3<Float>(worldVertex4.x, worldVertex4.y, worldVertex4.z)
 
-                // Transform normals
-                let localNormal = geometry.normal(at: UInt32(i))
-                let rotationMatrix = simd_float3x3(
-                    SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
-                    SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
-                    SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-                )
-                let worldNormal = rotationMatrix * localNormal
-                allNormals.append(worldNormal)
+                let dist = length(worldVertex - cameraPosition)
+                if dist <= maxDist {
+                    localIndexMap[i] = UInt32(localVertices.count)
+                    localVertices.append(worldVertex)
+                    vertexInRange.append(true)
 
-                // Get vertex color from classification if available
-                if let classification = anchor.geometry.classification {
-                    let classIndex = classification.buffer.contents()
-                        .advanced(by: classification.offset + classification.stride * Int(i))
-                        .assumingMemoryBound(to: UInt8.self).pointee
-                    allColors.append(colorForClassification(classIndex))
+                    // Transform normals
+                    let localNormal = geometry.normal(at: UInt32(i))
+                    let rotationMatrix = simd_float3x3(
+                        SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+                        SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+                        SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+                    )
+                    let worldNormal = rotationMatrix * localNormal
+                    localNormals.append(worldNormal)
+
+                    // Get vertex color from classification if available
+                    if let classification = anchor.geometry.classification {
+                        let classIndex = classification.buffer.contents()
+                            .advanced(by: classification.offset + classification.stride * Int(i))
+                            .assumingMemoryBound(to: UInt8.self).pointee
+                        localColors.append(colorForClassification(classIndex))
+                    } else {
+                        localColors.append(SIMD4<Float>(0.7, 0.7, 0.7, 1.0))
+                    }
                 } else {
-                    allColors.append(SIMD4<Float>(0.7, 0.7, 0.7, 1.0))
+                    vertexInRange.append(false)
                 }
             }
 
-            // Process face indices with offset
+            // Process faces - only include faces where all vertices are in range
             for f in 0..<geometry.faces.count {
                 let indices = geometry.vertexIndicesOf(face: f)
-                let offsetIndices = indices.map { $0 + vertexOffset }
-                allFaces.append(offsetIndices)
+                let allInRange = indices.allSatisfy { idx in
+                    Int(idx) < vertexInRange.count && vertexInRange[Int(idx)]
+                }
+                guard allInRange else { continue }
+                let mappedIndices = indices.map { localIndexMap[Int($0)] + vertexOffset }
+                allFaces.append(mappedIndices)
             }
 
-            vertexOffset += UInt32(geometry.vertices.count)
+            allVertices.append(contentsOf: localVertices)
+            allNormals.append(contentsOf: localNormals)
+            allColors.append(contentsOf: localColors)
+            vertexOffset += UInt32(localVertices.count)
+        }
+
+        guard !allVertices.isEmpty else { return nil }
+
+        // If we have camera texture data, replace classification colors with camera colors
+        if captureTexture && textureMapper.frameCount > 0 {
+            let cameraColors = textureMapper.sampleVertexColors(vertices: allVertices, normals: allNormals)
+            allColors = cameraColors
         }
 
         // Calculate bounding box
@@ -181,6 +275,14 @@ class LiDARScanner: NSObject, ObservableObject {
             colors: allColors,
             boundingBoxMin: minBound,
             boundingBoxMax: maxBound
+        )
+    }
+
+    /// Build texture atlas for current mesh data
+    func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
+        return textureMapper.buildTextureAtlas(
+            meshData: meshData,
+            tileSize: scanQuality.textureAtlasTileSize
         )
     }
 

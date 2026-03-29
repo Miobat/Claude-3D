@@ -12,15 +12,27 @@ class MockLiDARScanner: ObservableObject {
     @Published var faceCount: Int = 0
     @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
+    @Published var capturedFrameCount: Int = 0
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
     private var meshData: MeshData?
+    private var scanRange: ScanSettings.ScanRange = .room
+    private var scanQuality: ScanSettings.ScanQuality = .standard
 
     static var isLiDARAvailable: Bool { true }
     static var isLiDARWithClassificationAvailable: Bool { true }
 
-    func startScanning(detail: ScanSettings.MeshDetail = .medium, captureTexture: Bool = true) {
+    let textureMapper = TextureMapper()
+
+    func startScanning(
+        detail: ScanSettings.MeshDetail = .medium,
+        captureTexture: Bool = true,
+        range: ScanSettings.ScanRange = .room,
+        quality: ScanSettings.ScanQuality = .standard
+    ) {
+        self.scanRange = range
+        self.scanQuality = quality
         isScanning = true
         isPaused = false
         scanError = nil
@@ -41,10 +53,13 @@ class MockLiDARScanner: ObservableObject {
             self.faceCount = totalFaces
             self.scanProgress = "Scanning... \(Int(progress * 100))%"
 
+            // Simulate frame capture count
+            self.capturedFrameCount = Int(progress * Float(quality.maxTextureFrames))
+
             if self.simulatedProgress >= 1.0 {
                 self.scanTimer?.invalidate()
                 self.scanProgress = "Scan complete - \(self.vertexCount) vertices captured"
-                self.meshData = Self.generateSampleRoomMesh()
+                self.meshData = Self.generateSampleRoomMesh(range: range)
             }
         }
     }
@@ -66,7 +81,7 @@ class MockLiDARScanner: ObservableObject {
         isPaused = false
 
         if meshData == nil {
-            meshData = Self.generateSampleRoomMesh()
+            meshData = Self.generateSampleRoomMesh(range: scanRange)
             vertexCount = meshData!.vertexCount
             faceCount = meshData!.faceCount
         }
@@ -78,11 +93,16 @@ class MockLiDARScanner: ObservableObject {
         meshData = nil
         vertexCount = 0
         faceCount = 0
+        capturedFrameCount = 0
         scanProgress = "Ready to scan (Simulator Mode)"
     }
 
     func getCombinedMeshData() -> MeshData? {
-        return meshData ?? Self.generateSampleRoomMesh()
+        return meshData ?? Self.generateSampleRoomMesh(range: scanRange)
+    }
+
+    func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
+        return nil // No real camera in simulator
     }
 
     // MARK: - Sample Room Mesh Generation
@@ -91,16 +111,19 @@ class MockLiDARScanner: ObservableObject {
     private static let sampleRoomFaceCount = 2000
 
     /// Generates a sample room mesh with floor, walls, a table, and a chair
-    static func generateSampleRoomMesh() -> MeshData {
+    static func generateSampleRoomMesh(range: ScanSettings.ScanRange = .room) -> MeshData {
         var vertices: [SIMD3<Float>] = []
         var normals: [SIMD3<Float>] = []
         var faces: [[UInt32]] = []
         var colors: [SIMD4<Float>] = []
 
+        // Scale room based on range
+        let scale = min(range.maxDistance / 3.0, 1.0)
+
         // Room dimensions (meters)
-        let roomWidth: Float = 4.0
-        let roomDepth: Float = 5.0
-        let roomHeight: Float = 2.8
+        let roomWidth: Float = 4.0 * scale
+        let roomDepth: Float = 5.0 * scale
+        let roomHeight: Float = 2.8 * scale
 
         // Floor
         let floorColor = SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
@@ -182,11 +205,11 @@ class MockLiDARScanner: ObservableObject {
 
         // Table (in center of room)
         let tableColor = SIMD4<Float>(0.6, 0.4, 0.1, 1.0)
-        let tableHeight: Float = 0.75
-        let tableWidth: Float = 1.2
-        let tableDepth: Float = 0.7
+        let tableHeight: Float = 0.75 * scale
+        let tableWidth: Float = 1.2 * scale
+        let tableDepth: Float = 0.7 * scale
         let tableX: Float = 0.0
-        let tableZ: Float = -0.5
+        let tableZ: Float = -0.5 * scale
 
         // Table top
         addBox(
@@ -212,22 +235,22 @@ class MockLiDARScanner: ObservableObject {
 
         // Chair
         let chairColor = SIMD4<Float>(0.3, 0.6, 0.3, 1.0)
-        let seatHeight: Float = 0.45
+        let seatHeight: Float = 0.45 * scale
         let chairX: Float = 0.0
-        let chairZ: Float = 0.6
+        let chairZ: Float = 0.6 * scale
 
         // Chair seat
         addBox(
             center: SIMD3(chairX, seatHeight, chairZ),
-            size: SIMD3(0.45, 0.04, 0.45),
+            size: SIMD3(0.45 * scale, 0.04, 0.45 * scale),
             color: chairColor,
             vertices: &vertices, normals: &normals, faces: &faces, colors: &colors
         )
 
         // Chair back
         addBox(
-            center: SIMD3(chairX, seatHeight + 0.35, chairZ + 0.2),
-            size: SIMD3(0.45, 0.7, 0.03),
+            center: SIMD3(chairX, seatHeight + 0.35 * scale, chairZ + 0.2 * scale),
+            size: SIMD3(0.45 * scale, 0.7 * scale, 0.03),
             color: chairColor,
             vertices: &vertices, normals: &normals, faces: &faces, colors: &colors
         )
@@ -235,8 +258,8 @@ class MockLiDARScanner: ObservableObject {
         // Chair legs
         let chairLegSize = SIMD3<Float>(0.03, seatHeight, 0.03)
         for (dx, dz) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] as [(Float, Float)] {
-            let lx = chairX + Float(dx) * 0.18
-            let lz = chairZ + Float(dz) * 0.18
+            let lx = chairX + Float(dx) * 0.18 * scale
+            let lz = chairZ + Float(dz) * 0.18 * scale
             addBox(
                 center: SIMD3(lx, seatHeight / 2, lz),
                 size: chairLegSize,

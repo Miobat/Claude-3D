@@ -111,7 +111,13 @@ class StorageManager: ObservableObject {
 
     // MARK: - Scan Management
 
-    func saveScan(meshData: MeshData, name: String, toProject project: Project, format: ExportFormat = .obj) throws -> Scan {
+    func saveScan(
+        meshData: MeshData,
+        name: String,
+        toProject project: Project,
+        format: ExportFormat = .obj,
+        textureAtlas: TextureAtlasResult? = nil
+    ) throws -> Scan {
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
         let fileName = "\(scanId.uuidString).\(fileExtension)"
@@ -125,6 +131,7 @@ class StorageManager: ObservableObject {
             fileURL = try OBJExporter.export(
                 meshData: meshData,
                 fileName: scanId.uuidString,
+                textureAtlas: textureAtlas,
                 directory: scanDir
             )
         case .ply:
@@ -145,8 +152,14 @@ class StorageManager: ObservableObject {
             fileSize: fileSize
         )
         scan.hasColor = !meshData.colors.isEmpty
+        scan.hasTexture = textureAtlas != nil
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
+
+        // Store texture file name if we have a texture atlas
+        if textureAtlas != nil {
+            scan.textureFileName = "\(scanId.uuidString)_texture.jpg"
+        }
 
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
@@ -180,6 +193,12 @@ class StorageManager: ObservableObject {
         let mtlURL = fileURL.deletingPathExtension().appendingPathExtension("mtl")
         try? fileManager.removeItem(at: mtlURL)
 
+        // Delete texture file if exists
+        if let texName = scan.textureFileName {
+            let texURL = fileURL.deletingLastPathComponent().appendingPathComponent(texName)
+            try? fileManager.removeItem(at: texURL)
+        }
+
         if let index = projects.firstIndex(where: { $0.id == project.id }) {
             projects[index].scans.removeAll { $0.id == scan.id }
             projects[index].modifiedAt = Date()
@@ -212,6 +231,15 @@ class StorageManager: ObservableObject {
             if fileManager.fileExists(atPath: mtlSource.path) {
                 let mtlDest = destURL.deletingPathExtension().appendingPathExtension("mtl")
                 try fileManager.moveItem(at: mtlSource, to: mtlDest)
+            }
+
+            // Move texture file if exists
+            if let texName = scan.textureFileName {
+                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
+                if fileManager.fileExists(atPath: texSource.path) {
+                    let texDest = destDir.appendingPathComponent(texName)
+                    try fileManager.moveItem(at: texSource, to: texDest)
+                }
             }
         } catch {
             // If move fails, try copy
@@ -252,6 +280,16 @@ class StorageManager: ObservableObject {
                 try fileManager.copyItem(at: mtlSource, to: mtlDest)
             }
 
+            // Copy texture file
+            if let texName = scan.textureFileName {
+                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
+                if fileManager.fileExists(atPath: texSource.path) {
+                    let newTexName = "\(newScanId.uuidString)_texture.jpg"
+                    let texDest = destDir.appendingPathComponent(newTexName)
+                    try fileManager.copyItem(at: texSource, to: texDest)
+                }
+            }
+
             var newScan = Scan(
                 name: "\(scan.name) (Copy)",
                 fileName: newFileName,
@@ -264,6 +302,10 @@ class StorageManager: ObservableObject {
             newScan.boundingBoxMin = scan.boundingBoxMin
             newScan.boundingBoxMax = scan.boundingBoxMax
             newScan.thumbnailData = scan.thumbnailData
+
+            if scan.textureFileName != nil {
+                newScan.textureFileName = "\(newScanId.uuidString)_texture.jpg"
+            }
 
             if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
                 projects[dstIndex].addScan(newScan)
@@ -301,6 +343,18 @@ class StorageManager: ObservableObject {
         if fileManager.fileExists(atPath: mtlSourceURL.path) {
             let mtlDestURL = scanDir.appendingPathComponent("\(scanId.uuidString).mtl")
             try? fileManager.copyItem(at: mtlSourceURL, to: mtlDestURL)
+        }
+
+        // Copy texture files if they exist
+        let sourceDir = sourceURL.deletingLastPathComponent()
+        let textureSuffixes = ["_texture.jpg", "_texture.png"]
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        for suffix in textureSuffixes {
+            let texSourceURL = sourceDir.appendingPathComponent("\(baseName)\(suffix)")
+            if fileManager.fileExists(atPath: texSourceURL.path) {
+                let texDestURL = scanDir.appendingPathComponent("\(scanId.uuidString)\(suffix)")
+                try? fileManager.copyItem(at: texSourceURL, to: texDestURL)
+            }
         }
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
@@ -350,6 +404,17 @@ class StorageManager: ObservableObject {
             }
         }
 
+        // Copy texture file if exists
+        if let texName = scan.textureFileName {
+            let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
+            if fileManager.fileExists(atPath: texSource.path) {
+                let texExportName = "\(sanitizedName)_texture.jpg"
+                let texExport = exportDir.appendingPathComponent(texExportName)
+                try? fileManager.removeItem(at: texExport)
+                try? fileManager.copyItem(at: texSource, to: texExport)
+            }
+        }
+
         return exportURL
     }
 
@@ -377,6 +442,15 @@ class StorageManager: ObservableObject {
             if fileManager.fileExists(atPath: mtlSource.path) {
                 let mtlDest = exportDir.appendingPathComponent("\(sanitizedName).mtl")
                 try? fileManager.copyItem(at: mtlSource, to: mtlDest)
+            }
+
+            // Copy texture if exists
+            if let texName = scan.textureFileName {
+                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
+                if fileManager.fileExists(atPath: texSource.path) {
+                    let texDest = exportDir.appendingPathComponent("\(sanitizedName)_texture.jpg")
+                    try? fileManager.copyItem(at: texSource, to: texDest)
+                }
             }
         }
 
