@@ -28,6 +28,7 @@
 		A10020 /* AllScansView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10020; };
 		A10021 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10021; };
 		A10022 /* DebugLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10022; };
+		A10023 /* TextureMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10023; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -53,6 +54,7 @@
 		B10020 /* AllScansView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AllScansView.swift; sourceTree = "<group>"; };
 		B10021 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		B10022 /* DebugLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogView.swift; sourceTree = "<group>"; };
+		B10023 /* TextureMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureMapper.swift; sourceTree = "<group>"; };
 		D10001 /* ScanView3D.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ScanView3D.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -145,6 +147,7 @@
 				B10007 /* MeshProcessor.swift */,
 				B10008 /* OBJExporter.swift */,
 				B10009 /* StorageManager.swift */,
+				B10023 /* TextureMapper.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -265,6 +268,7 @@
 				A10020 /* AllScansView.swift in Sources */,
 			A10021 /* DebugLogger.swift in Sources */,
 			A10022 /* DebugLogView.swift in Sources */,
+			A10023 /* TextureMapper.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

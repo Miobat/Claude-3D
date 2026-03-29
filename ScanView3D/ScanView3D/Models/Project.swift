@@ -72,6 +72,7 @@ struct Scan: Identifiable, Codable {
     var boundingBoxMax: SIMD3<Float>?
     var thumbnailData: Data?
     var notes: String?
+    var textureFileName: String?
 
     init(name: String, fileName: String, vertexCount: Int = 0, faceCount: Int = 0, fileSize: Int64 = 0) {
         self.id = UUID()
@@ -118,6 +119,109 @@ struct ScanSettings: Codable {
     var meshDetail: MeshDetail = .medium
     var unit: MeasurementUnit = .meters
     var autoSave: Bool = true
+    var scanRange: ScanRange = .room
+    var scanQuality: ScanQuality = .standard
+
+    // MARK: - Scan Range
+
+    enum ScanRange: String, Codable, CaseIterable {
+        case closeUp = "Close-up"
+        case near = "Near"
+        case room = "Room"
+        case extended = "Extended"
+
+        var maxDistance: Float {
+            switch self {
+            case .closeUp: return 0.5
+            case .near: return 1.5
+            case .room: return 3.0
+            case .extended: return 5.0
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .closeUp: return "Small objects, high precision (0.5m)"
+            case .near: return "Furniture and desk items (1.5m)"
+            case .room: return "Room interiors (3m)"
+            case .extended: return "Large spaces (5m)"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .closeUp: return "scope"
+            case .near: return "cube"
+            case .room: return "house"
+            case .extended: return "building.2"
+            }
+        }
+    }
+
+    // MARK: - Scan Quality
+
+    enum ScanQuality: String, Codable, CaseIterable {
+        case preview = "Preview"
+        case standard = "Standard"
+        case high = "High"
+        case ultra = "Ultra"
+
+        var confidenceThreshold: Float {
+            switch self {
+            case .preview: return 0.3
+            case .standard: return 0.5
+            case .high: return 0.6
+            case .ultra: return 0.7
+            }
+        }
+
+        var textureCaptureInterval: TimeInterval {
+            switch self {
+            case .preview: return 1.5
+            case .standard: return 0.8
+            case .high: return 0.5
+            case .ultra: return 0.3
+            }
+        }
+
+        var maxTextureFrames: Int {
+            switch self {
+            case .preview: return 15
+            case .standard: return 30
+            case .high: return 50
+            case .ultra: return 80
+            }
+        }
+
+        var textureAtlasTileSize: Int {
+            switch self {
+            case .preview: return 512
+            case .standard: return 768
+            case .high: return 1024
+            case .ultra: return 1024
+            }
+        }
+
+        var description: String {
+            switch self {
+            case .preview: return "Fast scan, lower detail"
+            case .standard: return "Good balance of speed and detail"
+            case .high: return "Detailed scan, slower"
+            case .ultra: return "Maximum detail, large files"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .preview: return "hare"
+            case .standard: return "circle.grid.2x2"
+            case .high: return "circle.grid.3x3"
+            case .ultra: return "sparkles"
+            }
+        }
+    }
+
+    // MARK: - Mesh Detail (kept for backward compatibility)
 
     enum MeshDetail: String, Codable, CaseIterable {
         case low = "Low"
@@ -132,6 +236,8 @@ struct ScanSettings: Codable {
             }
         }
     }
+
+    // MARK: - Measurement Unit
 
     enum MeasurementUnit: String, Codable, CaseIterable {
         case meters = "Meters"
