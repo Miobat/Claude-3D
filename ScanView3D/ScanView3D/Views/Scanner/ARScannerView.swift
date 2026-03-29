@@ -125,8 +125,9 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
 
             do {
                 let meshResource = try MeshResource.generate(from: [descriptor])
+                // Use brighter, more visible overlay so user can clearly see scanned area
                 var material = SimpleMaterial()
-                material.color = .init(tint: tint)
+                material.color = .init(tint: UIColor.cyan.withAlphaComponent(0.35))
                 return ModelEntity(mesh: meshResource, materials: [material])
             } catch {
                 return nil

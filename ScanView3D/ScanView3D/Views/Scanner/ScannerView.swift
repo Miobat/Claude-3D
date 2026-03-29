@@ -25,6 +25,8 @@ struct ScannerView: View {
     @State private var isSaving = false
     @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
+    @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
+    @State private var savingProgress = ""
 
     var body: some View {
         ZStack {
@@ -595,22 +597,29 @@ struct ScannerView: View {
                     }
                 }
 
-                Section("Export Format") {
-                    Picker("Format", selection: $exportFormat) {
-                        Text("OBJ (With Texture)").tag(StorageManager.ExportFormat.obj)
-                        Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                Section("Post-Processing") {
+                    Picker("Quality", selection: $processingLevel) {
+                        ForEach(MeshProcessor.ProcessingLevel.allCases, id: \.self) { level in
+                            HStack {
+                                Image(systemName: level.icon)
+                                Text(level.rawValue)
+                            }
+                            .tag(level)
+                        }
                     }
                     .pickerStyle(.segmented)
 
-                    if exportFormat == .obj && settings.captureTexture {
-                        HStack {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                            Text("Photo texture will be included")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                    Text(processingLevel.description)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Section("Export Format") {
+                    Picker("Format", selection: $exportFormat) {
+                        Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
+                        Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
                     }
+                    .pickerStyle(.segmented)
                 }
 
                 if let meshData = scanner.getCombinedMeshData() {
@@ -634,7 +643,7 @@ struct ScannerView: View {
                         HStack {
                             ProgressView()
                                 .padding(.trailing, 8)
-                            Text("Saving scan...")
+                            Text(savingProgress.isEmpty ? "Saving..." : savingProgress)
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -716,20 +725,29 @@ struct ScannerView: View {
 
     private func saveScan() {
         guard let project = selectedProject,
-              let meshData = scanner.getCombinedMeshData() else {
+              let rawMeshData = scanner.getCombinedMeshData() else {
             errorMessage = "No scan data or project selected"
             showingError = true
             return
         }
 
         isSaving = true
+        savingProgress = "Processing mesh..."
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                // Post-process the mesh to clean up quality
+                let meshData = MeshProcessor.postProcess(rawMeshData, level: processingLevel)
+
+                DispatchQueue.main.async { self.savingProgress = "Building texture..." }
+
+                // Build texture atlas for OBJ if we have camera data
                 var textureAtlas: TextureAtlasResult?
                 if exportFormat == .obj && settings.captureTexture {
                     textureAtlas = scanner.buildTextureAtlas(meshData: meshData)
                 }
+
+                DispatchQueue.main.async { self.savingProgress = "Saving file..." }
 
                 let _ = try storageManager.saveScan(
                     meshData: meshData,
@@ -741,6 +759,7 @@ struct ScannerView: View {
 
                 DispatchQueue.main.async {
                     isSaving = false
+                    savingProgress = ""
                     showingSaveDialog = false
                     scanner.resetScanning()
                 }
