@@ -57,7 +57,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
             lastUpdateTime = now
 
             let scanOrigin = scanner.scanOrigin
-            let maxDist = scanner.currentRange.maxDistance
+            let maxDist = scanner.rangeMeters
 
             // Track which anchors are still valid
             var activeIDs = Set<UUID>()

@@ -23,6 +23,7 @@ class MockLiDARScanner: ObservableObject {
     private var simulatedProgress: Float = 0
     private var meshData: MeshData?
     private(set) var currentRange: ScanSettings.ScanRange = .room
+    private(set) var rangeMeters: Float = 3.0
     private var scanQuality: ScanSettings.ScanQuality = .standard
     private(set) var meshMode: ScanSettings.MeshMode = .free
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
@@ -46,9 +47,12 @@ class MockLiDARScanner: ObservableObject {
         captureTexture: Bool = true,
         range: ScanSettings.ScanRange = .room,
         quality: ScanSettings.ScanQuality = .standard,
-        meshMode: ScanSettings.MeshMode = .free
+        meshMode: ScanSettings.MeshMode = .free,
+        rangeMeters: Float = 3.0,
+        confidenceLevel: Int = 1
     ) {
         self.currentRange = range
+        self.rangeMeters = rangeMeters
         self.scanQuality = quality
         self.meshMode = meshMode
         isScanning = true
