@@ -39,9 +39,9 @@ class DepthFusion {
         self.origin = boundsMin - SIMD3<Float>(self.voxelSize, self.voxelSize, self.voxelSize)
 
         let extent = boundsMax - boundsMin + SIMD3<Float>(self.voxelSize * 2, self.voxelSize * 2, self.voxelSize * 2)
-        self.resolutionX = max(2, min(Int(ceil(extent.x / self.voxelSize)), 128))
-        self.resolutionY = max(2, min(Int(ceil(extent.y / self.voxelSize)), 128))
-        self.resolutionZ = max(2, min(Int(ceil(extent.z / self.voxelSize)), 128))
+        self.resolutionX = max(2, min(Int(ceil(extent.x / self.voxelSize)), 160))
+        self.resolutionY = max(2, min(Int(ceil(extent.y / self.voxelSize)), 160))
+        self.resolutionZ = max(2, min(Int(ceil(extent.z / self.voxelSize)), 160))
 
         let totalVoxels = resolutionX * resolutionY * resolutionZ
         self.grid = [Voxel](repeating: Voxel(), count: totalVoxels)
@@ -260,36 +260,32 @@ extension MeshProcessor {
 
     /// Fuse raw mesh through a voxel grid for cleaner results
     static func depthFusionProcess(_ meshData: MeshData, voxelSize: Float = 0.015) -> MeshData {
-        // Need meaningful mesh data for fusion to work
         guard meshData.vertexCount >= 100 else {
-            DebugLogger.shared.warn("Too few vertices for fusion (\(meshData.vertexCount)), using high quality processing", category: "Mesh")
             return postProcess(meshData, level: .high)
         }
 
         let extent = meshData.boundingBoxMax - meshData.boundingBoxMin
         let maxExtent = max(extent.x, max(extent.y, extent.z))
 
-        // Skip if extent is invalid or too small
         guard maxExtent > 0.05 && maxExtent < 100.0 else {
-            DebugLogger.shared.warn("Invalid mesh extent (\(maxExtent)m), using high quality processing", category: "Mesh")
             return postProcess(meshData, level: .high)
         }
 
-        // Auto-calculate voxel size: aim for ~80^3 grid max
-        let autoVoxelSize = maxExtent / 80.0
-        let effectiveVoxelSize = max(max(voxelSize, autoVoxelSize), 0.01)
+        // Higher resolution grid: aim for ~120^3 max for better detail
+        let autoVoxelSize = maxExtent / 120.0
+        let effectiveVoxelSize = max(max(voxelSize, autoVoxelSize), 0.008)
 
         let estX = Int(ceil(extent.x / effectiveVoxelSize)) + 2
         let estY = Int(ceil(extent.y / effectiveVoxelSize)) + 2
         let estZ = Int(ceil(extent.z / effectiveVoxelSize)) + 2
         let estTotal = estX * estY * estZ
 
-        if estTotal > 2_000_000 {
-            DebugLogger.shared.warn("Grid too large (\(estTotal) voxels), using high quality processing", category: "Mesh")
+        if estTotal > 3_000_000 {
+            DebugLogger.shared.warn("Grid too large (\(estTotal) voxels), using high quality", category: "Mesh")
             return postProcess(meshData, level: .high)
         }
 
-        DebugLogger.shared.info("Starting depth fusion: \(estX)x\(estY)x\(estZ) grid, voxel=\(effectiveVoxelSize)m", category: "Mesh")
+        DebugLogger.shared.info("Depth fusion: \(estX)x\(estY)x\(estZ), voxel=\(effectiveVoxelSize)m", category: "Mesh")
 
         let fusion = DepthFusion(
             boundsMin: meshData.boundingBoxMin,
@@ -297,21 +293,21 @@ extension MeshProcessor {
             voxelSize: effectiveVoxelSize
         )
 
-        // Integrate the mesh into the voxel grid
         fusion.integrateMesh(meshData)
-
-        // Extract clean mesh
         var fusedMesh = fusion.extractMesh()
 
-        // If fusion produced too few vertices (can happen), fall back
         if fusedMesh.vertexCount < meshData.vertexCount / 10 {
-            DebugLogger.shared.warn("Fusion produced too few vertices (\(fusedMesh.vertexCount)), using standard processing", category: "Mesh")
+            DebugLogger.shared.warn("Fusion produced too few vertices, using high quality", category: "Mesh")
             return postProcess(meshData, level: .high)
         }
 
-        // Apply additional cleanup to the fused mesh
+        // Apply the FULL aggressive cleanup pipeline after fusion
         fusedMesh = removeDegenerateTriangles(fusedMesh)
-        fusedMesh = removeSmallComponents(fusedMesh, minVertices: 12)
+        fusedMesh = weldNearbyVertices(fusedMesh, threshold: effectiveVoxelSize * 1.5)
+        fusedMesh = removeSmallComponents(fusedMesh, minVertices: 100)
+        fusedMesh = recalculateNormals(fusedMesh)
+        fusedMesh = smoothVertexPositions(fusedMesh, iterations: 3, factor: 0.5)
+        fusedMesh = smoothNormals(fusedMesh)
 
         return fusedMesh
     }
