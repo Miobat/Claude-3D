@@ -47,6 +47,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraView(_:)), name: .setCameraView, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraProjection(_:)), name: .setCameraProjection, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetVisualizationMode(_:)), name: .setVisualizationMode, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleClearMeasurements), name: .clearMeasurements, object: nil)
 
         return sceneView
     }
@@ -378,9 +379,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 let distance = p1.distance(to: p2)
                 let convertedDistance = measurementUnit.convert(fromMeters: distance)
                 let text = String(format: "%.3f %@", convertedDistance, measurementUnit.abbreviation)
-                addMeasurementLine(from: p1, to: p2, in: sceneView.scene!)
-                let midPoint = SCNVector3((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 + 0.05, (p1.z + p2.z) / 2)
-                parent.measurementLabels.append(MeasurementLabel(text: text, position: midPoint))
+                addMeasurementLine(from: p1, to: p2, label: text, in: sceneView.scene!)
+                parent.measurementLabels.append(MeasurementLabel(text: text, position: SCNVector3.init(0, 0, 0)))
             }
         }
 
@@ -452,6 +452,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     node.removeFromParentNode()
                 }
             }
+        }
+
+        @objc func handleClearMeasurements() {
+            guard let sceneView = sceneView, let scene = sceneView.scene else { return }
+            clearAllMeasurements(in: scene)
         }
 
         @objc func resetCamera() {
@@ -526,17 +531,68 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Measurement Helpers
 
         private func addMeasurementMarker(at position: SCNVector3, in scene: SCNScene) {
-            let sphere = SCNSphere(radius: 0.01)
-            sphere.firstMaterial?.diffuse.contents = UIColor.red
-            sphere.firstMaterial?.emission.contents = UIColor.red.withAlphaComponent(0.5)
+            let sphere = SCNSphere(radius: 0.015)
+            sphere.firstMaterial?.diffuse.contents = UIColor.systemCyan
+            sphere.firstMaterial?.emission.contents = UIColor.systemCyan
             let node = SCNNode(geometry: sphere)
             node.position = position
-            node.name = "measurementMarker"
+            node.name = "measurementNode"
             scene.rootNode.addChildNode(node)
         }
 
-        private func addMeasurementLine(from: SCNVector3, to: SCNVector3, in scene: SCNScene) {
+        private func addMeasurementLine(from: SCNVector3, to: SCNVector3, label: String, in scene: SCNScene) {
+            // Line
             let vertices: [SCNVector3] = [from, to]
+            let source = SCNGeometrySource(vertices: vertices)
+            let indices: [Int32] = [0, 1]
+            let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+            let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
+            let geometry = SCNGeometry(sources: [source], elements: [element])
+            geometry.firstMaterial?.diffuse.contents = UIColor.systemCyan
+            geometry.firstMaterial?.emission.contents = UIColor.systemCyan
+            geometry.firstMaterial?.isDoubleSided = true
+            let lineNode = SCNNode(geometry: geometry)
+            lineNode.name = "measurementNode"
+            scene.rootNode.addChildNode(lineNode)
+
+            // 3D text label at midpoint
+            let midPoint = SCNVector3(
+                (from.x + to.x) / 2,
+                (from.y + to.y) / 2 + 0.03,
+                (from.z + to.z) / 2
+            )
+
+            let text = SCNText(string: label, extrusionDepth: 0.002)
+            text.font = UIFont.systemFont(ofSize: 0.04, weight: .bold)
+            text.flatness = 0.1
+            text.firstMaterial?.diffuse.contents = UIColor.white
+            text.firstMaterial?.emission.contents = UIColor.white
+            text.firstMaterial?.isDoubleSided = true
+
+            let textNode = SCNNode(geometry: text)
+            textNode.name = "measurementNode"
+
+            // Center the text
+            let (textMin, textMax) = textNode.boundingBox
+            let textWidth = textMax.x - textMin.x
+            textNode.pivot = SCNMatrix4MakeTranslation(textWidth / 2, 0, 0)
+            textNode.position = midPoint
+
+            // Billboard constraint - text always faces camera
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = .all
+            textNode.constraints = [billboard]
+
+            scene.rootNode.addChildNode(textNode)
+        }
+
+        func clearAllMeasurements(in scene: SCNScene) {
+            scene.rootNode.enumerateChildNodes { node, _ in
+                if node.name == "measurementNode" || node.name == "axisGuide" {
+                    node.removeFromParentNode()
+                }
+            }
+        }
             let source = SCNGeometrySource(vertices: vertices)
             let indices: [Int32] = [0, 1]
             let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)

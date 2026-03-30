@@ -550,8 +550,7 @@ struct ScannerView: View {
                     Picker("Quality", selection: $processingLevel) {
                         Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
                         Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
-                        Text("High").tag(MeshProcessor.ProcessingLevel.high)
-                        Text("Fusion").tag(MeshProcessor.ProcessingLevel.fusion)
+                        Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
                     }
 
                     Text(processingLevel.description)

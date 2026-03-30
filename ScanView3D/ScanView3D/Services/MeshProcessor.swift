@@ -33,8 +33,6 @@ class MeshProcessor {
             result = recalculateNormals(result)
             result = smoothVertexPositions(result, iterations: 3, factor: 0.4)
             result = smoothNormals(result)
-        case .fusion:
-            result = depthFusionProcess(result, voxelSize: 0.015)
         }
 
         return result
@@ -44,14 +42,12 @@ class MeshProcessor {
         case quick = "Quick"
         case standard = "Standard"
         case high = "High Quality"
-        case fusion = "Fusion"
 
         var description: String {
             switch self {
             case .quick: return "Light cleanup, fastest"
             case .standard: return "Clean mesh, remove debris, smooth"
             case .high: return "Aggressive cleanup, very smooth surfaces"
-            case .fusion: return "Voxel reconstruction, cleanest but slower"
             }
         }
 
@@ -60,7 +56,6 @@ class MeshProcessor {
             case .quick: return "hare"
             case .standard: return "wand.and.stars"
             case .high: return "sparkles"
-            case .fusion: return "atom"
             }
         }
     }
