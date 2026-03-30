@@ -167,8 +167,32 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     private func loadModel(sceneView: SCNView, context: Context) {
         let fileURL = storageManager.getScanFileURL(scan: scan, project: project)
 
+        // Try native SceneKit format first (faster, preserves materials), fall back to OBJ
+        let scnURL = fileURL.deletingPathExtension().appendingPathExtension("scn")
+
         DispatchQueue.global(qos: .userInitiated).async {
-            let node = MeshProcessor.createSceneKitNode(fromOBJ: fileURL)
+            var node: SCNNode?
+
+            // Prefer .scn for internal viewing (preserves vertex colors, materials)
+            if FileManager.default.fileExists(atPath: scnURL.path) {
+                if let scene = try? SCNScene(url: scnURL, options: [.checkConsistency: false]) {
+                    let container = SCNNode()
+                    for child in scene.rootNode.childNodes {
+                        let cloned = child.clone()
+                        cloned.geometry?.materials.forEach { $0.isDoubleSided = true }
+                        cloned.enumerateChildNodes { n, _ in
+                            n.geometry?.materials.forEach { $0.isDoubleSided = true }
+                        }
+                        container.addChildNode(cloned)
+                    }
+                    node = container
+                }
+            }
+
+            // Fall back to OBJ/PLY loading
+            if node == nil {
+                node = MeshProcessor.createSceneKitNode(fromOBJ: fileURL)
+            }
 
             DispatchQueue.main.async {
                 if let node = node {

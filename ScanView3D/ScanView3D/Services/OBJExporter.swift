@@ -167,7 +167,7 @@ class OBJExporter {
         return objURL
     }
 
-    /// Export MeshData to PLY format with vertex colors
+    /// Export MeshData to binary PLY format (much smaller files than ASCII)
     static func exportPLY(
         meshData: MeshData,
         fileName: String,
@@ -183,55 +183,63 @@ class OBJExporter {
         let sanitizedName = sanitizeFileName(fileName)
         let plyURL = exportDir.appendingPathComponent("\(sanitizedName).ply")
 
-        var content = ""
+        let hasColors = !meshData.colors.isEmpty
 
-        content += "ply\n"
-        content += "format ascii 1.0\n"
-        content += "comment ScanView 3D Export\n"
-        content += "element vertex \(meshData.vertexCount)\n"
-        content += "property float x\n"
-        content += "property float y\n"
-        content += "property float z\n"
-        content += "property float nx\n"
-        content += "property float ny\n"
-        content += "property float nz\n"
-
-        if !meshData.colors.isEmpty {
-            content += "property uchar red\n"
-            content += "property uchar green\n"
-            content += "property uchar blue\n"
-            content += "property uchar alpha\n"
+        // Build header as ASCII string
+        var header = "ply\n"
+        header += "format binary_little_endian 1.0\n"
+        header += "comment ScanView 3D Export\n"
+        header += "element vertex \(meshData.vertexCount)\n"
+        header += "property float x\n"
+        header += "property float y\n"
+        header += "property float z\n"
+        header += "property float nx\n"
+        header += "property float ny\n"
+        header += "property float nz\n"
+        if hasColors {
+            header += "property uchar red\n"
+            header += "property uchar green\n"
+            header += "property uchar blue\n"
+            header += "property uchar alpha\n"
         }
+        header += "element face \(meshData.faceCount)\n"
+        header += "property list uchar uint vertex_indices\n"
+        header += "end_header\n"
 
-        content += "element face \(meshData.faceCount)\n"
-        content += "property list uchar uint vertex_indices\n"
-        content += "end_header\n"
+        var data = Data(header.utf8)
 
+        // Write binary vertex data (much more compact than ASCII)
         for i in 0..<meshData.vertexCount {
             let v = meshData.vertices[i]
             let n = i < meshData.normals.count ? meshData.normals[i] : SIMD3<Float>(0, 1, 0)
 
-            if i < meshData.colors.count {
-                let c = meshData.colors[i]
-                let r = UInt8(min(max(c.x * 255, 0), 255))
-                let g = UInt8(min(max(c.y * 255, 0), 255))
-                let b = UInt8(min(max(c.z * 255, 0), 255))
-                let a = UInt8(min(max(c.w * 255, 0), 255))
-                content += String(format: "%.6f %.6f %.6f %.6f %.6f %.6f %d %d %d %d\n",
-                                 v.x, v.y, v.z, n.x, n.y, n.z, r, g, b, a)
-            } else {
-                content += String(format: "%.6f %.6f %.6f %.6f %.6f %.6f\n",
-                                 v.x, v.y, v.z, n.x, n.y, n.z)
+            // 6 floats: x, y, z, nx, ny, nz
+            var values: [Float] = [v.x, v.y, v.z, n.x, n.y, n.z]
+            data.append(contentsOf: values.withUnsafeBytes { Data($0) })
+
+            if hasColors {
+                let c = i < meshData.colors.count ? meshData.colors[i] : SIMD4<Float>(0.7, 0.7, 0.7, 1.0)
+                var rgba: [UInt8] = [
+                    UInt8(min(max(c.x * 255, 0), 255)),
+                    UInt8(min(max(c.y * 255, 0), 255)),
+                    UInt8(min(max(c.z * 255, 0), 255)),
+                    UInt8(min(max(c.w * 255, 0), 255))
+                ]
+                data.append(contentsOf: rgba)
             }
         }
 
+        // Write binary face data
         for face in meshData.faces {
             if face.count == 3 {
-                content += "3 \(face[0]) \(face[1]) \(face[2])\n"
+                var count: UInt8 = 3
+                data.append(contentsOf: withUnsafeBytes(of: &count) { Data($0) })
+                var indices = face.map { UInt32($0) }
+                data.append(contentsOf: indices.withUnsafeBytes { Data($0) })
             }
         }
 
-        try content.write(to: plyURL, atomically: true, encoding: .utf8)
+        try data.write(to: plyURL)
         return plyURL
     }
 
