@@ -338,7 +338,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             model.enumerateChildNodes { child, _ in applyToNode(child) }
         }
 
-        // MARK: - Tap / Measure
+        // MARK: - Tap / Measure with Snapping
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard activeTool == .measure, let sceneView = sceneView else { return }
@@ -350,11 +350,28 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             ])
 
             guard let hit = hitResults.first else { return }
-            let point = hit.worldCoordinates
+            var point = hit.worldCoordinates
+
+            // If we already have an odd number of points (first point placed),
+            // try to snap the second point to an axis of the first point
+            let pointCount = parent.measurementPoints.count
+            if pointCount > 0 && pointCount % 2 == 1 {
+                let firstPoint = parent.measurementPoints[pointCount - 1]
+                point = snapToAxis(point, relativeTo: firstPoint, threshold: 0.08)
+            }
+
             parent.measurementPoints.append(point)
             addMeasurementMarker(at: point, in: sceneView.scene!)
 
-            if parent.measurementPoints.count >= 2 {
+            // Show axis guides from this point if it's a first point (odd index after adding)
+            if parent.measurementPoints.count % 2 == 1 {
+                showAxisGuides(at: point, in: sceneView.scene!)
+            } else {
+                // Second point placed - remove guides and create measurement
+                removeAxisGuides(from: sceneView.scene!)
+            }
+
+            if parent.measurementPoints.count >= 2 && parent.measurementPoints.count % 2 == 0 {
                 let lastIndex = parent.measurementPoints.count - 1
                 let p1 = parent.measurementPoints[lastIndex - 1]
                 let p2 = parent.measurementPoints[lastIndex]
@@ -364,6 +381,76 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 addMeasurementLine(from: p1, to: p2, in: sceneView.scene!)
                 let midPoint = SCNVector3((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 + 0.05, (p1.z + p2.z) / 2)
                 parent.measurementLabels.append(MeasurementLabel(text: text, position: midPoint))
+            }
+        }
+
+        /// Snap a point to the nearest axis of a reference point
+        private func snapToAxis(_ point: SCNVector3, relativeTo ref: SCNVector3, threshold: Float) -> SCNVector3 {
+            var snapped = point
+            let dx = abs(point.x - ref.x)
+            let dy = abs(point.y - ref.y)
+            let dz = abs(point.z - ref.z)
+
+            // Find which axis the point is most aligned with
+            // If close to vertical (small dx and dz), snap to pure Y
+            if dx < threshold && dz < threshold {
+                snapped.x = ref.x
+                snapped.z = ref.z
+            }
+            // If close to horizontal-X (small dy), snap Y
+            else if dy < threshold {
+                snapped.y = ref.y
+            }
+            // Snap individual axes if very close
+            else {
+                if dx < threshold * 0.5 { snapped.x = ref.x }
+                if dy < threshold * 0.5 { snapped.y = ref.y }
+                if dz < threshold * 0.5 { snapped.z = ref.z }
+            }
+
+            return snapped
+        }
+
+        /// Show dashed axis guide lines from a measurement point
+        private func showAxisGuides(at point: SCNVector3, in scene: SCNScene) {
+            let guideLength: Float = viewDistance * 1.5
+
+            // Vertical guide (Y axis) - green dashed line
+            addGuide(from: SCNVector3(point.x, point.y - guideLength, point.z),
+                     to: SCNVector3(point.x, point.y + guideLength, point.z),
+                     color: UIColor.green, name: "axisGuide", in: scene)
+
+            // Horizontal X guide - red
+            addGuide(from: SCNVector3(point.x - guideLength, point.y, point.z),
+                     to: SCNVector3(point.x + guideLength, point.y, point.z),
+                     color: UIColor.red.withAlphaComponent(0.4), name: "axisGuide", in: scene)
+
+            // Horizontal Z guide - blue
+            addGuide(from: SCNVector3(point.x, point.y, point.z - guideLength),
+                     to: SCNVector3(point.x, point.y, point.z + guideLength),
+                     color: UIColor.blue.withAlphaComponent(0.4), name: "axisGuide", in: scene)
+        }
+
+        private func addGuide(from: SCNVector3, to: SCNVector3, color: UIColor, name: String, in scene: SCNScene) {
+            let vertices: [SCNVector3] = [from, to]
+            let source = SCNGeometrySource(vertices: vertices)
+            let indices: [Int32] = [0, 1]
+            let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+            let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
+            let geometry = SCNGeometry(sources: [source], elements: [element])
+            geometry.firstMaterial?.diffuse.contents = color
+            geometry.firstMaterial?.emission.contents = color
+            geometry.firstMaterial?.isDoubleSided = true
+            let node = SCNNode(geometry: geometry)
+            node.name = name
+            scene.rootNode.addChildNode(node)
+        }
+
+        private func removeAxisGuides(from scene: SCNScene) {
+            scene.rootNode.enumerateChildNodes { node, _ in
+                if node.name == "axisGuide" {
+                    node.removeFromParentNode()
+                }
             }
         }
 

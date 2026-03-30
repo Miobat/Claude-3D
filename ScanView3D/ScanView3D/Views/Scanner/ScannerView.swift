@@ -27,6 +27,9 @@ struct ScannerView: View {
     @State private var exportFormat: StorageManager.ExportFormat = .obj
     @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
     @State private var savingProgress = ""
+    @State private var savedScan: Scan?
+    @State private var savedProject: Project?
+    @State private var showingSavedScan = false
 
     var body: some View {
         ZStack {
@@ -78,6 +81,21 @@ struct ScannerView: View {
         }
         .sheet(isPresented: $showingSettings) {
             settingsSheet
+        }
+        .fullScreenCover(isPresented: $showingSavedScan) {
+            if let scan = savedScan, let project = savedProject {
+                NavigationView {
+                    ModelViewerView(scan: scan, project: project)
+                        .environmentObject(storageManager)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Done") {
+                                    showingSavedScan = false
+                                }
+                            }
+                        }
+                }
+            }
         }
         .alert("Error", isPresented: $showingError) {
             Button("OK") {}
@@ -692,7 +710,7 @@ struct ScannerView: View {
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
 
-                let _ = try storageManager.saveScan(
+                let scan = try storageManager.saveScan(
                     meshData: meshData,
                     name: scanName,
                     toProject: project,
@@ -705,6 +723,10 @@ struct ScannerView: View {
                     savingProgress = ""
                     showingSaveDialog = false
                     scanner.resetScanning()
+                    // Navigate to the saved scan's viewer
+                    savedScan = scan
+                    savedProject = project
+                    showingSavedScan = true
                 }
             } catch {
                 DispatchQueue.main.async {
