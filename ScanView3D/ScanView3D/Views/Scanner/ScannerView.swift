@@ -530,15 +530,11 @@ struct ScannerView: View {
 
                 Section("Post-Processing") {
                     Picker("Quality", selection: $processingLevel) {
-                        ForEach(MeshProcessor.ProcessingLevel.allCases, id: \.self) { level in
-                            HStack {
-                                Image(systemName: level.icon)
-                                Text(level.rawValue)
-                            }
-                            .tag(level)
-                        }
+                        Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
+                        Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
+                        Text("High").tag(MeshProcessor.ProcessingLevel.high)
+                        Text("Fusion").tag(MeshProcessor.ProcessingLevel.fusion)
                     }
-                    .pickerStyle(.segmented)
 
                     Text(processingLevel.description)
                         .font(.caption)

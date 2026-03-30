@@ -34,14 +34,14 @@ class DepthFusion {
     ///   - bounds: The world-space bounding box to cover
     ///   - voxelSize: Size of each voxel in meters (smaller = more detail, more memory)
     init(boundsMin: SIMD3<Float>, boundsMax: SIMD3<Float>, voxelSize: Float = 0.02) {
-        self.voxelSize = voxelSize
-        self.truncation = voxelSize * 4.0
-        self.origin = boundsMin - SIMD3<Float>(voxelSize, voxelSize, voxelSize) // small padding
+        self.voxelSize = max(voxelSize, 0.005) // minimum 5mm voxels
+        self.truncation = self.voxelSize * 4.0
+        self.origin = boundsMin - SIMD3<Float>(self.voxelSize, self.voxelSize, self.voxelSize)
 
-        let extent = boundsMax - boundsMin + SIMD3<Float>(voxelSize * 2, voxelSize * 2, voxelSize * 2)
-        self.resolutionX = min(Int(ceil(extent.x / voxelSize)), 256)
-        self.resolutionY = min(Int(ceil(extent.y / voxelSize)), 256)
-        self.resolutionZ = min(Int(ceil(extent.z / voxelSize)), 256)
+        let extent = boundsMax - boundsMin + SIMD3<Float>(self.voxelSize * 2, self.voxelSize * 2, self.voxelSize * 2)
+        self.resolutionX = max(2, min(Int(ceil(extent.x / self.voxelSize)), 128))
+        self.resolutionY = max(2, min(Int(ceil(extent.y / self.voxelSize)), 128))
+        self.resolutionZ = max(2, min(Int(ceil(extent.z / self.voxelSize)), 128))
 
         let totalVoxels = resolutionX * resolutionY * resolutionZ
         self.grid = [Voxel](repeating: Voxel(), count: totalVoxels)
@@ -101,27 +101,111 @@ class DepthFusion {
         }
     }
 
-    // MARK: - Extract Mesh (Marching Cubes)
+    // MARK: - Extract Mesh (Surface Nets)
 
-    /// Extract a clean mesh from the voxel grid using marching cubes
+    /// Extract a clean mesh using surface nets - simpler and more robust than marching cubes
     func extractMesh() -> MeshData {
         var vertices: [SIMD3<Float>] = []
         var normals: [SIMD3<Float>] = []
         var faces: [[UInt32]] = []
         var colors: [SIMD4<Float>] = []
 
-        // For each voxel cell, check if surface crosses it (TSDF changes sign)
+        // Surface nets: place one vertex per cell that contains a sign change,
+        // then connect adjacent cells with quads/triangles
+
+        // Step 1: Find cells with sign changes and place a vertex at the average edge crossing
+        var cellVertexIndex = [Int: Int]() // cell flat index -> vertex index
+
         for z in 0..<(resolutionZ - 1) {
             for y in 0..<(resolutionY - 1) {
                 for x in 0..<(resolutionX - 1) {
-                    extractCellVertices(x: x, y: y, z: z,
-                                       vertices: &vertices, normals: &normals,
-                                       faces: &faces, colors: &colors)
+                    let v000 = getVoxel(x, y, z)
+                    guard v000.weight > 0.5 else { continue }
+
+                    // Check the 3 edges from this corner (x+1, y+1, z+1)
+                    let neighbors = [
+                        getVoxel(x+1, y, z),
+                        getVoxel(x, y+1, z),
+                        getVoxel(x, y, z+1)
+                    ]
+
+                    var hasSignChange = false
+                    for n in neighbors {
+                        if n.weight > 0.5 && v000.tsdf * n.tsdf < 0 {
+                            hasSignChange = true
+                            break
+                        }
+                    }
+                    guard hasSignChange else { continue }
+
+                    // Place vertex at cell center (simple but effective)
+                    let pos = SIMD3<Float>(
+                        origin.x + (Float(x) + 0.5) * voxelSize,
+                        origin.y + (Float(y) + 0.5) * voxelSize,
+                        origin.z + (Float(z) + 0.5) * voxelSize
+                    )
+
+                    let normal = calculateGradient(at: pos)
+                    let color = SIMD4<Float>(v000.colorR, v000.colorG, v000.colorB, 1.0)
+
+                    let idx = vertices.count
+                    let cellKey = x + y * resolutionX + z * resolutionX * resolutionY
+                    cellVertexIndex[cellKey] = idx
+                    vertices.append(pos)
+                    normals.append(normal)
+                    colors.append(color)
                 }
             }
         }
 
-        // Calculate bounding box
+        // Step 2: Connect adjacent cells with triangles
+        for z in 0..<(resolutionZ - 1) {
+            for y in 0..<(resolutionY - 1) {
+                for x in 0..<(resolutionX - 1) {
+                    let cellKey = x + y * resolutionX + z * resolutionX * resolutionY
+
+                    guard let v0 = cellVertexIndex[cellKey] else { continue }
+
+                    // Check X-edge: connect (x,y,z) with (x, y+1, z), (x, y, z+1), (x, y+1, z+1)
+                    let voxHere = getVoxel(x, y, z)
+                    let voxX = getVoxel(x+1, y, z)
+                    if voxHere.weight > 0.5 && voxX.weight > 0.5 && voxHere.tsdf * voxX.tsdf < 0 {
+                        let k1 = x + (y+1) * resolutionX + z * resolutionX * resolutionY
+                        let k2 = x + y * resolutionX + (z+1) * resolutionX * resolutionY
+                        let k3 = x + (y+1) * resolutionX + (z+1) * resolutionX * resolutionY
+                        if let v1 = cellVertexIndex[k1], let v2 = cellVertexIndex[k2], let v3 = cellVertexIndex[k3] {
+                            faces.append([UInt32(v0), UInt32(v1), UInt32(v3)])
+                            faces.append([UInt32(v0), UInt32(v3), UInt32(v2)])
+                        }
+                    }
+
+                    // Check Y-edge
+                    let voxY = getVoxel(x, y+1, z)
+                    if voxHere.weight > 0.5 && voxY.weight > 0.5 && voxHere.tsdf * voxY.tsdf < 0 {
+                        let k1 = (x+1) + y * resolutionX + z * resolutionX * resolutionY
+                        let k2 = x + y * resolutionX + (z+1) * resolutionX * resolutionY
+                        let k3 = (x+1) + y * resolutionX + (z+1) * resolutionX * resolutionY
+                        if let v1 = cellVertexIndex[k1], let v2 = cellVertexIndex[k2], let v3 = cellVertexIndex[k3] {
+                            faces.append([UInt32(v0), UInt32(v2), UInt32(v3)])
+                            faces.append([UInt32(v0), UInt32(v3), UInt32(v1)])
+                        }
+                    }
+
+                    // Check Z-edge
+                    let voxZ = getVoxel(x, y, z+1)
+                    if voxHere.weight > 0.5 && voxZ.weight > 0.5 && voxHere.tsdf * voxZ.tsdf < 0 {
+                        let k1 = (x+1) + y * resolutionX + z * resolutionX * resolutionY
+                        let k2 = x + (y+1) * resolutionX + z * resolutionX * resolutionY
+                        let k3 = (x+1) + (y+1) * resolutionX + z * resolutionX * resolutionY
+                        if let v1 = cellVertexIndex[k1], let v2 = cellVertexIndex[k2], let v3 = cellVertexIndex[k3] {
+                            faces.append([UInt32(v0), UInt32(v1), UInt32(v3)])
+                            faces.append([UInt32(v0), UInt32(v3), UInt32(v2)])
+                        }
+                    }
+                }
+            }
+        }
+
         var minB = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
         var maxB = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
         for v in vertices {
@@ -137,81 +221,6 @@ class DepthFusion {
             boundingBoxMin: vertices.isEmpty ? origin : minB,
             boundingBoxMax: vertices.isEmpty ? origin + SIMD3(Float(resolutionX), Float(resolutionY), Float(resolutionZ)) * voxelSize : maxB
         )
-    }
-
-    // MARK: - Cell Extraction (Simplified Marching Cubes)
-
-    private func extractCellVertices(x: Int, y: Int, z: Int,
-                                     vertices: inout [SIMD3<Float>],
-                                     normals: inout [SIMD3<Float>],
-                                     faces: inout [[UInt32]],
-                                     colors: inout [SIMD4<Float>]) {
-        // Get 8 corner values
-        let corners = [
-            getVoxel(x, y, z),
-            getVoxel(x+1, y, z),
-            getVoxel(x+1, y+1, z),
-            getVoxel(x, y+1, z),
-            getVoxel(x, y, z+1),
-            getVoxel(x+1, y, z+1),
-            getVoxel(x+1, y+1, z+1),
-            getVoxel(x, y+1, z+1)
-        ]
-
-        // Skip cells where all corners have zero weight (unobserved)
-        let minWeight: Float = 1.0
-        guard corners.allSatisfy({ $0.weight >= minWeight }) else { return }
-
-        // Check each edge for zero-crossing
-        let edges: [(Int, Int)] = [
-            (0,1), (1,2), (2,3), (3,0),  // bottom face
-            (4,5), (5,6), (6,7), (7,4),  // top face
-            (0,4), (1,5), (2,6), (3,7)   // vertical edges
-        ]
-
-        let cornerPositions: [SIMD3<Float>] = [
-            worldPos(x, y, z), worldPos(x+1, y, z), worldPos(x+1, y+1, z), worldPos(x, y+1, z),
-            worldPos(x, y, z+1), worldPos(x+1, y, z+1), worldPos(x+1, y+1, z+1), worldPos(x, y+1, z+1)
-        ]
-
-        for (i, j) in edges {
-            let v0 = corners[i].tsdf
-            let v1 = corners[j].tsdf
-
-            // Surface crosses this edge (sign change)
-            guard v0 * v1 < 0 else { continue }
-
-            // Interpolate position along edge
-            let t = v0 / (v0 - v1)
-            let pos = cornerPositions[i] + t * (cornerPositions[j] - cornerPositions[i])
-
-            // Interpolate color
-            let c0 = corners[i]
-            let c1 = corners[j]
-            let r = c0.colorR + t * (c1.colorR - c0.colorR)
-            let g = c0.colorG + t * (c1.colorG - c0.colorG)
-            let b = c0.colorB + t * (c1.colorB - c0.colorB)
-
-            // Calculate normal from TSDF gradient
-            let normal = calculateGradient(at: pos)
-
-            vertices.append(pos)
-            normals.append(normal)
-            colors.append(SIMD4<Float>(r, g, b, 1.0))
-        }
-
-        // Form triangles from the edge crossings (simplified - create triangle fans)
-        let baseIdx = UInt32(vertices.count - vertices.count) // This needs proper marching cubes tables
-        // For simplicity, group edge crossings into triangles
-        let newVertCount = vertices.count
-        let startIdx = newVertCount - edges.filter { corners[$0.0].tsdf * corners[$0.1].tsdf < 0 }.count
-
-        if vertices.count - startIdx >= 3 {
-            // Simple fan triangulation of the crossing points
-            for i in stride(from: startIdx + 2, to: vertices.count, by: 1) {
-                faces.append([UInt32(startIdx), UInt32(i - 1), UInt32(i)])
-            }
-        }
     }
 
     private func getVoxel(_ x: Int, _ y: Int, _ z: Int) -> Voxel {
@@ -250,27 +259,33 @@ class DepthFusion {
 extension MeshProcessor {
 
     /// Fuse raw mesh through a voxel grid for cleaner results
-    /// This is the key quality differentiator - produces continuous, smooth surfaces
     static func depthFusionProcess(_ meshData: MeshData, voxelSize: Float = 0.015) -> MeshData {
-        guard meshData.vertexCount > 0 else { return meshData }
+        // Need meaningful mesh data for fusion to work
+        guard meshData.vertexCount >= 100 else {
+            DebugLogger.shared.warn("Too few vertices for fusion (\(meshData.vertexCount)), using high quality processing", category: "Mesh")
+            return postProcess(meshData, level: .high)
+        }
 
-        // Determine appropriate voxel size based on mesh extent
         let extent = meshData.boundingBoxMax - meshData.boundingBoxMin
         let maxExtent = max(extent.x, max(extent.y, extent.z))
 
-        // Clamp voxel size to prevent excessive memory usage
-        // Max ~128^3 = ~2M voxels for safety
-        let minVoxelSize = maxExtent / 128.0
-        let effectiveVoxelSize = max(voxelSize, minVoxelSize)
+        // Skip if extent is invalid or too small
+        guard maxExtent > 0.05 && maxExtent < 100.0 else {
+            DebugLogger.shared.warn("Invalid mesh extent (\(maxExtent)m), using high quality processing", category: "Mesh")
+            return postProcess(meshData, level: .high)
+        }
 
-        // Check if the grid would be too large (> 4M voxels)
-        let estX = Int(ceil(extent.x / effectiveVoxelSize))
-        let estY = Int(ceil(extent.y / effectiveVoxelSize))
-        let estZ = Int(ceil(extent.z / effectiveVoxelSize))
+        // Auto-calculate voxel size: aim for ~80^3 grid max
+        let autoVoxelSize = maxExtent / 80.0
+        let effectiveVoxelSize = max(max(voxelSize, autoVoxelSize), 0.01)
+
+        let estX = Int(ceil(extent.x / effectiveVoxelSize)) + 2
+        let estY = Int(ceil(extent.y / effectiveVoxelSize)) + 2
+        let estZ = Int(ceil(extent.z / effectiveVoxelSize)) + 2
         let estTotal = estX * estY * estZ
-        if estTotal > 4_000_000 {
-            // Too large for fusion, fall back to standard post-processing
-            DebugLogger.shared.warn("Mesh too large for fusion (\(estTotal) voxels), using standard processing", category: "Mesh")
+
+        if estTotal > 2_000_000 {
+            DebugLogger.shared.warn("Grid too large (\(estTotal) voxels), using high quality processing", category: "Mesh")
             return postProcess(meshData, level: .high)
         }
 
