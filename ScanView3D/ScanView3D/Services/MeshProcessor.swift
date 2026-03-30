@@ -27,6 +27,9 @@ class MeshProcessor {
             result = removeSmallComponents(result, minVertices: 20)
             result = recalculateNormals(result)
             result = smoothNormals(result)
+        case .fusion:
+            // Depth fusion: voxel grid reconstruction for dramatically cleaner mesh
+            result = depthFusionProcess(result, voxelSize: 0.015)
         }
 
         return result
@@ -36,12 +39,14 @@ class MeshProcessor {
         case quick = "Quick"
         case standard = "Standard"
         case high = "High Quality"
+        case fusion = "Fusion"
 
         var description: String {
             switch self {
             case .quick: return "Basic cleanup, fastest"
             case .standard: return "Remove fragments, fix normals"
             case .high: return "Full cleanup, smooth, optimize"
+            case .fusion: return "Depth fusion - cleanest mesh, slower"
             }
         }
 
@@ -50,6 +55,7 @@ class MeshProcessor {
             case .quick: return "hare"
             case .standard: return "wand.and.stars"
             case .high: return "sparkles"
+            case .fusion: return "atom"
             }
         }
     }

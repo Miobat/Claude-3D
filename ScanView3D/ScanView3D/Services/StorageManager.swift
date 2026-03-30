@@ -161,6 +161,13 @@ class StorageManager: ObservableObject {
             scan.textureFileName = "\(scanId.uuidString)_texture.jpg"
         }
 
+        // Save native SceneKit scene for fast internal viewing
+        let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
+        let scnNode = MeshProcessor.createSceneKitNode(from: meshData)
+        let scene = SCNScene()
+        scene.rootNode.addChildNode(scnNode)
+        scene.write(to: scnURL, delegate: nil)
+
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
