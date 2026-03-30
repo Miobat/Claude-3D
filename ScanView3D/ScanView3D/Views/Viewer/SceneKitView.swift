@@ -593,17 +593,5 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 }
             }
         }
-            let source = SCNGeometrySource(vertices: vertices)
-            let indices: [Int32] = [0, 1]
-            let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
-            let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
-            let geometry = SCNGeometry(sources: [source], elements: [element])
-            geometry.firstMaterial?.diffuse.contents = UIColor.yellow
-            geometry.firstMaterial?.emission.contents = UIColor.yellow
-            geometry.firstMaterial?.isDoubleSided = true
-            let lineNode = SCNNode(geometry: geometry)
-            lineNode.name = "measurementLine"
-            scene.rootNode.addChildNode(lineNode)
-        }
     }
 }
