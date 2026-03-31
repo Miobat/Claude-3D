@@ -13,27 +13,21 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         arView.session = scanner.arSession
         arView.automaticallyConfigureSession = false
 
-        // Disable default scene understanding debug vis - we'll draw our own range-limited mesh
         arView.debugOptions = []
-
-        // Configure rendering
         arView.environment.sceneUnderstanding.options = [.occlusion, .receivesLighting]
         arView.renderOptions = [.disableMotionBlur]
 
         context.coordinator.arView = arView
         context.coordinator.scanner = scanner
+        context.coordinator.startUpdateLoop()
 
         return arView
     }
 
     func updateUIView(_ arView: ARView, context: Context) {
         context.coordinator.showMeshOverlay = showMeshOverlay
-
-        if showMeshOverlay && scanner.isScanning {
-            // Update mesh visualization with range filtering
-            context.coordinator.updateRangeFilteredMesh()
-        } else if !showMeshOverlay {
-            context.coordinator.clearMeshVisualization()
+        if !showMeshOverlay {
+            context.coordinator.clearAllMesh()
         }
     }
 
@@ -45,64 +39,89 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         var arView: ARView?
         var scanner: LiDARScanner?
         var showMeshOverlay = true
-        private var meshAnchors: [UUID: AnchorEntity] = [:]
-        private var lastUpdateTime: TimeInterval = 0
-        private let updateInterval: TimeInterval = 0.3
 
-        func updateRangeFilteredMesh() {
-            guard let arView = arView, let scanner = scanner else { return }
+        // Track mesh entities and their geometry version (vertex count as proxy)
+        private var meshEntities: [UUID: AnchorEntity] = [:]
+        private var meshVersions: [UUID: Int] = [:]
+        private var displayLink: CADisplayLink?
+        private var frameCount = 0
 
-            let now = CACurrentMediaTime()
-            guard now - lastUpdateTime >= updateInterval else { return }
-            lastUpdateTime = now
+        func startUpdateLoop() {
+            displayLink?.invalidate()
+            displayLink = CADisplayLink(target: self, selector: #selector(updateFrame))
+            displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 4, maximum: 10, preferred: 6)
+            displayLink?.add(to: .main, forMode: .common)
+        }
 
-            let scanOrigin = scanner.scanOrigin
-            let maxDist = scanner.rangeMeters
+        deinit {
+            displayLink?.invalidate()
+        }
 
-            // Track which anchors are still valid
+        @objc private func updateFrame() {
+            guard showMeshOverlay, let arView = arView, let scanner = scanner,
+                  scanner.isScanning else { return }
+
+            frameCount += 1
+            guard frameCount % 2 == 0 else { return }
+
+            let anchors = scanner.meshAnchors
             var activeIDs = Set<UUID>()
 
-            for anchor in scanner.meshAnchors {
-                let anchorPos = SIMD3<Float>(
-                    anchor.transform.columns.3.x,
-                    anchor.transform.columns.3.y,
-                    anchor.transform.columns.3.z
-                )
-                let dist = length(anchorPos - scanOrigin)
+            for anchor in anchors {
+                let id = anchor.identifier
+                activeIDs.insert(id)
 
-                if dist <= maxDist + 1.0 && showMeshOverlay {
-                    activeIDs.insert(anchor.identifier)
+                let currentVertexCount = anchor.geometry.vertices.count
 
-                    if meshAnchors[anchor.identifier] == nil {
-                        // Create new mesh entity for this anchor
-                        if let entity = createMeshEntity(from: anchor, tint: UIColor.cyan.withAlphaComponent(0.15)) {
-                            let anchorEntity = AnchorEntity(world: anchor.transform)
-                            anchorEntity.addChild(entity)
-                            arView.scene.addAnchor(anchorEntity)
-                            meshAnchors[anchor.identifier] = anchorEntity
-                        }
+                // Check if this anchor needs a new mesh entity:
+                // - Never created before, OR
+                // - Geometry changed (vertex count differs from last build)
+                let needsRebuild: Bool
+                if meshEntities[id] == nil {
+                    needsRebuild = true
+                } else if let lastVersion = meshVersions[id], lastVersion != currentVertexCount {
+                    needsRebuild = true
+                } else {
+                    needsRebuild = false
+                }
+
+                if needsRebuild {
+                    // Remove old entity if exists
+                    if let old = meshEntities[id] {
+                        old.removeFromParent()
+                    }
+
+                    // Build fresh mesh entity with current geometry
+                    if let entity = buildMeshEntity(from: anchor) {
+                        let anchorEntity = AnchorEntity(world: anchor.transform)
+                        anchorEntity.addChild(entity)
+                        arView.scene.addAnchor(anchorEntity)
+                        meshEntities[id] = anchorEntity
+                        meshVersions[id] = currentVertexCount
                     }
                 }
             }
 
-            // Remove anchors that are out of range
-            let toRemove = meshAnchors.keys.filter { !activeIDs.contains($0) }
-            for id in toRemove {
-                meshAnchors[id]?.removeFromParent()
-                meshAnchors.removeValue(forKey: id)
+            // Remove anchors that no longer exist
+            let stale = meshEntities.keys.filter { !activeIDs.contains($0) }
+            for id in stale {
+                meshEntities[id]?.removeFromParent()
+                meshEntities.removeValue(forKey: id)
+                meshVersions.removeValue(forKey: id)
             }
         }
 
-        func clearMeshVisualization() {
-            for (_, entity) in meshAnchors {
+        func clearAllMesh() {
+            for (_, entity) in meshEntities {
                 entity.removeFromParent()
             }
-            meshAnchors.removeAll()
+            meshEntities.removeAll()
+            meshVersions.removeAll()
         }
 
-        private func createMeshEntity(from anchor: ARMeshAnchor, tint: UIColor) -> ModelEntity? {
+        private func buildMeshEntity(from anchor: ARMeshAnchor) -> ModelEntity? {
             let geometry = anchor.geometry
-            var descriptor = MeshDescriptor(name: "mesh_\(anchor.identifier)")
+            var descriptor = MeshDescriptor(name: "live_\(anchor.identifier.uuidString.prefix(8))")
 
             var positions: [SIMD3<Float>] = []
             for i in 0..<geometry.vertices.count {
@@ -125,9 +144,10 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
 
             do {
                 let meshResource = try MeshResource.generate(from: [descriptor])
-                // Use brighter, more visible overlay so user can clearly see scanned area
                 var material = SimpleMaterial()
-                material.color = .init(tint: UIColor.cyan.withAlphaComponent(0.35))
+                material.color = .init(tint: UIColor(red: 0.1, green: 0.9, blue: 0.3, alpha: 0.4))
+                material.metallic = .float(0.0)
+                material.roughness = .float(0.9)
                 return ModelEntity(mesh: meshResource, materials: [material])
             } catch {
                 return nil

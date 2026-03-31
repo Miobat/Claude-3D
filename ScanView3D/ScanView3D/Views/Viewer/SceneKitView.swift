@@ -47,6 +47,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraView(_:)), name: .setCameraView, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraProjection(_:)), name: .setCameraProjection, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetVisualizationMode(_:)), name: .setVisualizationMode, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleClearMeasurements), name: .clearMeasurements, object: nil)
 
         return sceneView
     }
@@ -338,33 +339,135 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             model.enumerateChildNodes { child, _ in applyToNode(child) }
         }
 
-        // MARK: - Tap / Measure
+        // MARK: - Tap / Measure with Snapping
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             guard activeTool == .measure, let sceneView = sceneView else { return }
 
             let location = gesture.location(in: sceneView)
             let hitResults = sceneView.hitTest(location, options: [
-                .searchMode: SCNHitTestSearchMode.closest.rawValue,
-                .ignoreHiddenNodes: true
+                .searchMode: SCNHitTestSearchMode.all.rawValue,
+                .ignoreHiddenNodes: true,
+                .boundingBoxOnly: false
             ])
 
-            guard let hit = hitResults.first else { return }
-            let point = hit.worldCoordinates
+            // Filter: only hit the actual model geometry, not guides/markers/grid/bounding box
+            let excludedNames: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera"]
+            guard let hit = hitResults.first(where: { result in
+                var node: SCNNode? = result.node
+                while let n = node {
+                    if let name = n.name, excludedNames.contains(name) { return false }
+                    node = n.parent
+                }
+                return true
+            }) else { return }
+
+            var point = hit.worldCoordinates
+
+            // If we already have an odd number of points (first point placed),
+            // try to snap the second point to an axis of the first point
+            let pointCount = parent.measurementPoints.count
+            if pointCount > 0 && pointCount % 2 == 1 {
+                let firstPoint = parent.measurementPoints[pointCount - 1]
+                point = snapToAxis(point, relativeTo: firstPoint, threshold: 0.08)
+            }
+
             parent.measurementPoints.append(point)
             addMeasurementMarker(at: point, in: sceneView.scene!)
 
-            if parent.measurementPoints.count >= 2 {
+            // Show axis guides from this point if it's a first point (odd index after adding)
+            if parent.measurementPoints.count % 2 == 1 {
+                showAxisGuides(at: point, in: sceneView.scene!)
+            } else {
+                // Second point placed - remove guides and create measurement
+                removeAxisGuides(from: sceneView.scene!)
+            }
+
+            if parent.measurementPoints.count >= 2 && parent.measurementPoints.count % 2 == 0 {
                 let lastIndex = parent.measurementPoints.count - 1
                 let p1 = parent.measurementPoints[lastIndex - 1]
                 let p2 = parent.measurementPoints[lastIndex]
                 let distance = p1.distance(to: p2)
                 let convertedDistance = measurementUnit.convert(fromMeters: distance)
                 let text = String(format: "%.3f %@", convertedDistance, measurementUnit.abbreviation)
-                addMeasurementLine(from: p1, to: p2, in: sceneView.scene!)
-                let midPoint = SCNVector3((p1.x + p2.x) / 2, (p1.y + p2.y) / 2 + 0.05, (p1.z + p2.z) / 2)
-                parent.measurementLabels.append(MeasurementLabel(text: text, position: midPoint))
+                addMeasurementLine(from: p1, to: p2, label: text, in: sceneView.scene!)
+                parent.measurementLabels.append(MeasurementLabel(text: text, position: SCNVector3.init(0, 0, 0)))
             }
+        }
+
+        /// Snap a point to the nearest axis of a reference point
+        private func snapToAxis(_ point: SCNVector3, relativeTo ref: SCNVector3, threshold: Float) -> SCNVector3 {
+            var snapped = point
+            let dx = abs(point.x - ref.x)
+            let dy = abs(point.y - ref.y)
+            let dz = abs(point.z - ref.z)
+
+            // Find which axis the point is most aligned with
+            // If close to vertical (small dx and dz), snap to pure Y
+            if dx < threshold && dz < threshold {
+                snapped.x = ref.x
+                snapped.z = ref.z
+            }
+            // If close to horizontal-X (small dy), snap Y
+            else if dy < threshold {
+                snapped.y = ref.y
+            }
+            // Snap individual axes if very close
+            else {
+                if dx < threshold * 0.5 { snapped.x = ref.x }
+                if dy < threshold * 0.5 { snapped.y = ref.y }
+                if dz < threshold * 0.5 { snapped.z = ref.z }
+            }
+
+            return snapped
+        }
+
+        /// Show dashed axis guide lines from a measurement point
+        private func showAxisGuides(at point: SCNVector3, in scene: SCNScene) {
+            let guideLength: Float = viewDistance * 1.5
+
+            // Vertical guide (Y axis) - green dashed line
+            addGuide(from: SCNVector3(point.x, point.y - guideLength, point.z),
+                     to: SCNVector3(point.x, point.y + guideLength, point.z),
+                     color: UIColor.green, name: "axisGuide", in: scene)
+
+            // Horizontal X guide - red
+            addGuide(from: SCNVector3(point.x - guideLength, point.y, point.z),
+                     to: SCNVector3(point.x + guideLength, point.y, point.z),
+                     color: UIColor.red.withAlphaComponent(0.4), name: "axisGuide", in: scene)
+
+            // Horizontal Z guide - blue
+            addGuide(from: SCNVector3(point.x, point.y, point.z - guideLength),
+                     to: SCNVector3(point.x, point.y, point.z + guideLength),
+                     color: UIColor.blue.withAlphaComponent(0.4), name: "axisGuide", in: scene)
+        }
+
+        private func addGuide(from: SCNVector3, to: SCNVector3, color: UIColor, name: String, in scene: SCNScene) {
+            let vertices: [SCNVector3] = [from, to]
+            let source = SCNGeometrySource(vertices: vertices)
+            let indices: [Int32] = [0, 1]
+            let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
+            let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
+            let geometry = SCNGeometry(sources: [source], elements: [element])
+            geometry.firstMaterial?.diffuse.contents = color
+            geometry.firstMaterial?.emission.contents = color
+            geometry.firstMaterial?.isDoubleSided = true
+            let node = SCNNode(geometry: geometry)
+            node.name = name
+            scene.rootNode.addChildNode(node)
+        }
+
+        private func removeAxisGuides(from scene: SCNScene) {
+            scene.rootNode.enumerateChildNodes { node, _ in
+                if node.name == "axisGuide" {
+                    node.removeFromParentNode()
+                }
+            }
+        }
+
+        @objc func handleClearMeasurements() {
+            guard let sceneView = sceneView, let scene = sceneView.scene else { return }
+            clearAllMeasurements(in: scene)
         }
 
         @objc func resetCamera() {
@@ -439,28 +542,67 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Measurement Helpers
 
         private func addMeasurementMarker(at position: SCNVector3, in scene: SCNScene) {
-            let sphere = SCNSphere(radius: 0.01)
-            sphere.firstMaterial?.diffuse.contents = UIColor.red
-            sphere.firstMaterial?.emission.contents = UIColor.red.withAlphaComponent(0.5)
+            let sphere = SCNSphere(radius: 0.015)
+            sphere.firstMaterial?.diffuse.contents = UIColor.systemCyan
+            sphere.firstMaterial?.emission.contents = UIColor.systemCyan
             let node = SCNNode(geometry: sphere)
             node.position = position
-            node.name = "measurementMarker"
+            node.name = "measurementNode"
             scene.rootNode.addChildNode(node)
         }
 
-        private func addMeasurementLine(from: SCNVector3, to: SCNVector3, in scene: SCNScene) {
+        private func addMeasurementLine(from: SCNVector3, to: SCNVector3, label: String, in scene: SCNScene) {
+            // Line
             let vertices: [SCNVector3] = [from, to]
             let source = SCNGeometrySource(vertices: vertices)
             let indices: [Int32] = [0, 1]
             let indexData = Data(bytes: indices, count: indices.count * MemoryLayout<Int32>.size)
             let element = SCNGeometryElement(data: indexData, primitiveType: .line, primitiveCount: 1, bytesPerIndex: MemoryLayout<Int32>.size)
             let geometry = SCNGeometry(sources: [source], elements: [element])
-            geometry.firstMaterial?.diffuse.contents = UIColor.yellow
-            geometry.firstMaterial?.emission.contents = UIColor.yellow
+            geometry.firstMaterial?.diffuse.contents = UIColor.systemCyan
+            geometry.firstMaterial?.emission.contents = UIColor.systemCyan
             geometry.firstMaterial?.isDoubleSided = true
             let lineNode = SCNNode(geometry: geometry)
-            lineNode.name = "measurementLine"
+            lineNode.name = "measurementNode"
             scene.rootNode.addChildNode(lineNode)
+
+            // 3D text label at midpoint
+            let midPoint = SCNVector3(
+                (from.x + to.x) / 2,
+                (from.y + to.y) / 2 + 0.03,
+                (from.z + to.z) / 2
+            )
+
+            let text = SCNText(string: label, extrusionDepth: 0.002)
+            text.font = UIFont.systemFont(ofSize: 0.04, weight: .bold)
+            text.flatness = 0.1
+            text.firstMaterial?.diffuse.contents = UIColor.white
+            text.firstMaterial?.emission.contents = UIColor.white
+            text.firstMaterial?.isDoubleSided = true
+
+            let textNode = SCNNode(geometry: text)
+            textNode.name = "measurementNode"
+
+            // Center the text
+            let (textMin, textMax) = textNode.boundingBox
+            let textWidth = textMax.x - textMin.x
+            textNode.pivot = SCNMatrix4MakeTranslation(textWidth / 2, 0, 0)
+            textNode.position = midPoint
+
+            // Billboard constraint - text always faces camera
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = .all
+            textNode.constraints = [billboard]
+
+            scene.rootNode.addChildNode(textNode)
+        }
+
+        func clearAllMeasurements(in scene: SCNScene) {
+            scene.rootNode.enumerateChildNodes { node, _ in
+                if node.name == "measurementNode" || node.name == "axisGuide" {
+                    node.removeFromParentNode()
+                }
+            }
         }
     }
 }

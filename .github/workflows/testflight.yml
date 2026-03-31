@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+      - 'claude/**'
     paths:
       - 'ScanView3D/**'
   workflow_dispatch:  # Allows manual trigger from GitHub UI

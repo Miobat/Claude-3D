@@ -39,8 +39,8 @@ class LiDARScanner: NSObject, ObservableObject {
     private var textureCapturePaused = false
 
     // Memory limits
-    private let maxMemoryUsageMB: Double = 400
-    private let criticalMemoryMB: Double = 150 // available memory threshold
+    private let maxMemoryUsageMB: Double = 800
+    private let criticalMemoryMB: Double = 100 // available memory threshold
 
     // MARK: - Initialization
 
@@ -254,17 +254,17 @@ class LiDARScanner: NSObject, ObservableObject {
             let memoryPressure = totalMB / self.maxMemoryUsageMB
             self.scanCapacityPercent = min(memoryPressure * 100, 100)
 
-            // Auto-pause texture capture if memory is getting tight
+            // Auto-pause texture capture if memory is getting tight (scan continues)
             if availableMemory < self.criticalMemoryMB || totalMB > self.maxMemoryUsageMB {
                 if !self.textureCapturePaused {
                     self.textureCapturePaused = true
-                    self.scanProgress = "Memory limit - texture capture paused"
+                    self.scanProgress = "Photo capture paused (memory) - scan continues"
                     DebugLogger.shared.warn("Texture capture paused: available=\(Int(availableMemory))MB, used=\(Int(totalMB))MB", category: "Scanner")
                 }
             }
 
-            // Critical: auto-stop if about to crash
-            if availableMemory < 80 {
+            // Critical: only stop if truly about to crash (very low memory)
+            if availableMemory < 50 {
                 self.scanProgress = "Low memory - stopping scan"
                 DebugLogger.shared.error("Critical memory: \(Int(availableMemory))MB available, force stopping", category: "Scanner")
                 self.stopScanning()

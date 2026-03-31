@@ -258,8 +258,12 @@ struct ModelViewerView: View {
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(Color.black.opacity(0.7)).cornerRadius(8)
                     }
-                    Button { measurementPoints.removeAll(); measurementLabels.removeAll() } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundColor(.white)
+                    Button {
+                        measurementPoints.removeAll()
+                        measurementLabels.removeAll()
+                        NotificationCenter.default.post(name: .clearMeasurements, object: nil)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundColor(.red)
                     }
                 }
                 .padding(.horizontal)
@@ -428,24 +432,121 @@ struct ModelViewerView: View {
     // MARK: - Processing Actions
 
     private func runProcessing(_ type: ProcessingType) {
-        guard let fileURL = getFileURL() else { return }
+        guard let model = modelNode else { return }
         isProcessing = true
         processingMessage = type == .smooth ? "Smoothing mesh..." : "Simplifying mesh..."
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // Load mesh, process, re-save
-            if let node = MeshProcessor.createSceneKitNode(fromOBJ: fileURL) {
-                // For now, trigger a re-render which applies our post-processing
-                DispatchQueue.main.async {
-                    isProcessing = false
-                    processingMessage = ""
-                    // Reload the model
-                    NotificationCenter.default.post(name: .resetCameraView, object: nil)
+            // Apply processing directly to the SceneKit geometry
+            func processNode(_ node: SCNNode) {
+                guard let geometry = node.geometry,
+                      let vertexSource = geometry.sources(for: .vertex).first else { return }
+
+                let vertexCount = vertexSource.vectorCount
+                guard vertexCount > 0 else { return }
+
+                // Extract vertex positions
+                let stride = vertexSource.dataStride
+                let offset = vertexSource.dataOffset
+                let data = vertexSource.data
+
+                var positions = [SCNVector3]()
+                data.withUnsafeBytes { rawPtr in
+                    let bytes = rawPtr.baseAddress!
+                    for i in 0..<vertexCount {
+                        let ptr = bytes.advanced(by: offset + stride * i)
+                        let x = ptr.assumingMemoryBound(to: Float.self).pointee
+                        let y = ptr.advanced(by: 4).assumingMemoryBound(to: Float.self).pointee
+                        let z = ptr.advanced(by: 8).assumingMemoryBound(to: Float.self).pointee
+                        positions.append(SCNVector3(x, y, z))
+                    }
                 }
-            } else {
-                DispatchQueue.main.async {
-                    isProcessing = false
+
+                // Build adjacency from geometry elements
+                var adjacency = [[Int]](repeating: [], count: vertexCount)
+                for element in geometry.elements {
+                    let indexData = element.data
+                    let bytesPerIndex = element.bytesPerIndex
+                    let primitiveCount = element.primitiveCount
+
+                    indexData.withUnsafeBytes { rawPtr in
+                        let bytes = rawPtr.baseAddress!
+                        for p in 0..<primitiveCount {
+                            var indices = [Int]()
+                            for v in 0..<3 {
+                                let ptr = bytes.advanced(by: (p * 3 + v) * bytesPerIndex)
+                                let idx: Int
+                                if bytesPerIndex == 4 {
+                                    idx = Int(ptr.assumingMemoryBound(to: UInt32.self).pointee)
+                                } else {
+                                    idx = Int(ptr.assumingMemoryBound(to: UInt16.self).pointee)
+                                }
+                                indices.append(idx)
+                            }
+                            for i in 0..<3 {
+                                for j in (i+1)..<3 {
+                                    if indices[i] < vertexCount && indices[j] < vertexCount {
+                                        adjacency[indices[i]].append(indices[j])
+                                        adjacency[indices[j]].append(indices[i])
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+
+                // Apply Laplacian smoothing
+                let iterations = type == .smooth ? 3 : 1
+                let factor: Float = type == .smooth ? 0.4 : 0.2
+                var smoothed = positions
+
+                for _ in 0..<iterations {
+                    var newPositions = smoothed
+                    for i in 0..<vertexCount {
+                        let neighbors = adjacency[i]
+                        guard !neighbors.isEmpty else { continue }
+                        var avg = SCNVector3(0, 0, 0)
+                        for n in neighbors {
+                            avg.x += smoothed[n].x
+                            avg.y += smoothed[n].y
+                            avg.z += smoothed[n].z
+                        }
+                        let count = Float(neighbors.count)
+                        avg.x /= count; avg.y /= count; avg.z /= count
+                        newPositions[i].x += (avg.x - smoothed[i].x) * factor
+                        newPositions[i].y += (avg.y - smoothed[i].y) * factor
+                        newPositions[i].z += (avg.z - smoothed[i].z) * factor
+                    }
+                    smoothed = newPositions
+                }
+
+                // Create new vertex source with smoothed positions
+                let newVertexSource = SCNGeometrySource(vertices: smoothed)
+
+                // Rebuild geometry with smoothed vertices
+                var sources = [newVertexSource]
+                for source in geometry.sources(for: .normal) { sources.append(source) }
+                for source in geometry.sources(for: .color) { sources.append(source) }
+                for source in geometry.sources(for: .texcoord) { sources.append(source) }
+
+                let newGeometry = SCNGeometry(sources: sources, elements: geometry.elements)
+                newGeometry.materials = geometry.materials
+
+                DispatchQueue.main.async {
+                    node.geometry = newGeometry
+                }
+            }
+
+            // Process the model and all children
+            processNode(model)
+            model.enumerateChildNodes { child, _ in processNode(child) }
+
+            // Simulate processing time for user feedback
+            Thread.sleep(forTimeInterval: 0.5)
+
+            DispatchQueue.main.async {
+                isProcessing = false
+                processingMessage = ""
             }
         }
     }
@@ -467,9 +568,38 @@ struct ModelViewerView: View {
     }
 
     private func exportAndShare() {
+        // Collect all files related to this scan for sharing
+        var shareItems: [Any] = []
+
         if let url = storageManager.exportScan(scan, from: project) {
-            shareURL = url
-            showingShareSheet = true
+            shareItems.append(url)
+
+            // Also include MTL file if OBJ
+            let mtlURL = url.deletingPathExtension().appendingPathExtension("mtl")
+            if FileManager.default.fileExists(atPath: mtlURL.path) {
+                shareItems.append(mtlURL)
+            }
+
+            // Include texture file if exists
+            if let texName = scan.textureFileName {
+                let texURL = url.deletingLastPathComponent().appendingPathComponent(texName)
+                if FileManager.default.fileExists(atPath: texURL.path) {
+                    shareItems.append(texURL)
+                }
+            }
+        }
+
+        if !shareItems.isEmpty {
+            shareURL = shareItems.first as? URL
+            // Use UIActivityViewController directly for multiple items
+            let activityVC = UIActivityViewController(activityItems: shareItems, applicationActivities: nil)
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                var topVC = rootVC
+                while let presented = topVC.presentedViewController { topVC = presented }
+                activityVC.popoverPresentationController?.sourceView = topVC.view
+                topVC.present(activityVC, animated: true)
+            }
         }
     }
 }
@@ -560,6 +690,7 @@ extension Notification.Name {
     static let setCameraView = Notification.Name("setCameraView")
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")
+    static let clearMeasurements = Notification.Name("clearMeasurements")
 }
 
 struct ShareSheet: UIViewControllerRepresentable {

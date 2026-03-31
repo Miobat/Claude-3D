@@ -16,20 +16,23 @@ class MeshProcessor {
         switch level {
         case .quick:
             result = removeDegenerateTriangles(result)
+            result = weldNearbyVertices(result, threshold: 0.005)
+            result = removeSmallComponents(result, minVertices: 30)
+            result = recalculateNormals(result)
         case .standard:
             result = removeDegenerateTriangles(result)
-            result = weldNearbyVertices(result, threshold: 0.002)
-            result = removeSmallComponents(result, minVertices: 8)
+            result = weldNearbyVertices(result, threshold: 0.01)
+            result = removeSmallComponents(result, minVertices: 80)
             result = recalculateNormals(result)
+            result = smoothVertexPositions(result, iterations: 1, factor: 0.3)
+            result = smoothNormals(result)
         case .high:
             result = removeDegenerateTriangles(result)
-            result = weldNearbyVertices(result, threshold: 0.003)
-            result = removeSmallComponents(result, minVertices: 20)
+            result = weldNearbyVertices(result, threshold: 0.015)
+            result = removeSmallComponents(result, minVertices: 150)
             result = recalculateNormals(result)
+            result = smoothVertexPositions(result, iterations: 3, factor: 0.4)
             result = smoothNormals(result)
-        case .fusion:
-            // Depth fusion: voxel grid reconstruction for dramatically cleaner mesh
-            result = depthFusionProcess(result, voxelSize: 0.015)
         }
 
         return result
@@ -39,14 +42,12 @@ class MeshProcessor {
         case quick = "Quick"
         case standard = "Standard"
         case high = "High Quality"
-        case fusion = "Fusion"
 
         var description: String {
             switch self {
-            case .quick: return "Basic cleanup, fastest"
-            case .standard: return "Remove fragments, fix normals"
-            case .high: return "Full cleanup, smooth, optimize"
-            case .fusion: return "Depth fusion - cleanest mesh, slower"
+            case .quick: return "Light cleanup, fastest"
+            case .standard: return "Clean mesh, remove debris, smooth"
+            case .high: return "Aggressive cleanup, very smooth surfaces"
             }
         }
 
@@ -55,7 +56,6 @@ class MeshProcessor {
             case .quick: return "hare"
             case .standard: return "wand.and.stars"
             case .high: return "sparkles"
-            case .fusion: return "atom"
             }
         }
     }
@@ -354,6 +354,71 @@ class MeshProcessor {
             colors: meshData.colors,
             boundingBoxMin: meshData.boundingBoxMin,
             boundingBoxMax: meshData.boundingBoxMax
+        )
+    }
+
+    // MARK: - Smooth Vertex Positions (Laplacian Smoothing)
+
+    /// Move each vertex toward the average of its neighbors to smooth the mesh surface
+    static func smoothVertexPositions(_ meshData: MeshData, iterations: Int = 2, factor: Float = 0.3) -> MeshData {
+        var positions = meshData.vertices
+        var colors = meshData.colors
+
+        // Build adjacency
+        var adjacency = [[Int]](repeating: [], count: positions.count)
+        for face in meshData.faces {
+            for i in 0..<face.count {
+                for j in (i+1)..<face.count {
+                    let a = Int(face[i]), b = Int(face[j])
+                    if a < positions.count && b < positions.count {
+                        adjacency[a].append(b)
+                        adjacency[b].append(a)
+                    }
+                }
+            }
+        }
+
+        for _ in 0..<iterations {
+            var newPositions = positions
+            var newColors = colors
+
+            for i in 0..<positions.count {
+                let neighbors = adjacency[i]
+                guard !neighbors.isEmpty else { continue }
+
+                // Average neighbor positions
+                var avgPos = SIMD3<Float>(0, 0, 0)
+                var avgColor = SIMD4<Float>(0, 0, 0, 0)
+                for n in neighbors {
+                    avgPos += positions[n]
+                    if n < colors.count { avgColor += colors[n] }
+                }
+                avgPos /= Float(neighbors.count)
+                avgColor /= Float(neighbors.count)
+
+                // Move vertex toward average by factor
+                newPositions[i] = positions[i] + (avgPos - positions[i]) * factor
+                if i < colors.count && !colors.isEmpty {
+                    newColors[i] = colors[i] + (avgColor - colors[i]) * factor * 0.5
+                }
+            }
+
+            positions = newPositions
+            colors = newColors
+        }
+
+        // Recalculate bounding box
+        var minB = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxB = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for v in positions { minB = min(minB, v); maxB = max(maxB, v) }
+
+        return MeshData(
+            vertices: positions,
+            normals: meshData.normals,
+            faces: meshData.faces,
+            colors: colors,
+            boundingBoxMin: minB,
+            boundingBoxMax: maxB
         )
     }
 
