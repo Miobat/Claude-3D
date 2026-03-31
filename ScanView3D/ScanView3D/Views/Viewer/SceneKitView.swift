@@ -346,11 +346,22 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
             let location = gesture.location(in: sceneView)
             let hitResults = sceneView.hitTest(location, options: [
-                .searchMode: SCNHitTestSearchMode.closest.rawValue,
-                .ignoreHiddenNodes: true
+                .searchMode: SCNHitTestSearchMode.all.rawValue,
+                .ignoreHiddenNodes: true,
+                .boundingBoxOnly: false
             ])
 
-            guard let hit = hitResults.first else { return }
+            // Filter: only hit the actual model geometry, not guides/markers/grid/bounding box
+            let excludedNames: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera"]
+            guard let hit = hitResults.first(where: { result in
+                var node: SCNNode? = result.node
+                while let n = node {
+                    if let name = n.name, excludedNames.contains(name) { return false }
+                    node = n.parent
+                }
+                return true
+            }) else { return }
+
             var point = hit.worldCoordinates
 
             // If we already have an odd number of points (first point placed),
