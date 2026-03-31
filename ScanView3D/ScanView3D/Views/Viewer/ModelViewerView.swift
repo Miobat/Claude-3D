@@ -568,9 +568,38 @@ struct ModelViewerView: View {
     }
 
     private func exportAndShare() {
+        // Collect all files related to this scan for sharing
+        var shareItems: [Any] = []
+
         if let url = storageManager.exportScan(scan, from: project) {
-            shareURL = url
-            showingShareSheet = true
+            shareItems.append(url)
+
+            // Also include MTL file if OBJ
+            let mtlURL = url.deletingPathExtension().appendingPathExtension("mtl")
+            if FileManager.default.fileExists(atPath: mtlURL.path) {
+                shareItems.append(mtlURL)
+            }
+
+            // Include texture file if exists
+            if let texName = scan.textureFileName {
+                let texURL = url.deletingLastPathComponent().appendingPathComponent(texName)
+                if FileManager.default.fileExists(atPath: texURL.path) {
+                    shareItems.append(texURL)
+                }
+            }
+        }
+
+        if !shareItems.isEmpty {
+            shareURL = shareItems.first as? URL
+            // Use UIActivityViewController directly for multiple items
+            let activityVC = UIActivityViewController(activityItems: shareItems, applicationActivities: nil)
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let rootVC = windowScene.windows.first?.rootViewController {
+                var topVC = rootVC
+                while let presented = topVC.presentedViewController { topVC = presented }
+                activityVC.popoverPresentationController?.sourceView = topVC.view
+                topVC.present(activityVC, animated: true)
+            }
         }
     }
 }

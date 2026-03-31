@@ -246,10 +246,10 @@ struct ScanSettings: Codable {
 
         var maxTextureFrames: Int {
             switch self {
-            case .preview: return 20
-            case .standard: return 40
-            case .high: return 60
-            case .ultra: return 80
+            case .preview: return 30
+            case .standard: return 80
+            case .high: return 120
+            case .ultra: return 200
             }
         }
 
