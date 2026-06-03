@@ -197,6 +197,12 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
             DispatchQueue.main.async {
                 if let node = node {
+                    // Metric scale correction for photogrammetry models (which have
+                    // no inherent real-world scale). Measurements use world-space
+                    // hit coordinates, so scaling the node makes them read true metres.
+                    if let s = scan.modelScale, s > 0, abs(s - 1.0) > 0.0001 {
+                        node.simdScale = SIMD3<Float>(repeating: s)
+                    }
                     sceneView.scene?.rootNode.addChildNode(node)
                     self.modelNode = node
 

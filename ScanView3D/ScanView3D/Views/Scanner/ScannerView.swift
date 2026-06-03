@@ -1,4 +1,6 @@
 import SwiftUI
+import SceneKit
+import simd
 #if !targetEnvironment(simulator)
 import ARKit
 #endif
@@ -628,11 +630,22 @@ struct ScannerView: View {
 
                 if settings.captureMode == .highQuality {
                     // Path B: photogrammetry (iOS supports reduced detail on-device)
+                    Section("Reconstruction") {
+                        Picker("Effort", selection: $settings.reconstructQuality) {
+                            ForEach(ScanSettings.ReconstructQuality.allCases, id: \.self) { q in
+                                Text(q.rawValue).tag(q)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(settings.reconstructQuality.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                     Section("Output") {
                         Label("On-device photogrammetry → textured model (USDZ)", systemImage: "sparkles")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("iOS reconstructs at reduced detail on-device. For higher detail, use Splat (Desktop) export.")
+                        Text("iOS caps on-device detail at reduced (Apple limit). Photos are kept so you can re-run as Best later. For higher detail, use Splat (Desktop) export.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -903,6 +916,12 @@ struct ScannerView: View {
             // Keep an in-app point-cloud record so the scan shows up in Projects
             let record = cloud.flatMap { try? storageManager.savePointCloud(meshData: $0, name: scanName, toProject: project) }
 
+            // Persist the zip WITH the scan so it's never lost if the share sheet
+            // glitches — it can be re-sent later from the scan's viewer.
+            if let zipURL = zipURL, let record = record {
+                storageManager.attachSplatBundle(zipURL: zipURL, toScan: record.id, in: project)
+            }
+
             DispatchQueue.main.async {
                 isSaving = false
                 savingProgress = ""
@@ -971,22 +990,30 @@ struct ScannerView: View {
         savingProgress = "Reconstructing… 0%"
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).usdz")
+        // Metric reference from the LiDAR mesh captured in the same session.
+        let lidarExtent = ScannerView.metricExtent(of: scanner.getCombinedMeshData())
+        let quality: PhotogrammetryProcessor.Quality =
+            settings.reconstructQuality == .draft ? .draft : .best
 
         Task {
             do {
                 try await PhotogrammetryProcessor.reconstruct(
                     inputFolder: inputFolder,
-                    outputUSDZ: outputURL
+                    outputUSDZ: outputURL,
+                    quality: quality
                 ) { fraction in
                     DispatchQueue.main.async {
                         self.savingProgress = "Reconstructing… \(Int(fraction * 100))%"
                     }
                 }
 
+                let modelScale = ScannerView.metricScale(forModel: outputURL, lidarExtent: lidarExtent)
                 let scan = try storageManager.importProcessedModel(
                     modelURL: outputURL,
                     name: scanName,
-                    toProject: project
+                    toProject: project,
+                    modelScale: modelScale,
+                    photosFolder: inputFolder
                 )
                 try? FileManager.default.removeItem(at: outputURL)
 
@@ -1010,6 +1037,31 @@ struct ScannerView: View {
         }
     }
     #endif
+}
+
+// MARK: - Photogrammetry Metric Scale
+
+extension ScannerView {
+    /// Diagonal length (metres) of a LiDAR mesh's bounding box, or nil if unusable.
+    static func metricExtent(of mesh: MeshData?) -> Float? {
+        guard let mesh = mesh, mesh.vertexCount > 0 else { return nil }
+        let d = length(mesh.boundingBoxMax - mesh.boundingBoxMin)
+        return (d.isFinite && d > 0.01) ? d : nil
+    }
+
+    /// Uniform scale that makes a photogrammetry model (no inherent real-world
+    /// scale) match the metric size measured by LiDAR in the same session.
+    static func metricScale(forModel url: URL, lidarExtent: Float?) -> Float? {
+        guard let lidar = lidarExtent,
+              let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }
+        let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
+        let dx = Float(mx.x - mn.x), dy = Float(mx.y - mn.y), dz = Float(mx.z - mn.z)
+        let modelDiag = sqrtf(dx * dx + dy * dy + dz * dz)
+        guard modelDiag.isFinite, modelDiag > 0.0001 else { return nil }
+        let s = lidar / modelDiag
+        // Reject implausible ratios (poor LiDAR coverage etc.) to avoid worsening it.
+        return (s > 0.02 && s < 50) ? s : nil
+    }
 }
 
 // MARK: - Simulator Scan View

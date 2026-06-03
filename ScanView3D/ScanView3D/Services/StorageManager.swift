@@ -210,7 +210,11 @@ class StorageManager: ObservableObject {
     }
 
     /// Register a scan from an already-produced model file (e.g. a photogrammetry USDZ).
-    func importProcessedModel(modelURL: URL, name: String, toProject project: Project) throws -> Scan {
+    /// - modelScale: uniform metric scale correction (photogrammetry has no real-world
+    ///   scale; we derive this from the LiDAR mesh captured in the same session).
+    /// - photosFolder: source photos to keep with the scan for later re-reconstruction.
+    func importProcessedModel(modelURL: URL, name: String, toProject project: Project,
+                              modelScale: Float? = nil, photosFolder: URL? = nil) throws -> Scan {
         let scanId = UUID()
         let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
         let fileName = "\(scanId.uuidString).\(ext)"
@@ -225,7 +229,25 @@ class StorageManager: ObservableObject {
         var scan = Scan(name: name, fileName: fileName, vertexCount: 0, faceCount: 0, fileSize: fileSize)
         scan.hasTexture = true
         scan.hasColor = true
+        scan.modelScale = modelScale
         scan.thumbnailData = generateThumbnail(fromModelURL: destURL)
+
+        // Record true (scaled) dimensions so the info panel reads metric.
+        if let scene = try? SCNScene(url: destURL, options: [.checkConsistency: false]) {
+            let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
+            let s = modelScale ?? 1.0
+            scan.boundingBoxMin = SIMD3<Float>(Float(mn.x) * s, Float(mn.y) * s, Float(mn.z) * s)
+            scan.boundingBoxMax = SIMD3<Float>(Float(mx.x) * s, Float(mx.y) * s, Float(mx.z) * s)
+        }
+
+        // Keep the source photos so the user can re-reconstruct at higher effort later.
+        if let photosFolder = photosFolder {
+            let kept = scanDir.appendingPathComponent("\(scanId.uuidString)_photos")
+            try? fileManager.removeItem(at: kept)
+            if (try? fileManager.copyItem(at: photosFolder, to: kept)) != nil {
+                scan.captureFolderName = kept.lastPathComponent
+            }
+        }
 
         if let index = projects.firstIndex(where: { $0.id == project.id }) {
             projects[index].addScan(scan)
@@ -235,6 +257,60 @@ class StorageManager: ObservableObject {
             saveProjects()
         }
         return scan
+    }
+
+    // MARK: - Re-export / Re-process helpers
+
+    /// URL of a saved Splat bundle zip, if this scan has one.
+    func splatBundleURL(for scan: Scan, in project: Project) -> URL? {
+        guard let name = scan.splatBundleName else { return nil }
+        let url = scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(name)
+        return fileManager.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// URL of the kept source-photos folder for a High-Quality scan, if present.
+    func captureFolderURL(for scan: Scan, in project: Project) -> URL? {
+        guard let name = scan.captureFolderName else { return nil }
+        let url = scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(name)
+        return fileManager.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Copy a prepared Splat zip next to the scan so it can be re-shared anytime.
+    func attachSplatBundle(zipURL: URL, toScan scanID: UUID, in project: Project) {
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try? fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+        let dest = scanDir.appendingPathComponent("\(scanID.uuidString)_bundle.zip")
+        try? fileManager.removeItem(at: dest)
+        guard (try? fileManager.copyItem(at: zipURL, to: dest)) != nil else { return }
+        if let pi = projects.firstIndex(where: { $0.id == project.id }),
+           let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) {
+            projects[pi].scans[si].splatBundleName = dest.lastPathComponent
+            saveProjects()
+        }
+    }
+
+    /// Replace a photogrammetry scan's model file in place (used by re-reconstruct).
+    func replacePhotogrammetryModel(scanID: UUID, in project: Project,
+                                    newModelURL: URL, modelScale: Float?) throws {
+        guard let pi = projects.firstIndex(where: { $0.id == project.id }),
+              let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let fileName = projects[pi].scans[si].fileName
+        let destURL = scanDir.appendingPathComponent(fileName)
+        try? fileManager.removeItem(at: destURL)
+        try fileManager.copyItem(at: newModelURL, to: destURL)
+
+        let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
+        projects[pi].scans[si].fileSize = fileSize
+        projects[pi].scans[si].modelScale = modelScale
+        projects[pi].scans[si].thumbnailData = generateThumbnail(fromModelURL: destURL)
+        if let scene = try? SCNScene(url: destURL, options: [.checkConsistency: false]) {
+            let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
+            let s = modelScale ?? 1.0
+            projects[pi].scans[si].boundingBoxMin = SIMD3<Float>(Float(mn.x) * s, Float(mn.y) * s, Float(mn.z) * s)
+            projects[pi].scans[si].boundingBoxMax = SIMD3<Float>(Float(mx.x) * s, Float(mx.y) * s, Float(mx.z) * s)
+        }
+        saveProjects()
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.

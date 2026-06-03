@@ -1,12 +1,15 @@
 import SwiftUI
 import SceneKit
+import simd
 
 /// Full-screen 3D model viewer with measurement, processing, and visualization tools
 struct ModelViewerView: View {
-    let scan: Scan
+    @State var scan: Scan
     let project: Project
     @EnvironmentObject var storageManager: StorageManager
 
+    // Bumped to force the SceneKit view to rebuild (e.g. after re-reconstruction).
+    @State private var reloadToken = UUID()
     @State private var sceneView: SCNView?
     @State private var modelNode: SCNNode?
     @State private var isLoading = true
@@ -93,6 +96,7 @@ struct ModelViewerView: View {
                 measurementLabels: $measurementLabels,
                 measurementUnit: $measurementUnit
             )
+            .id(reloadToken)
             .ignoresSafeArea(edges: .bottom)
 
             if isLoading { loadingOverlay }
@@ -397,9 +401,72 @@ struct ModelViewerView: View {
         }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
             Button("Capture Floorplan Image") { captureFloorplanImage() }
+            if storageManager.splatBundleURL(for: scan, in: project) != nil {
+                Button("Send Splat Bundle (.zip)") { sendSplatBundle() }
+            }
+            #if !targetEnvironment(simulator)
+            if storageManager.captureFolderURL(for: scan, in: project) != nil {
+                Button("Re-reconstruct (Best Quality)") { reReconstruct() }
+            }
+            #endif
             Button("Cancel", role: .cancel) {}
         }
     }
+
+    /// Re-share the Splat bundle zip that was saved with this scan.
+    private func sendSplatBundle() {
+        guard let url = storageManager.splatBundleURL(for: scan, in: project) else { return }
+        shareURL = url
+        showingShareSheet = true
+    }
+
+    #if !targetEnvironment(simulator)
+    /// Re-run on-device photogrammetry from the kept photos at Best effort.
+    private func reReconstruct() {
+        guard let photos = storageManager.captureFolderURL(for: scan, in: project) else { return }
+        isProcessing = true
+        processingMessage = "Reconstructing… 0%"
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).usdz")
+        let lidarExtent = scan.boundingBoxMin.flatMap { mn in
+            scan.boundingBoxMax.map { mx in length(mx - mn) }
+        }
+        Task {
+            do {
+                try await PhotogrammetryProcessor.reconstruct(
+                    inputFolder: photos, outputUSDZ: outputURL, quality: .best
+                ) { fraction in
+                    DispatchQueue.main.async { self.processingMessage = "Reconstructing… \(Int(fraction * 100))%" }
+                }
+                let scale = ScannerView.metricScale(forModel: outputURL, lidarExtent: lidarExtent)
+                try storageManager.replacePhotogrammetryModel(
+                    scanID: scan.id, in: project, newModelURL: outputURL, modelScale: scale
+                )
+                try? FileManager.default.removeItem(at: outputURL)
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.processingMessage = ""
+                    // Refresh the local scan copy (new model + metric scale) and
+                    // force the SceneKit view to rebuild from the updated file.
+                    if let updated = self.storageManager.projects
+                        .first(where: { $0.id == self.project.id })?
+                        .scans.first(where: { $0.id == self.scan.id }) {
+                        self.scan = updated
+                    }
+                    NotificationCenter.default.post(name: .clearMeasurements, object: nil)
+                    self.modelNode = nil
+                    self.reloadToken = UUID()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isProcessing = false
+                    self.processingMessage = ""
+                    self.loadError = "Re-reconstruction failed: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    #endif
 
     // MARK: - Camera View Presets
 

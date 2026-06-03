@@ -776,11 +776,20 @@ enum PhotogrammetryProcessor {
         }
     }
 
+    /// On-device reconstruction effort. iOS caps mesh detail at `.reduced`
+    /// (Apple limitation; `.medium`/`.full` are macOS-only), so this trades
+    /// feature-matching effort and photo count for speed — not a detail tier.
+    enum Quality {
+        case draft   // fewer photos, normal sensitivity — fastest
+        case best    // all photos, high sensitivity — slower, sharper
+    }
+
     /// Reconstruct a textured USDZ from a folder of images.
     /// `progress` is called with values in 0...1 as the session works.
     static func reconstruct(
         inputFolder: URL,
         outputUSDZ: URL,
+        quality: Quality = .best,
         progress: @escaping (Double) -> Void
     ) async throws {
         guard isSupported else { throw ProcessError.notSupported }
@@ -790,18 +799,39 @@ enum PhotogrammetryProcessor {
         // Splat (Desktop) export or cloud.
         let requestDetail: PhotogrammetrySession.Request.Detail = .reduced
 
-        let images = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
-        let imageCount = images.filter {
+        let allImages = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
+        let imageNames = allImages.filter {
             let l = $0.lowercased()
             return l.hasSuffix(".jpg") || l.hasSuffix(".jpeg") || l.hasSuffix(".heic")
-        }.count
-        guard imageCount >= 3 else { throw ProcessError.noImages }
+        }.sorted()
+        guard imageNames.count >= 3 else { throw ProcessError.noImages }
+
+        // Draft trades quality for speed by feeding a subset (every other photo)
+        // from a temporary folder of hard links, keeping the originals intact.
+        var workingFolder = inputFolder
+        var tempFolder: URL?
+        if quality == .draft && imageNames.count >= 12 {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("draft-\(UUID().uuidString)")
+            if (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil {
+                for (i, name) in imageNames.enumerated() where i % 2 == 0 {
+                    let src = inputFolder.appendingPathComponent(name)
+                    let dst = tmp.appendingPathComponent(name)
+                    try? FileManager.default.linkItem(at: src, to: dst)
+                }
+                if let n = try? FileManager.default.contentsOfDirectory(atPath: tmp.path), n.count >= 3 {
+                    workingFolder = tmp
+                    tempFolder = tmp
+                }
+            }
+        }
+        defer { if let t = tempFolder { try? FileManager.default.removeItem(at: t) } }
 
         var configuration = PhotogrammetrySession.Configuration()
         configuration.sampleOrdering = .sequential
-        configuration.featureSensitivity = .high
+        configuration.featureSensitivity = (quality == .best) ? .high : .normal
 
-        let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
+        let session = try PhotogrammetrySession(input: workingFolder, configuration: configuration)
         try session.process(requests: [
             .modelFile(url: outputUSDZ, detail: requestDetail)
         ])

@@ -84,6 +84,11 @@ struct Scan: Identifiable, Codable {
     var thumbnailData: Data?
     var notes: String?
     var textureFileName: String?
+    // Re-export / re-process support (all optional so existing saved projects
+    // keep decoding). Set only for the relevant capture modes.
+    var splatBundleName: String?     // zip under the scan dir, re-shareable anytime (Splat mode)
+    var captureFolderName: String?   // folder of source photos kept for later re-reconstruction (HQ mode)
+    var modelScale: Float?           // uniform metric scale correction for photogrammetry models
 
     init(name: String, fileName: String, vertexCount: Int = 0, faceCount: Int = 0, fileSize: Int64 = 0) {
         self.id = UUID()
@@ -137,6 +142,31 @@ struct ScanSettings: Codable {
     var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
     var captureMode: CaptureMode = .fast
     var detailMM: Float = 10.0        // Point/mesh grid spacing in mm (5 = fine, 20 = coarse)
+    var reconstructQuality: ReconstructQuality = .best  // High-Quality photogrammetry effort
+
+    // MARK: - Reconstruction Quality (High-Quality / photogrammetry)
+
+    /// On-device iOS photogrammetry is capped at `.reduced` mesh detail by Apple,
+    /// so this controls reconstruction *effort* (feature matching + how many photos
+    /// are used), trading speed against fidelity — not a higher detail tier.
+    enum ReconstructQuality: String, Codable, CaseIterable {
+        case draft = "Draft"   // fewer photos, normal sensitivity — fastest
+        case best = "Best"     // all photos, high sensitivity — slower, sharper
+
+        var description: String {
+            switch self {
+            case .draft: return "Fast preview. Uses fewer photos. Re-do as Best later."
+            case .best: return "Slower, sharpest the device can do (reduced detail)."
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .draft: return "hare"
+            case .best: return "tortoise"
+            }
+        }
+    }
 
     // MARK: - Capture Mode
 
