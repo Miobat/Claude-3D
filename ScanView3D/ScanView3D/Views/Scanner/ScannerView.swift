@@ -699,12 +699,12 @@ struct ScannerView: View {
             do {
                 let meshData = MeshProcessor.postProcess(rawMesh, level: processingLevel)
 
-                DispatchQueue.main.async { self.savingProgress = "Building texture..." }
+                DispatchQueue.main.async { self.savingProgress = "Baking texture..." }
 
-                // Build texture atlas for OBJ if we have camera data
-                var textureAtlas: TextureAtlasResult?
+                // Bake a high-resolution UV texture atlas for OBJ if we have camera data
+                var baked: BakedTexture?
                 if exportFormat == .obj && settings.captureTexture {
-                    textureAtlas = scanner.buildTextureAtlas(meshData: meshData)
+                    baked = scanner.bakeTexture(meshData: meshData)
                 }
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
@@ -714,7 +714,7 @@ struct ScannerView: View {
                     name: scanName,
                     toProject: project,
                     format: exportFormat,
-                    textureAtlas: textureAtlas
+                    baked: baked
                 )
 
                 DispatchQueue.main.async {

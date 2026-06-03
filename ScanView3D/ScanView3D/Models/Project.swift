@@ -272,6 +272,16 @@ struct ScanSettings: Codable {
             }
         }
 
+        /// Size (px) of the baked UV texture atlas. Larger = sharper surface detail.
+        var bakeAtlasSize: Int {
+            switch self {
+            case .preview: return 2048
+            case .standard: return 4096
+            case .high: return 6144
+            case .ultra: return 8192
+            }
+        }
+
         var description: String {
             switch self {
             case .preview: return "Fast scan, lower detail"

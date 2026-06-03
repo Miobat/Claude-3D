@@ -475,6 +475,58 @@ class MeshProcessor {
         return SCNNode(geometry: geometry)
     }
 
+    /// Build a UV-textured SceneKit node from a baked atlas.
+    /// Vertices are expanded per-face-corner so each triangle carries its own UVs.
+    static func createTexturedNode(from meshData: MeshData, baked: BakedTexture) -> SCNNode {
+        var positions: [SCNVector3] = []
+        var normals: [SCNVector3] = []
+        var uvs: [CGPoint] = []
+        positions.reserveCapacity(meshData.faceCount * 3)
+        normals.reserveCapacity(meshData.faceCount * 3)
+        uvs.reserveCapacity(meshData.faceCount * 3)
+
+        let normalCount = meshData.normals.count
+        for (fi, face) in meshData.faces.enumerated() {
+            guard face.count == 3 else { continue }
+            for k in 0..<3 {
+                let vi = Int(face[k])
+                guard vi < meshData.vertices.count else { continue }
+                let v = meshData.vertices[vi]
+                positions.append(SCNVector3(v.x, v.y, v.z))
+                let n = vi < normalCount ? meshData.normals[vi] : SIMD3<Float>(0, 1, 0)
+                normals.append(SCNVector3(n.x, n.y, n.z))
+                let uvIdx = fi * 3 + k
+                let uv = uvIdx < baked.cornerUVs.count ? baked.cornerUVs[uvIdx] : SIMD2<Float>(0, 0)
+                uvs.append(CGPoint(x: CGFloat(uv.x), y: CGFloat(uv.y)))
+            }
+        }
+
+        let vertexSource = SCNGeometrySource(vertices: positions)
+        let normalSource = SCNGeometrySource(normals: normals)
+        let uvSource = SCNGeometrySource(textureCoordinates: uvs)
+
+        let indices = Array(0..<UInt32(positions.count))
+        let element = SCNGeometryElement(indices: indices, primitiveType: .triangles)
+
+        let geometry = SCNGeometry(sources: [vertexSource, normalSource, uvSource], elements: [element])
+
+        let material = SCNMaterial()
+        material.isDoubleSided = true
+        // Unlit so the baked photo texture shows true-to-photo (Street-View style),
+        // not darkened/relit by scene lighting.
+        material.lightingModel = .constant
+        material.diffuse.contents = baked.atlasImage
+        material.diffuse.magnificationFilter = .linear
+        material.diffuse.minificationFilter = .linear
+        // Nearest mip avoids cross-cell color bleed in the packed atlas.
+        material.diffuse.mipFilter = .nearest
+        material.diffuse.wrapS = .clamp
+        material.diffuse.wrapT = .clamp
+        geometry.materials = [material]
+
+        return SCNNode(geometry: geometry)
+    }
+
     /// Create a SceneKit node from an OBJ file URL
     static func createSceneKitNode(fromOBJ url: URL) -> SCNNode? {
         do {

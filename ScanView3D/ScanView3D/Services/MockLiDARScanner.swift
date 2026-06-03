@@ -127,7 +127,7 @@ class MockLiDARScanner: ObservableObject {
         return nil // No real planes in simulator
     }
 
-    func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
+    func bakeTexture(meshData: MeshData) -> BakedTexture? {
         return nil // No real camera in simulator
     }
 

@@ -499,11 +499,11 @@ class LiDARScanner: NSObject, ObservableObject {
         )
     }
 
-    /// Build texture atlas for current mesh data
-    func buildTextureAtlas(meshData: MeshData) -> TextureAtlasResult? {
-        return textureMapper.buildTextureAtlas(
+    /// Bake a high-resolution UV texture atlas for the current mesh data.
+    func bakeTexture(meshData: MeshData) -> BakedTexture? {
+        return textureMapper.bakeTexture(
             meshData: meshData,
-            tileSize: scanQuality.textureAtlasTileSize
+            atlasSize: scanQuality.bakeAtlasSize
         )
     }
 
