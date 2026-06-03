@@ -8,12 +8,13 @@ on:
       - 'claude/**'
     paths:
       - 'ScanView3D/**'
+      - '.github/workflows/**'
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
 jobs:
   build-and-deploy:
     name: Build & Upload to TestFlight
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
 
     defaults:
@@ -24,29 +25,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select latest Xcode 16 and show info
+      - name: Select Xcode 26+ (required for App Store upload)
         run: |
-          # Find the latest Xcode 16.x on this runner
-          XCODE_PATH=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          # Apple requires Xcode 26 / iOS 26 SDK to upload. Prefer Xcode 26.x,
+          # fall back to the newest installed Xcode, and fail loudly if < 26.
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
           if [ -z "$XCODE_PATH" ]; then
-            echo "::error::No Xcode 16.x found. Available versions:"
-            ls -d /Applications/Xcode*.app
-            exit 1
+            XCODE_PATH=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$XCODE_PATH" ]; then
+            echo "::error::No Xcode found on runner"; ls -d /Applications/Xcode*.app || true; exit 1
           fi
           echo "Selected: $XCODE_PATH"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
-          # Show available simulator runtimes
-          xcrun simctl list runtimes || true
-
-      - name: Install iOS Simulator runtime (if needed)
-        run: |
-          # Check if an iOS 18+ simulator runtime exists
-          if ! xcrun simctl list runtimes | grep -q "iOS 18"; then
-            echo "No iOS 18 simulator runtime found, installing..."
-            xcodebuild -downloadPlatform iOS || true
-          else
-            echo "iOS 18 simulator runtime already available"
+          MAJOR=$(xcodebuild -version | sed -n 's/^Xcode \([0-9][0-9]*\).*/\1/p')
+          echo "Xcode major version: ${MAJOR:-unknown}"
+          if [ "${MAJOR:-0}" -lt 26 ]; then
+            echo "::error::Apple requires Xcode 26+ (iOS 26 SDK) to upload, but this runner's newest is Xcode ${MAJOR:-unknown}."
+            echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app || true
+            exit 1
           fi
 
       - name: Set up Ruby
