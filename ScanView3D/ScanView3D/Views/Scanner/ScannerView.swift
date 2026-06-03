@@ -126,7 +126,7 @@ struct ScannerView: View {
                             .font(.caption2)
                         Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
                             .font(.caption2)
-                        if settings.captureMode == .highQuality {
+                        if settings.captureMode == .highQuality || settings.captureMode == .splatExport {
                             Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack")
                                 .font(.caption2)
                         } else if scanner.capturedFrameCount > 0 {
@@ -616,6 +616,15 @@ struct ScannerView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
+                } else if settings.captureMode == .splatExport {
+                    Section("Output") {
+                        Label("Splat bundle (images + transforms.json + points3D.ply)", systemImage: "square.and.arrow.up.on.square")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("On Save, a .zip is shared to send to your computer for splat training.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 } else {
                     // Path A: mesh post-processing + export format
                     Section("Post-Processing") {
@@ -762,6 +771,12 @@ struct ScannerView: View {
             return
         }
 
+        // Splat (Desktop): package posed photos + point cloud and share for desktop training
+        if settings.captureMode == .splatExport, let folder = scanner.getCaptureFolderURL() {
+            runSplatExport(project: project, folder: folder)
+            return
+        }
+
         // For Area mode, try plane-based reconstruction first
         let rawMeshData: MeshData?
         #if !targetEnvironment(simulator)
@@ -823,6 +838,55 @@ struct ScannerView: View {
                 }
             }
         }
+    }
+
+    /// Splat (Desktop): write transforms.json + points3D.ply + README into the
+    /// captured-photo folder, zip it, and present the share sheet for the computer.
+    private func runSplatExport(project: Project, folder: URL) {
+        let poses = scanner.capturedPoses
+        guard !poses.isEmpty else {
+            errorMessage = "No photos captured. Move slowly around the subject, then save."
+            showingError = true
+            return
+        }
+        isSaving = true
+        savingProgress = "Packaging for desktop…"
+        let cloud = scanner.getCombinedMeshData()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            SplatExporter.writeBundle(imageFolder: folder, poses: poses, pointCloud: cloud)
+            let zipURL = SplatExporter.zip(folder: folder)
+
+            // Keep an in-app point-cloud record so the scan shows up in Projects
+            let record = cloud.flatMap { try? storageManager.savePointCloud(meshData: $0, name: scanName, toProject: project) }
+
+            DispatchQueue.main.async {
+                isSaving = false
+                savingProgress = ""
+                showingSaveDialog = false
+                _ = record
+                if let zipURL = zipURL {
+                    presentShareSheet(url: zipURL)
+                } else {
+                    errorMessage = "Could not package the splat bundle."
+                    showingError = true
+                }
+                scanner.resetScanning()
+            }
+        }
+    }
+
+    /// Present the iOS share sheet (AirDrop / Files / Mail / …) for a file.
+    private func presentShareSheet(url: URL) {
+        let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+                ?? scene.windows.first?.rootViewController else { return }
+        var top = root
+        while let presented = top.presentedViewController { top = presented }
+        activity.popoverPresentationController?.sourceView = top.view
+        activity.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+        top.present(activity, animated: true)
     }
 
     /// Path C foundation: save the scan's colored world-space points as a point cloud.

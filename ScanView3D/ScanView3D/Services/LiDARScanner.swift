@@ -48,6 +48,7 @@ class LiDARScanner: NSObject, ObservableObject {
     private let maxHighResFrames: Int = 250
     private let ciContext = CIContext()
     private let hqSaveQueue = DispatchQueue(label: "scanview.hq.save", qos: .utility)
+    private(set) var capturedPoses: [CapturedPose] = []
 
     // Memory limits
     private let maxMemoryUsageMB: Double = 800
@@ -117,11 +118,12 @@ class LiDARScanner: NSObject, ObservableObject {
         self.confidenceThreshold = [0.3, 0.5, 0.7][min(confidenceLevel, 2)]
         self.textureCapturePaused = false
 
-        // High-Quality capture: prepare a fresh folder for full-res photos
+        // High-Quality / Splat-export: prepare a fresh folder for full-res posed photos
         self.captureMode = captureMode
         self.highResFrameCount = 0
         self.lastHighResSaveTime = 0
-        if captureMode == .highQuality {
+        self.capturedPoses = []
+        if captureMode == .highQuality || captureMode == .splatExport {
             self.captureFolderURL = makeCaptureFolder()
         } else {
             self.captureFolderURL = nil
@@ -220,6 +222,7 @@ class LiDARScanner: NSObject, ObservableObject {
         }
         captureFolderURL = nil
         highResFrameCount = 0
+        capturedPoses = []
         captureMode = .fast
         scanProgress = "Ready to scan"
     }
@@ -251,8 +254,8 @@ class LiDARScanner: NSObject, ObservableObject {
             }
         }
 
-        // Path B: full-resolution photos saved to disk for photogrammetry
-        if captureMode == .highQuality {
+        // Path B / Splat export: full-resolution posed photos saved to disk
+        if captureMode == .highQuality || captureMode == .splatExport {
             saveHighResFrame(frame)
         }
     }
@@ -279,8 +282,20 @@ class LiDARScanner: NSObject, ObservableObject {
         let index = highResFrameCount
         highResFrameCount = index + 1
 
+        // Record this keyframe's pose + intrinsics (for desktop splat export)
+        let pixelBuffer = frame.capturedImage
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+        capturedPoses.append(CapturedPose(
+            index: index,
+            transform: frame.camera.transform,
+            intrinsics: frame.camera.intrinsics,
+            width: w,
+            height: h
+        ))
+
         // Retain the pixel buffer via CIImage, then JPEG-encode off the main thread.
-        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let url = folder.appendingPathComponent(String(format: "frame_%04d.jpg", index))
         let context = ciContext
         hqSaveQueue.async {
@@ -295,6 +310,12 @@ class LiDARScanner: NSObject, ObservableObject {
     func getPhotogrammetryInputURL() -> URL? {
         guard captureMode == .highQuality, let folder = captureFolderURL else { return nil }
         return folder
+    }
+
+    /// Folder of captured posed photos for splat export, or nil.
+    func getCaptureFolderURL() -> URL? {
+        guard captureMode == .splatExport || captureMode == .highQuality else { return nil }
+        return captureFolderURL
     }
 
     // MARK: - Memory Monitoring

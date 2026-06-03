@@ -137,6 +137,12 @@ class MockLiDARScanner: ObservableObject {
         return nil // No real photos in simulator
     }
 
+    private(set) var capturedPoses: [CapturedPose] = []
+
+    func getCaptureFolderURL() -> URL? {
+        return nil // No real photos in simulator
+    }
+
     // MARK: - Sample Room Mesh Generation
 
     private static let sampleRoomVertexCount = 1200

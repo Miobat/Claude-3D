@@ -1,4 +1,15 @@
 import Foundation
+import simd
+
+/// A captured keyframe's camera pose + intrinsics, paired with a saved photo
+/// (by index). Used to export posed images for desktop Gaussian-splat training.
+struct CapturedPose {
+    let index: Int
+    let transform: simd_float4x4   // camera-to-world (ARKit; OpenGL/nerfstudio convention)
+    let intrinsics: simd_float3x3  // for the full-res captured image
+    let width: Int
+    let height: Int
+}
 
 /// Represents a scanning project containing multiple scans
 struct Project: Identifiable, Codable, Hashable {
@@ -130,7 +141,8 @@ enum ReconstructionDetail: String, CaseIterable, Codable {
 
 /// Settings for the scanning session
 struct ScanSettings: Codable {
-    var captureTexture: Bool = true    var meshDetail: MeshDetail = .medium
+    var captureTexture: Bool = true
+    var meshDetail: MeshDetail = .medium
     var unit: MeasurementUnit = .meters
     var autoSave: Bool = true
     var scanRange: ScanRange = .room
@@ -155,12 +167,17 @@ struct ScanSettings: Codable {
         /// depth + camera color. The initialization for Gaussian Splatting, and
         /// exportable as PLY.
         case pointCloud = "Point Cloud"
+        /// Splat (Desktop): captures posed full-res photos + point cloud and
+        /// exports a bundle (images + transforms.json + points3D.ply) so a
+        /// computer can train a Gaussian splat, skipping COLMAP.
+        case splatExport = "Splat (Desktop)"
 
         var description: String {
             switch self {
             case .fast: return "Quick mesh + baked texture. Best for big areas & measuring."
             case .highQuality: return "Saves full-res photos for photoreal post-processing."
             case .pointCloud: return "Dense colored point cloud (splat foundation). Exports PLY."
+            case .splatExport: return "Posed photos + point cloud, exported for desktop splat training."
             }
         }
 
@@ -169,6 +186,7 @@ struct ScanSettings: Codable {
             case .fast: return "bolt.fill"
             case .highQuality: return "sparkles"
             case .pointCloud: return "aqi.medium"
+            case .splatExport: return "square.and.arrow.up.on.square"
             }
         }
     }

@@ -739,3 +739,90 @@ enum PhotogrammetryProcessor {
     }
 }
 #endif
+
+// MARK: - Splat Desktop Export (Path C, no cloud)
+
+/// Packages a scan's posed photos + point cloud into a bundle a desktop Gaussian-
+/// splat tool can train from directly. Because ARKit supplies camera poses, the
+/// desktop side can skip COLMAP entirely.
+enum SplatExporter {
+
+    /// Write transforms.json (instant-ngp/nerfstudio convention), points3D.ply,
+    /// and a README into the folder that already holds the captured frames.
+    static func writeBundle(imageFolder: URL, poses: [CapturedPose], pointCloud: MeshData?) {
+        if let first = poses.first {
+            let fx = Double(first.intrinsics[0][0])
+            let fy = Double(first.intrinsics[1][1])
+            let cx = Double(first.intrinsics[2][0])
+            let cy = Double(first.intrinsics[2][1])
+
+            var frames: [[String: Any]] = []
+            for p in poses {
+                let m = p.transform
+                // row-major 4x4: element(row r, col c) = m[c][r]
+                var rows: [[Double]] = []
+                for r in 0..<4 {
+                    rows.append([Double(m[0][r]), Double(m[1][r]), Double(m[2][r]), Double(m[3][r])])
+                }
+                frames.append([
+                    "file_path": String(format: "frame_%04d.jpg", p.index),
+                    "transform_matrix": rows
+                ])
+            }
+
+            let root: [String: Any] = [
+                "camera_model": "OPENCV",
+                "fl_x": fx, "fl_y": fy, "cx": cx, "cy": cy,
+                "w": first.width, "h": first.height,
+                "aabb_scale": 16,
+                "ply_file_path": "points3D.ply",
+                "frames": frames
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]) {
+                try? data.write(to: imageFolder.appendingPathComponent("transforms.json"))
+            }
+        }
+
+        if let cloud = pointCloud, !cloud.vertices.isEmpty {
+            _ = try? OBJExporter.exportPointCloudPLY(meshData: cloud, fileName: "points3D", directory: imageFolder)
+        }
+
+        let readme = """
+        ScanView 3D — Gaussian Splat capture bundle
+        ===========================================
+
+        Contents:
+          frame_XXXX.jpg     Captured photos (full resolution)
+          transforms.json    Camera intrinsics + per-image poses
+                             (instant-ngp / Nerfstudio convention, OpenGL axes)
+          points3D.ply       LiDAR colored point cloud (use as init)
+
+        Poses are included from ARKit, so you can SKIP COLMAP / structure-from-motion.
+
+        Train a Gaussian splat on your computer, e.g.:
+          • Nerfstudio:  ns-train splatfacto --data <thisFolder>
+          • Postshot:    import transforms.json (poses are read directly)
+          • gsplat / inria 3DGS: convert transforms.json to your loader, init from points3D.ply
+
+        Tip: if a tool expects the opposite handedness, flip the Y and Z axes of each
+        transform_matrix.
+        """
+        try? readme.write(to: imageFolder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+    }
+
+    /// Zip the bundle folder for sharing (uses the documented NSFileCoordinator trick).
+    static func zip(folder: URL) -> URL? {
+        let coordinator = NSFileCoordinator()
+        var nsError: NSError?
+        var result: URL?
+        coordinator.coordinate(readingItemAt: folder, options: [.forUploading], error: &nsError) { zipURL in
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent(folder.lastPathComponent + "_splat.zip")
+            try? FileManager.default.removeItem(at: dest)
+            if (try? FileManager.default.copyItem(at: zipURL, to: dest)) != nil {
+                result = dest
+            }
+        }
+        return result
+    }
+}
