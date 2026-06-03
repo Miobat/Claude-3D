@@ -336,7 +336,6 @@ class LiDARScanner: NSObject, ObservableObject {
             let opts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.9]
             CGImageDestinationSetProperties(dest, opts as CFDictionary)
             CGImageDestinationFinalize(dest)
-            }
         }
     }
 
