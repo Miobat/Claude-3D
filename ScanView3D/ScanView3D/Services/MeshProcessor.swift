@@ -1,5 +1,6 @@
 import Foundation
 import SceneKit
+import RealityKit
 #if !targetEnvironment(simulator)
 import ARKit
 #endif
@@ -527,6 +528,42 @@ class MeshProcessor {
         return SCNNode(geometry: geometry)
     }
 
+    /// Build a colored point-cloud SceneKit node (Path C foundation / splat init).
+    static func createPointCloudNode(from meshData: MeshData) -> SCNNode {
+        let vertices = meshData.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+
+        var sources = [vertexSource]
+        if !meshData.colors.isEmpty {
+            let colorData = Data(bytes: meshData.colors, count: meshData.colors.count * MemoryLayout<SIMD4<Float>>.stride)
+            let colorSource = SCNGeometrySource(
+                data: colorData,
+                semantic: .color,
+                vectorCount: meshData.colors.count,
+                usesFloatComponents: true,
+                componentsPerVector: 4,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: MemoryLayout<SIMD4<Float>>.stride
+            )
+            sources.append(colorSource)
+        }
+
+        let indices = Array(0..<UInt32(vertices.count))
+        let element = SCNGeometryElement(indices: indices, primitiveType: .point)
+        element.pointSize = 6
+        element.minimumPointScreenSpaceRadius = 2
+        element.maximumPointScreenSpaceRadius = 8
+
+        let geometry = SCNGeometry(sources: sources, elements: [element])
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        geometry.materials = [material]
+
+        return SCNNode(geometry: geometry)
+    }
+
     /// Create a SceneKit node from an OBJ file URL
     static func createSceneKitNode(fromOBJ url: URL) -> SCNNode? {
         do {
@@ -628,3 +665,77 @@ class MeshProcessor {
         return maxDimension * 2.0
     }
 }
+
+// MARK: - Path B: On-Device Photogrammetry
+
+#if !targetEnvironment(simulator)
+/// Reconstructs a dense, textured USDZ from a folder of full-resolution photos
+/// using Apple's on-device PhotogrammetrySession. Supported on iPhone 12 Pro and
+/// later (Pro models). Always gate calls with `isSupported`.
+enum PhotogrammetryProcessor {
+
+    static var isSupported: Bool {
+        PhotogrammetrySession.isSupported
+    }
+
+    enum ProcessError: Error, LocalizedError {
+        case notSupported
+        case noImages
+        var errorDescription: String? {
+            switch self {
+            case .notSupported: return "High-quality reconstruction isn't supported on this device."
+            case .noImages: return "Not enough photos were captured for reconstruction."
+            }
+        }
+    }
+
+    /// Reconstruct a textured USDZ from a folder of images.
+    /// `progress` is called with values in 0...1 as the session works.
+    static func reconstruct(
+        inputFolder: URL,
+        outputUSDZ: URL,
+        detail: ReconstructionDetail = .medium,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        guard isSupported else { throw ProcessError.notSupported }
+
+        let requestDetail: PhotogrammetrySession.Request.Detail
+        switch detail {
+        case .reduced: requestDetail = .reduced
+        case .medium: requestDetail = .medium
+        case .full: requestDetail = .full
+        }
+
+        let images = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
+        let imageCount = images.filter {
+            let l = $0.lowercased()
+            return l.hasSuffix(".jpg") || l.hasSuffix(".jpeg") || l.hasSuffix(".heic")
+        }.count
+        guard imageCount >= 3 else { throw ProcessError.noImages }
+
+        var configuration = PhotogrammetrySession.Configuration()
+        configuration.sampleOrdering = .sequential
+        configuration.featureSensitivity = .high
+
+        let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
+        try session.process(requests: [
+            .modelFile(url: outputUSDZ, detail: requestDetail)
+        ])
+
+        for try await output in session.outputs {
+            switch output {
+            case .requestProgress(_, let fraction):
+                progress(fraction)
+            case .requestComplete:
+                progress(1.0)
+            case .processingComplete:
+                return
+            case .requestError(_, let error):
+                throw error
+            default:
+                continue
+            }
+        }
+    }
+}
+#endif

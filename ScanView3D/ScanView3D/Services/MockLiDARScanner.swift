@@ -18,6 +18,7 @@ class MockLiDARScanner: ObservableObject {
     @Published var memoryUsageMB: Double = 0
     @Published var estimatedFileSizeMB: Double = 0
     @Published var scanCapacityPercent: Double = 0
+    @Published var highResFrameCount: Int = 0
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
@@ -49,7 +50,8 @@ class MockLiDARScanner: ObservableObject {
         quality: ScanSettings.ScanQuality = .standard,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        confidenceLevel: Int = 1
+        confidenceLevel: Int = 1,
+        captureMode: ScanSettings.CaptureMode = .fast
     ) {
         self.currentRange = range
         self.rangeMeters = rangeMeters
@@ -129,6 +131,10 @@ class MockLiDARScanner: ObservableObject {
 
     func bakeTexture(meshData: MeshData) -> BakedTexture? {
         return nil // No real camera in simulator
+    }
+
+    func getPhotogrammetryInputURL() -> URL? {
+        return nil // No real photos in simulator
     }
 
     // MARK: - Sample Room Mesh Generation

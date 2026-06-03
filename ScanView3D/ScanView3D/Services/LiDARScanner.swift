@@ -2,6 +2,7 @@
 import ARKit
 import RealityKit
 import Combine
+import CoreImage
 
 /// Manages LiDAR scanning sessions using ARKit
 class LiDARScanner: NSObject, ObservableObject {
@@ -22,6 +23,7 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var memoryUsageMB: Double = 0
     @Published var estimatedFileSizeMB: Double = 0
     @Published var scanCapacityPercent: Double = 0
+    @Published var highResFrameCount: Int = 0
 
     // MARK: - Properties
 
@@ -37,6 +39,15 @@ class LiDARScanner: NSObject, ObservableObject {
     private var memoryMonitorTimer: Timer?
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
     private var textureCapturePaused = false
+
+    // High-Quality (Path B) full-resolution photo capture
+    private var captureMode: ScanSettings.CaptureMode = .fast
+    private var captureFolderURL: URL?
+    private var lastHighResSaveTime: TimeInterval = 0
+    private let highResInterval: TimeInterval = 0.35
+    private let maxHighResFrames: Int = 250
+    private let ciContext = CIContext()
+    private let hqSaveQueue = DispatchQueue(label: "scanview.hq.save", qos: .utility)
 
     // Memory limits
     private let maxMemoryUsageMB: Double = 800
@@ -89,7 +100,8 @@ class LiDARScanner: NSObject, ObservableObject {
         quality: ScanSettings.ScanQuality = .standard,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        confidenceLevel: Int = 1
+        confidenceLevel: Int = 1,
+        captureMode: ScanSettings.CaptureMode = .fast
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -104,6 +116,16 @@ class LiDARScanner: NSObject, ObservableObject {
         self.meshMode = meshMode
         self.confidenceThreshold = [0.3, 0.5, 0.7][min(confidenceLevel, 2)]
         self.textureCapturePaused = false
+
+        // High-Quality capture: prepare a fresh folder for full-res photos
+        self.captureMode = captureMode
+        self.highResFrameCount = 0
+        self.lastHighResSaveTime = 0
+        if captureMode == .highQuality {
+            self.captureFolderURL = makeCaptureFolder()
+        } else {
+            self.captureFolderURL = nil
+        }
 
         // Configure texture mapper
         textureMapper.configure(quality: quality)
@@ -192,6 +214,13 @@ class LiDARScanner: NSObject, ObservableObject {
         estimatedFileSizeMB = 0
         scanCapacityPercent = 0
         textureMapper.reset()
+        // Clean up any High-Quality capture folder
+        if let folder = captureFolderURL {
+            try? FileManager.default.removeItem(at: folder)
+        }
+        captureFolderURL = nil
+        highResFrameCount = 0
+        captureMode = .fast
         scanProgress = "Ready to scan"
     }
 
@@ -210,13 +239,62 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     private func captureCurrentFrame() {
-        guard isScanning && !isPaused && !textureCapturePaused,
-              captureTexture,
+        guard isScanning && !isPaused,
               let frame = arSession.currentFrame else { return }
-        textureMapper.captureFrame(from: frame)
-        DispatchQueue.main.async {
-            self.capturedFrameCount = self.textureMapper.frameCount
+
+        // Path A / Point Cloud: downscaled frames for color sampling
+        // (skipped only in High-Quality photogrammetry mode)
+        if captureMode != .highQuality && captureTexture && !textureCapturePaused {
+            textureMapper.captureFrame(from: frame)
+            DispatchQueue.main.async {
+                self.capturedFrameCount = self.textureMapper.frameCount
+            }
         }
+
+        // Path B: full-resolution photos saved to disk for photogrammetry
+        if captureMode == .highQuality {
+            saveHighResFrame(frame)
+        }
+    }
+
+    // MARK: - High-Quality Capture (Path B)
+
+    private func makeCaptureFolder() -> URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let dir = docs.appendingPathComponent("Captures").appendingPathComponent(UUID().uuidString)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
+        } catch {
+            return nil
+        }
+    }
+
+    private func saveHighResFrame(_ frame: ARFrame) {
+        guard let folder = captureFolderURL else { return }
+        let now = frame.timestamp
+        guard now - lastHighResSaveTime >= highResInterval, highResFrameCount < maxHighResFrames else { return }
+        lastHighResSaveTime = now
+
+        let index = highResFrameCount
+        highResFrameCount = index + 1
+
+        // Retain the pixel buffer via CIImage, then JPEG-encode off the main thread.
+        let ciImage = CIImage(cvPixelBuffer: frame.capturedImage)
+        let url = folder.appendingPathComponent(String(format: "frame_%04d.jpg", index))
+        let context = ciContext
+        hqSaveQueue.async {
+            let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            if let data = context.jpegRepresentation(of: ciImage, colorSpace: cs, options: [:]) {
+                try? data.write(to: url)
+            }
+        }
+    }
+
+    /// Folder of full-res photos for photogrammetry, or nil if not a High-Quality scan.
+    func getPhotogrammetryInputURL() -> URL? {
+        guard captureMode == .highQuality, let folder = captureFolderURL else { return nil }
+        return folder
     }
 
     // MARK: - Memory Monitoring

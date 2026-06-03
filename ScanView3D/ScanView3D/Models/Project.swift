@@ -113,10 +113,24 @@ struct Scan: Identifiable, Codable {
     }
 }
 
+/// Detail level for High-Quality photogrammetry (Path B) reconstruction.
+enum ReconstructionDetail: String, CaseIterable, Codable {
+    case reduced = "Reduced"
+    case medium = "Medium"
+    case full = "Full"
+
+    var info: String {
+        switch self {
+        case .reduced: return "Fastest, lighter file"
+        case .medium: return "Balanced detail (recommended)"
+        case .full: return "Sharpest, slowest, largest"
+        }
+    }
+}
+
 /// Settings for the scanning session
 struct ScanSettings: Codable {
-    var captureTexture: Bool = true
-    var meshDetail: MeshDetail = .medium
+    var captureTexture: Bool = true    var meshDetail: MeshDetail = .medium
     var unit: MeasurementUnit = .meters
     var autoSave: Bool = true
     var scanRange: ScanRange = .room
@@ -124,6 +138,40 @@ struct ScanSettings: Codable {
     var meshMode: MeshMode = .free
     var rangeValue: Float = 3.0       // Continuous range in meters (0.3 - 5.0)
     var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
+    var captureMode: CaptureMode = .fast
+
+    // MARK: - Capture Mode
+
+    /// Chosen BEFORE scanning. Determines what data is captured.
+    enum CaptureMode: String, Codable, CaseIterable {
+        /// A: light, mesh-focused. Downscaled frames + texture baking. Best for
+        /// large areas where accurate geometry/measurement matters.
+        case fast = "Fast"
+        /// B: saves full-resolution photos for after-scan photogrammetry
+        /// reconstruction (PhotogrammetrySession). Photoreal output, slower,
+        /// more storage.
+        case highQuality = "High Quality"
+        /// C (foundation): accumulates a dense colored point cloud from LiDAR
+        /// depth + camera color. The initialization for Gaussian Splatting, and
+        /// exportable as PLY.
+        case pointCloud = "Point Cloud"
+
+        var description: String {
+            switch self {
+            case .fast: return "Quick mesh + baked texture. Best for big areas & measuring."
+            case .highQuality: return "Saves full-res photos for photoreal post-processing."
+            case .pointCloud: return "Dense colored point cloud (splat foundation). Exports PLY."
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .fast: return "bolt.fill"
+            case .highQuality: return "sparkles"
+            case .pointCloud: return "aqi.medium"
+            }
+        }
+    }
 
     // MARK: - Mesh Mode
 
@@ -265,9 +313,9 @@ struct ScanSettings: Codable {
         /// Width to downscale captured camera frames to
         var textureDownscaleWidth: Int {
             switch self {
-            case .preview: return 640
-            case .standard: return 960
-            case .high: return 1280
+            case .preview: return 768
+            case .standard: return 1280
+            case .high: return 1600
             case .ultra: return 1920
             }
         }
@@ -276,8 +324,8 @@ struct ScanSettings: Codable {
         var bakeAtlasSize: Int {
             switch self {
             case .preview: return 2048
-            case .standard: return 4096
-            case .high: return 6144
+            case .standard: return 6144
+            case .high: return 8192
             case .ultra: return 8192
             }
         }

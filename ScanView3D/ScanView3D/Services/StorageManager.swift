@@ -209,6 +209,108 @@ class StorageManager: ObservableObject {
             .appendingPathComponent(scan.fileName)
     }
 
+    /// Register a scan from an already-produced model file (e.g. a photogrammetry USDZ).
+    func importProcessedModel(modelURL: URL, name: String, toProject project: Project) throws -> Scan {
+        let scanId = UUID()
+        let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
+        let fileName = "\(scanId.uuidString).\(ext)"
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+
+        let destURL = scanDir.appendingPathComponent(fileName)
+        try? fileManager.removeItem(at: destURL)
+        try fileManager.copyItem(at: modelURL, to: destURL)
+
+        let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
+        var scan = Scan(name: name, fileName: fileName, vertexCount: 0, faceCount: 0, fileSize: fileSize)
+        scan.hasTexture = true
+        scan.hasColor = true
+        scan.thumbnailData = generateThumbnail(fromModelURL: destURL)
+
+        if let index = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[index].addScan(scan)
+            if scan.thumbnailData != nil {
+                projects[index].thumbnailData = scan.thumbnailData
+            }
+            saveProjects()
+        }
+        return scan
+    }
+
+    /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
+    func savePointCloud(meshData: MeshData, name: String, toProject project: Project) throws -> Scan {
+        let scanId = UUID()
+        let fileName = "\(scanId.uuidString).ply"
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+
+        let fileURL = try OBJExporter.exportPointCloudPLY(
+            meshData: meshData,
+            fileName: scanId.uuidString,
+            directory: scanDir
+        )
+        let fileSize = (try? fileManager.attributesOfItem(atPath: fileURL.path)[.size] as? Int64) ?? 0
+
+        var scan = Scan(name: name, fileName: fileName, vertexCount: meshData.vertexCount, faceCount: 0, fileSize: fileSize)
+        scan.hasColor = !meshData.colors.isEmpty
+        scan.boundingBoxMin = meshData.boundingBoxMin
+        scan.boundingBoxMax = meshData.boundingBoxMax
+
+        // Native point-cloud scene for fast in-app viewing
+        let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
+        let node = MeshProcessor.createPointCloudNode(from: meshData)
+        let scene = SCNScene()
+        scene.rootNode.addChildNode(node)
+        scene.write(to: scnURL, delegate: nil)
+
+        scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
+
+        if let index = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[index].addScan(scan)
+            if scan.thumbnailData != nil {
+                projects[index].thumbnailData = scan.thumbnailData
+            }
+            saveProjects()
+        }
+        return scan
+    }
+
+    /// Render a thumbnail from a model file (USDZ/OBJ/SCN).
+    private func generateThumbnail(fromModelURL url: URL) -> Data? {
+        guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }
+
+        let ambient = SCNNode()
+        ambient.light = SCNLight()
+        ambient.light!.type = .ambient
+        ambient.light!.intensity = 600
+        scene.rootNode.addChildNode(ambient)
+
+        let dir = SCNNode()
+        dir.light = SCNLight()
+        dir.light!.type = .directional
+        dir.light!.intensity = 800
+        dir.position = SCNVector3(5, 10, 5)
+        dir.look(at: SCNVector3(0, 0, 0))
+        scene.rootNode.addChildNode(dir)
+
+        let (minB, maxB) = scene.rootNode.flattenedClone().boundingBox
+        let center = MeshProcessor.calculateCenter(min: minB, max: maxB)
+        let distance = MeshProcessor.calculateViewDistance(min: minB, max: maxB)
+
+        let cam = SCNNode()
+        cam.camera = SCNCamera()
+        cam.position = SCNVector3(center.x + distance * 0.3, center.y + distance * 0.4, center.z + distance * 0.8)
+        cam.look(at: center)
+        scene.rootNode.addChildNode(cam)
+        scene.background.contents = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
+
+        let renderer = SCNRenderer(device: nil, options: nil)
+        renderer.scene = scene
+        renderer.pointOfView = cam
+        let image = renderer.snapshot(atTime: 0, with: CGSize(width: 120, height: 120), antialiasingMode: .multisampling4X)
+        return image.jpegData(compressionQuality: 0.7)
+    }
+
     func deleteScan(_ scan: Scan, from project: Project) {
         let fileURL = getScanFileURL(scan: scan, project: project)
         try? fileManager.removeItem(at: fileURL)

@@ -26,6 +26,7 @@ struct ScannerView: View {
     @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
     @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
+    @State private var reconDetail: ReconstructionDetail = .medium
     @State private var savingProgress = ""
     @State private var savedScan: Scan?
     @State private var savedProject: Project?
@@ -125,7 +126,10 @@ struct ScannerView: View {
                             .font(.caption2)
                         Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
                             .font(.caption2)
-                        if scanner.capturedFrameCount > 0 {
+                        if settings.captureMode == .highQuality {
+                            Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack")
+                                .font(.caption2)
+                        } else if scanner.capturedFrameCount > 0 {
                             Label("\(scanner.capturedFrameCount)", systemImage: "camera.fill")
                                 .font(.caption2)
                         }
@@ -229,8 +233,54 @@ struct ScannerView: View {
 
     // MARK: - Pre-Scan Controls
 
+    private var highQualitySupported: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return PhotogrammetryProcessor.isSupported
+        #endif
+    }
+
     private var prescanControls: some View {
         VStack(spacing: 10) {
+            // Capture mode (must be chosen BEFORE scanning)
+            VStack(spacing: 4) {
+                HStack {
+                    Text("CAPTURE MODE")
+                        .font(.caption2).fontWeight(.bold).foregroundColor(.pink)
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
+                        let disabled = (mode == .highQuality && !highQualitySupported)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { settings.captureMode = mode }
+                        } label: {
+                            VStack(spacing: 2) {
+                                Image(systemName: mode.icon).font(.system(size: 15))
+                                Text(mode.rawValue).font(.system(size: 10, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(settings.captureMode == mode ? Color.pink.opacity(0.3) : Color.white.opacity(0.1))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(settings.captureMode == mode ? Color.pink : Color.clear, lineWidth: 1.5)
+                            )
+                            .opacity(disabled ? 0.4 : 1.0)
+                        }
+                        .disabled(disabled)
+                        .foregroundColor(settings.captureMode == mode ? .white : .gray)
+                    }
+                }
+                Text(settings.captureMode.description)
+                    .font(.system(size: 10)).foregroundColor(.gray)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // Range slider (continuous)
             VStack(spacing: 4) {
                 HStack {
@@ -456,7 +506,8 @@ struct ScannerView: View {
                             quality: settings.scanQuality,
                             meshMode: settings.meshMode,
                             rangeMeters: settings.rangeValue,
-                            confidenceLevel: settings.confidenceLevel
+                            confidenceLevel: settings.confidenceLevel,
+                            captureMode: settings.captureMode
                         )
                     } label: {
                         VStack(spacing: 4) {
@@ -546,24 +597,45 @@ struct ScannerView: View {
                     }
                 }
 
-                Section("Post-Processing") {
-                    Picker("Quality", selection: $processingLevel) {
-                        Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
-                        Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
-                        Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
+                if settings.captureMode == .highQuality {
+                    // Path B: photogrammetry reconstruction quality
+                    Section("Reconstruction Detail") {
+                        Picker("Detail", selection: $reconDetail) {
+                            ForEach(ReconstructionDetail.allCases, id: \.self) { d in
+                                Text(d.rawValue).tag(d)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(reconDetail.info)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else if settings.captureMode == .pointCloud {
+                    Section("Output") {
+                        Label("Colored point cloud (PLY)", systemImage: "aqi.medium")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    // Path A: mesh post-processing + export format
+                    Section("Post-Processing") {
+                        Picker("Quality", selection: $processingLevel) {
+                            Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
+                            Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
+                            Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
+                        }
+                        Text(processingLevel.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
 
-                    Text(processingLevel.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Section("Export Format") {
-                    Picker("Format", selection: $exportFormat) {
-                        Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
-                        Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                    Section("Export Format") {
+                        Picker("Format", selection: $exportFormat) {
+                            Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
+                            Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 if let meshData = scanner.getCombinedMeshData() {
@@ -674,6 +746,22 @@ struct ScannerView: View {
             return
         }
 
+        // High-Quality (Path B): reconstruct with on-device photogrammetry
+        #if !targetEnvironment(simulator)
+        if settings.captureMode == .highQuality,
+           let inputFolder = scanner.getPhotogrammetryInputURL(),
+           PhotogrammetryProcessor.isSupported {
+            runPhotogrammetrySave(project: project, inputFolder: inputFolder)
+            return
+        }
+        #endif
+
+        // Point Cloud (Path C foundation): save the colored world-space points
+        if settings.captureMode == .pointCloud, let cloud = scanner.getCombinedMeshData() {
+            savePointCloudFlow(project: project, cloud: cloud)
+            return
+        }
+
         // For Area mode, try plane-based reconstruction first
         let rawMeshData: MeshData?
         #if !targetEnvironment(simulator)
@@ -736,6 +824,81 @@ struct ScannerView: View {
             }
         }
     }
+
+    /// Path C foundation: save the scan's colored world-space points as a point cloud.
+    private func savePointCloudFlow(project: Project, cloud: MeshData) {
+        isSaving = true
+        savingProgress = "Saving point cloud…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let scan = try storageManager.savePointCloud(meshData: cloud, name: scanName, toProject: project)
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    showingSaveDialog = false
+                    scanner.resetScanning()
+                    savedScan = scan
+                    savedProject = project
+                    showingSavedScan = true
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    errorMessage = "Failed to save point cloud: \(error.localizedDescription)"
+                    showingError = true
+                }
+            }
+        }
+    }
+
+    #if !targetEnvironment(simulator)
+    /// Path B: run on-device photogrammetry on the captured photos, then save the USDZ.
+    private func runPhotogrammetrySave(project: Project, inputFolder: URL) {
+        isSaving = true
+        savingProgress = "Reconstructing… 0%"
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).usdz")
+
+        Task {
+            do {
+                try await PhotogrammetryProcessor.reconstruct(
+                    inputFolder: inputFolder,
+                    outputUSDZ: outputURL,
+                    detail: reconDetail
+                ) { fraction in
+                    DispatchQueue.main.async {
+                        self.savingProgress = "Reconstructing… \(Int(fraction * 100))%"
+                    }
+                }
+
+                let scan = try storageManager.importProcessedModel(
+                    modelURL: outputURL,
+                    name: scanName,
+                    toProject: project
+                )
+                try? FileManager.default.removeItem(at: outputURL)
+
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    showingSaveDialog = false
+                    scanner.resetScanning()
+                    savedScan = scan
+                    savedProject = project
+                    showingSavedScan = true
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    errorMessage = "Reconstruction failed: \(error.localizedDescription)"
+                    showingError = true
+                }
+            }
+        }
+    }
+    #endif
 }
 
 // MARK: - Simulator Scan View
