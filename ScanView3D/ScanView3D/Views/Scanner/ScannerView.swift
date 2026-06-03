@@ -296,6 +296,28 @@ struct ScannerView: View {
                     .tint(.cyan)
             }
 
+            // Detail / accuracy slider (grid spacing). Lower mm = denser points,
+            // sharper detail, heavier files; higher mm = coarser, faster, lighter.
+            VStack(spacing: 4) {
+                HStack {
+                    Text("DETAIL")
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.yellow)
+                    Spacer()
+                    Text(String(format: "%.0f mm", settings.detailMM))
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundColor(.yellow)
+                }
+                Slider(value: $settings.detailMM, in: 5...20, step: 1)
+                    .tint(.yellow)
+                HStack {
+                    Text("Fine (dense)").font(.system(size: 9)).foregroundColor(.gray)
+                    Spacer()
+                    Text("Coarse (fast)").font(.system(size: 9)).foregroundColor(.gray)
+                }
+            }
+
             // Confidence selector
             VStack(spacing: 4) {
                 HStack {
@@ -352,17 +374,24 @@ struct ScannerView: View {
             }
 
             // Photo texture toggle
-            HStack {
-                Image(systemName: "camera.fill")
-                    .foregroundColor(settings.captureTexture ? .green : .gray)
-                    .font(.caption)
-                Text("Photo Texture")
-                    .font(.caption)
-                    .foregroundColor(.white)
-                Spacer()
-                Toggle("", isOn: $settings.captureTexture)
-                    .labelsHidden()
-                    .tint(.green)
+            VStack(spacing: 2) {
+                HStack {
+                    Image(systemName: settings.captureTexture ? "camera.fill" : "cube")
+                        .foregroundColor(settings.captureTexture ? .green : .gray)
+                        .font(.caption)
+                    Text(settings.captureTexture ? "Photo Texture / Color" : "No Color (grey mesh)")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                    Spacer()
+                    Toggle("", isOn: $settings.captureTexture)
+                        .labelsHidden()
+                        .tint(.green)
+                }
+                if !settings.captureTexture {
+                    Text("Clean grey mesh for measuring / CAD export. Faster, no muddy colors.")
+                        .font(.system(size: 9)).foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.horizontal, AppConstants.Layout.padding)
@@ -506,7 +535,8 @@ struct ScannerView: View {
                             meshMode: settings.meshMode,
                             rangeMeters: settings.rangeValue,
                             confidenceLevel: settings.confidenceLevel,
-                            captureMode: settings.captureMode
+                            captureMode: settings.captureMode,
+                            detailMM: settings.detailMM
                         )
                     } label: {
                         VStack(spacing: 4) {
@@ -794,15 +824,32 @@ struct ScannerView: View {
         isSaving = true
         savingProgress = "Processing mesh..."
 
+        let detailMeters = max(0.001, settings.detailMM / 1000.0)
+        let wantColor = settings.captureTexture
+
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let meshData = MeshProcessor.postProcess(rawMesh, level: processingLevel)
+                var meshData = MeshProcessor.postProcess(rawMesh, level: processingLevel)
+
+                // Honor the DETAIL slider: weld vertices to the chosen grid spacing
+                // so a coarse setting (e.g. 20mm) yields a far lighter mesh — useful
+                // for scanning large land plots in one pass.
+                if detailMeters > 0.005 {
+                    meshData = MeshProcessor.weldNearbyVertices(meshData, threshold: detailMeters)
+                    meshData = MeshProcessor.recalculateNormals(meshData)
+                }
+
+                // No-color option: clean uniform grey mesh for measuring / CAD,
+                // instead of the muddy per-vertex coloring.
+                if !wantColor {
+                    meshData = MeshProcessor.makeUniformGrey(meshData)
+                }
 
                 DispatchQueue.main.async { self.savingProgress = "Baking texture..." }
 
                 // Bake a high-resolution UV texture atlas for OBJ if we have camera data
                 var baked: BakedTexture?
-                if exportFormat == .obj && settings.captureTexture {
+                if exportFormat == .obj && wantColor {
                     baked = scanner.bakeTexture(meshData: meshData)
                 }
 
@@ -889,9 +936,14 @@ struct ScannerView: View {
     private func savePointCloudFlow(project: Project, cloud: MeshData) {
         isSaving = true
         savingProgress = "Saving point cloud…"
+        let detailMeters = max(0.001, settings.detailMM / 1000.0)
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let scan = try storageManager.savePointCloud(meshData: cloud, name: scanName, toProject: project)
+                // Honor the DETAIL slider: voxel-downsample to the chosen grid so a
+                // coarse setting yields a lighter cloud (lay-of-the-land), a fine
+                // setting keeps it dense.
+                let downsampled = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
+                let scan = try storageManager.savePointCloud(meshData: downsampled, name: scanName, toProject: project)
                 DispatchQueue.main.async {
                     isSaving = false
                     savingProgress = ""

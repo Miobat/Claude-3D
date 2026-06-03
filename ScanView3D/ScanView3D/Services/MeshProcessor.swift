@@ -528,6 +528,93 @@ class MeshProcessor {
         return SCNNode(geometry: geometry)
     }
 
+    // MARK: - Voxel Downsampling (accuracy / detail control)
+
+    /// Downsample a colored point set to one averaged point per cubic voxel of
+    /// `leafSize` meters. Larger leaf = coarser grid = far fewer points (faster,
+    /// lighter); smaller leaf = denser/heavier. Used by the pre-scan accuracy
+    /// slider (5mm fine … 20mm coarse). Produces a point cloud (faces removed).
+    static func voxelDownsamplePoints(_ meshData: MeshData, leafSize: Float) -> MeshData {
+        guard leafSize > 0, !meshData.vertices.isEmpty else { return meshData }
+
+        struct Accum {
+            var p = SIMD3<Float>(repeating: 0)
+            var c = SIMD4<Float>(repeating: 0)
+            var n = SIMD3<Float>(repeating: 0)
+            var count: Float = 0
+        }
+
+        var voxels: [SIMD3<Int32>: Accum] = [:]
+        voxels.reserveCapacity(meshData.vertices.count / 4 + 1)
+
+        let inv = 1.0 / leafSize
+        let hasColor = !meshData.colors.isEmpty
+        let hasNormal = !meshData.normals.isEmpty
+
+        for i in 0..<meshData.vertices.count {
+            let v = meshData.vertices[i]
+            let key = SIMD3<Int32>(
+                Int32(floor(v.x * inv)),
+                Int32(floor(v.y * inv)),
+                Int32(floor(v.z * inv))
+            )
+            var acc = voxels[key] ?? Accum()
+            acc.p += v
+            if hasColor && i < meshData.colors.count { acc.c += meshData.colors[i] }
+            if hasNormal && i < meshData.normals.count { acc.n += meshData.normals[i] }
+            acc.count += 1
+            voxels[key] = acc
+        }
+
+        var newVertices: [SIMD3<Float>] = []
+        var newColors: [SIMD4<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        newVertices.reserveCapacity(voxels.count)
+
+        var minB = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var maxB = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+
+        for (_, acc) in voxels {
+            let p = acc.p / acc.count
+            newVertices.append(p)
+            if hasColor {
+                var c = acc.c / acc.count
+                c.w = 1.0
+                newColors.append(c)
+            }
+            if hasNormal {
+                let n = acc.n / acc.count
+                newNormals.append(length(n) > 1e-6 ? normalize(n) : SIMD3<Float>(0, 1, 0))
+            }
+            minB = min(minB, p)
+            maxB = max(maxB, p)
+        }
+
+        return MeshData(
+            vertices: newVertices,
+            normals: newNormals,
+            faces: [],
+            colors: newColors,
+            boundingBoxMin: minB,
+            boundingBoxMax: maxB
+        )
+    }
+
+    /// Replace all per-vertex colors with a uniform neutral grey. Used by the
+    /// Fast "no color" option to produce a clean grey mesh for measuring / CAD
+    /// export instead of the muddy per-vertex coloring.
+    static func makeUniformGrey(_ meshData: MeshData, grey: Float = 0.8) -> MeshData {
+        let g = SIMD4<Float>(grey, grey, grey, 1.0)
+        return MeshData(
+            vertices: meshData.vertices,
+            normals: meshData.normals,
+            faces: meshData.faces,
+            colors: [SIMD4<Float>](repeating: g, count: meshData.vertices.count),
+            boundingBoxMin: meshData.boundingBoxMin,
+            boundingBoxMax: meshData.boundingBoxMax
+        )
+    }
+
     /// Build a colored point-cloud SceneKit node (Path C foundation / splat init).
     static func createPointCloudNode(from meshData: MeshData) -> SCNNode {
         let vertices = meshData.vertices.map { SCNVector3($0.x, $0.y, $0.z) }

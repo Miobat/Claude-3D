@@ -136,6 +136,7 @@ struct ScanSettings: Codable {
     var rangeValue: Float = 3.0       // Continuous range in meters (0.3 - 5.0)
     var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
     var captureMode: CaptureMode = .fast
+    var detailMM: Float = 10.0        // Point/mesh grid spacing in mm (5 = fine, 20 = coarse)
 
     // MARK: - Capture Mode
 

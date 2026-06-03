@@ -51,7 +51,8 @@ class MockLiDARScanner: ObservableObject {
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
         confidenceLevel: Int = 1,
-        captureMode: ScanSettings.CaptureMode = .fast
+        captureMode: ScanSettings.CaptureMode = .fast,
+        detailMM: Float = 10.0
     ) {
         self.currentRange = range
         self.rangeMeters = rangeMeters

@@ -40,6 +40,16 @@ class LiDARScanner: NSObject, ObservableObject {
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
     private var textureCapturePaused = false
 
+    // Camera path: positions the device has visited during the scan. Used so the
+    // pre-scan range actually limits captured geometry — vertices are kept only
+    // if they're within `rangeMeters` of SOME point on the path the user walked,
+    // not just the single start position. Downsampled to ~10cm moves, capped.
+    private(set) var cameraPath: [SIMD3<Float>] = []
+    private let cameraPathMinStep: Float = 0.1
+    private let cameraPathMaxCount: Int = 600
+    // Detail/accuracy grid spacing in meters (pre-scan slider, 0.005 … 0.020).
+    private var detailMeters: Float = 0.010
+
     // High-Quality (Path B) full-resolution photo capture
     private var captureMode: ScanSettings.CaptureMode = .fast
     private var captureFolderURL: URL?
@@ -102,7 +112,8 @@ class LiDARScanner: NSObject, ObservableObject {
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
         confidenceLevel: Int = 1,
-        captureMode: ScanSettings.CaptureMode = .fast
+        captureMode: ScanSettings.CaptureMode = .fast,
+        detailMM: Float = 10.0
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -117,6 +128,8 @@ class LiDARScanner: NSObject, ObservableObject {
         self.meshMode = meshMode
         self.confidenceThreshold = [0.3, 0.5, 0.7][min(confidenceLevel, 2)]
         self.textureCapturePaused = false
+        self.detailMeters = max(0.001, detailMM / 1000.0)
+        self.cameraPath = []
 
         // High-Quality / Splat-export: prepare a fresh folder for full-res posed photos
         self.captureMode = captureMode
@@ -144,6 +157,7 @@ class LiDARScanner: NSObject, ObservableObject {
         } else {
             scanOrigin = SIMD3<Float>(0, 0, 0)
         }
+        cameraPath = [scanOrigin]
 
         let configuration = ARWorldTrackingConfiguration()
 
@@ -224,6 +238,7 @@ class LiDARScanner: NSObject, ObservableObject {
         highResFrameCount = 0
         capturedPoses = []
         captureMode = .fast
+        cameraPath = []
         scanProgress = "Ready to scan"
     }
 
@@ -244,6 +259,18 @@ class LiDARScanner: NSObject, ObservableObject {
     private func captureCurrentFrame() {
         guard isScanning && !isPaused,
               let frame = arSession.currentFrame else { return }
+
+        // Record where the device has travelled so the range filter follows the
+        // walked path, not just the start point. Only log meaningful moves.
+        let t = frame.camera.transform
+        let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+        if let last = cameraPath.last {
+            if length(camPos - last) >= cameraPathMinStep && cameraPath.count < cameraPathMaxCount {
+                cameraPath.append(camPos)
+            }
+        } else {
+            cameraPath.append(camPos)
+        }
 
         // Path A / Point Cloud: downscaled frames for color sampling
         // (skipped only in High-Quality photogrammetry mode)
@@ -422,6 +449,22 @@ class LiDARScanner: NSObject, ObservableObject {
 
     // MARK: - Mesh Data Access
 
+    /// True if `p` is within `maxDist` of ANY position on the walked camera path.
+    /// This makes the pre-scan range actually limit captured geometry: a point is
+    /// kept only if the device passed within range of it while scanning, so a
+    /// small range trims far walls/clutter even as the user moves around.
+    private func isWithinRangeOfPath(_ p: SIMD3<Float>, maxDist: Float) -> Bool {
+        let maxSq = maxDist * maxDist
+        // Fall back to scan origin if the path hasn't been populated yet.
+        if cameraPath.isEmpty {
+            return distance_squared(p, scanOrigin) <= maxSq
+        }
+        for c in cameraPath {
+            if distance_squared(p, c) <= maxSq { return true }
+        }
+        return false
+    }
+
     /// Returns all mesh data combined from all anchors, filtered by scan range
     func getCombinedMeshData() -> MeshData? {
         guard !meshAnchors.isEmpty else { return nil }
@@ -438,10 +481,10 @@ class LiDARScanner: NSObject, ObservableObject {
             let geometry = anchor.geometry
             let transform = anchor.transform
 
-            // Check if anchor center is within range from scan origin
+            // Cull whole anchors that the camera never came near (generous margin
+            // since an anchor block spans several metres).
             let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-            let anchorDist = length(anchorPos - scanOrigin)
-            if anchorDist > maxDist + 2.0 { continue }
+            if !isWithinRangeOfPath(anchorPos, maxDist: maxDist + 4.0) { continue }
 
             var localVertices: [SIMD3<Float>] = []
             var localNormals: [SIMD3<Float>] = []
@@ -454,8 +497,7 @@ class LiDARScanner: NSObject, ObservableObject {
                 let worldVertex4 = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
                 let worldVertex = SIMD3<Float>(worldVertex4.x, worldVertex4.y, worldVertex4.z)
 
-                let dist = length(worldVertex - scanOrigin)
-                if dist <= maxDist {
+                if isWithinRangeOfPath(worldVertex, maxDist: maxDist) {
                     localIndexMap[i] = UInt32(localVertices.count)
                     localVertices.append(worldVertex)
                     vertexInRange.append(true)
@@ -544,9 +586,8 @@ class LiDARScanner: NSObject, ObservableObject {
             let transform = plane.transform
             let planeCenter = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
 
-            // Range check
-            let dist = length(planeCenter - scanOrigin)
-            if dist > maxDist { continue }
+            // Range check (against the walked path)
+            if !isWithinRangeOfPath(planeCenter, maxDist: maxDist) { continue }
 
             // Get plane extent
             let extent = plane.extent
