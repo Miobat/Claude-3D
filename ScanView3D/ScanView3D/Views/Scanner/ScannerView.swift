@@ -26,6 +26,7 @@ struct ScannerView: View {
     @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
     @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
+    @State private var reconDetail: ReconstructionDetail = .medium
     @State private var savingProgress = ""
     @State private var savedScan: Scan?
     @State private var savedProject: Project?
@@ -596,24 +597,45 @@ struct ScannerView: View {
                     }
                 }
 
-                Section("Post-Processing") {
-                    Picker("Quality", selection: $processingLevel) {
-                        Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
-                        Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
-                        Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
+                if settings.captureMode == .highQuality {
+                    // Path B: photogrammetry reconstruction quality
+                    Section("Reconstruction Detail") {
+                        Picker("Detail", selection: $reconDetail) {
+                            ForEach(ReconstructionDetail.allCases, id: \.self) { d in
+                                Text(d.rawValue).tag(d)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(reconDetail.info)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else if settings.captureMode == .pointCloud {
+                    Section("Output") {
+                        Label("Colored point cloud (PLY)", systemImage: "aqi.medium")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    // Path A: mesh post-processing + export format
+                    Section("Post-Processing") {
+                        Picker("Quality", selection: $processingLevel) {
+                            Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
+                            Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
+                            Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
+                        }
+                        Text(processingLevel.description)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
 
-                    Text(processingLevel.description)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Section("Export Format") {
-                    Picker("Format", selection: $exportFormat) {
-                        Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
-                        Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                    Section("Export Format") {
+                        Picker("Format", selection: $exportFormat) {
+                            Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
+                            Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 }
 
                 if let meshData = scanner.getCombinedMeshData() {
@@ -843,7 +865,7 @@ struct ScannerView: View {
                 try await PhotogrammetryProcessor.reconstruct(
                     inputFolder: inputFolder,
                     outputUSDZ: outputURL,
-                    detail: .reduced
+                    detail: reconDetail
                 ) { fraction in
                     DispatchQueue.main.async {
                         self.savingProgress = "Reconstructing… \(Int(fraction * 100))%"

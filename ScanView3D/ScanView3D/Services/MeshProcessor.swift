@@ -694,10 +694,17 @@ enum PhotogrammetryProcessor {
     static func reconstruct(
         inputFolder: URL,
         outputUSDZ: URL,
-        detail: PhotogrammetrySession.Request.Detail = .reduced,
+        detail: ReconstructionDetail = .medium,
         progress: @escaping (Double) -> Void
     ) async throws {
         guard isSupported else { throw ProcessError.notSupported }
+
+        let requestDetail: PhotogrammetrySession.Request.Detail
+        switch detail {
+        case .reduced: requestDetail = .reduced
+        case .medium: requestDetail = .medium
+        case .full: requestDetail = .full
+        }
 
         let images = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
         let imageCount = images.filter {
@@ -712,7 +719,7 @@ enum PhotogrammetryProcessor {
 
         let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
         try session.process(requests: [
-            .modelFile(url: outputUSDZ, detail: detail)
+            .modelFile(url: outputUSDZ, detail: requestDetail)
         ])
 
         for try await output in session.outputs {

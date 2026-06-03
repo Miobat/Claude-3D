@@ -113,10 +113,24 @@ struct Scan: Identifiable, Codable {
     }
 }
 
+/// Detail level for High-Quality photogrammetry (Path B) reconstruction.
+enum ReconstructionDetail: String, CaseIterable, Codable {
+    case reduced = "Reduced"
+    case medium = "Medium"
+    case full = "Full"
+
+    var info: String {
+        switch self {
+        case .reduced: return "Fastest, lighter file"
+        case .medium: return "Balanced detail (recommended)"
+        case .full: return "Sharpest, slowest, largest"
+        }
+    }
+}
+
 /// Settings for the scanning session
 struct ScanSettings: Codable {
-    var captureTexture: Bool = true
-    var meshDetail: MeshDetail = .medium
+    var captureTexture: Bool = true    var meshDetail: MeshDetail = .medium
     var unit: MeasurementUnit = .meters
     var autoSave: Bool = true
     var scanRange: ScanRange = .room
@@ -299,9 +313,9 @@ struct ScanSettings: Codable {
         /// Width to downscale captured camera frames to
         var textureDownscaleWidth: Int {
             switch self {
-            case .preview: return 640
-            case .standard: return 960
-            case .high: return 1280
+            case .preview: return 768
+            case .standard: return 1280
+            case .high: return 1600
             case .ultra: return 1920
             }
         }
@@ -310,8 +324,8 @@ struct ScanSettings: Codable {
         var bakeAtlasSize: Int {
             switch self {
             case .preview: return 2048
-            case .standard: return 4096
-            case .high: return 6144
+            case .standard: return 6144
+            case .high: return 8192
             case .ultra: return 8192
             }
         }
