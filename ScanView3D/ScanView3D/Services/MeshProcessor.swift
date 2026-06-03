@@ -694,17 +694,14 @@ enum PhotogrammetryProcessor {
     static func reconstruct(
         inputFolder: URL,
         outputUSDZ: URL,
-        detail: ReconstructionDetail = .medium,
         progress: @escaping (Double) -> Void
     ) async throws {
         guard isSupported else { throw ProcessError.notSupported }
 
-        let requestDetail: PhotogrammetrySession.Request.Detail
-        switch detail {
-        case .reduced: requestDetail = .reduced
-        case .medium: requestDetail = .medium
-        case .full: requestDetail = .full
-        }
+        // iOS on-device PhotogrammetrySession only supports .reduced detail
+        // (.medium/.full/.raw are macOS-only). For higher detail, use the
+        // Splat (Desktop) export or cloud.
+        let requestDetail: PhotogrammetrySession.Request.Detail = .reduced
 
         let images = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
         let imageCount = images.filter {

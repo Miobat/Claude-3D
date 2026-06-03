@@ -124,21 +124,6 @@ struct Scan: Identifiable, Codable {
     }
 }
 
-/// Detail level for High-Quality photogrammetry (Path B) reconstruction.
-enum ReconstructionDetail: String, CaseIterable, Codable {
-    case reduced = "Reduced"
-    case medium = "Medium"
-    case full = "Full"
-
-    var info: String {
-        switch self {
-        case .reduced: return "Fastest, lighter file"
-        case .medium: return "Balanced detail (recommended)"
-        case .full: return "Sharpest, slowest, largest"
-        }
-    }
-}
-
 /// Settings for the scanning session
 struct ScanSettings: Codable {
     var captureTexture: Bool = true

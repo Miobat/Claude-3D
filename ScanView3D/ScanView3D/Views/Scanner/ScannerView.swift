@@ -26,7 +26,6 @@ struct ScannerView: View {
     @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
     @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
-    @State private var reconDetail: ReconstructionDetail = .medium
     @State private var savingProgress = ""
     @State private var savedScan: Scan?
     @State private var savedProject: Project?
@@ -598,16 +597,13 @@ struct ScannerView: View {
                 }
 
                 if settings.captureMode == .highQuality {
-                    // Path B: photogrammetry reconstruction quality
-                    Section("Reconstruction Detail") {
-                        Picker("Detail", selection: $reconDetail) {
-                            ForEach(ReconstructionDetail.allCases, id: \.self) { d in
-                                Text(d.rawValue).tag(d)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        Text(reconDetail.info)
+                    // Path B: photogrammetry (iOS supports reduced detail on-device)
+                    Section("Output") {
+                        Label("On-device photogrammetry → textured model (USDZ)", systemImage: "sparkles")
                             .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text("iOS reconstructs at reduced detail on-device. For higher detail, use Splat (Desktop) export.")
+                            .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 } else if settings.captureMode == .pointCloud {
@@ -928,8 +924,7 @@ struct ScannerView: View {
             do {
                 try await PhotogrammetryProcessor.reconstruct(
                     inputFolder: inputFolder,
-                    outputUSDZ: outputURL,
-                    detail: reconDetail
+                    outputUSDZ: outputURL
                 ) { fraction in
                     DispatchQueue.main.async {
                         self.savingProgress = "Reconstructing… \(Int(fraction * 100))%"
