@@ -294,14 +294,48 @@ class LiDARScanner: NSObject, ObservableObject {
             height: h
         ))
 
-        // Retain the pixel buffer via CIImage, then JPEG-encode off the main thread.
+        // Save full-res JPEG with EXIF metadata (focal length + gravity).
+        // PhotogrammetrySession requires this metadata to reconstruct.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let url = folder.appendingPathComponent(String(format: "frame_%04d.jpg", index))
-        let context = ciContext
-        hqSaveQueue.async {
+        let intrinsics = frame.camera.intrinsics
+        let gravity = frame.camera.transform // used for orientation
+        let focalLengthPx = Double(intrinsics[0][0]) // fx in pixels
+
+        // Approximate 35mm-equivalent focal length.
+        // iPhone sensor width ~6.17mm; 35mm film width = 36mm
+        let sensorWidthMM = 6.17
+        let physicalFocalMM = focalLengthPx * sensorWidthMM / Double(w)
+        let focalLength35mm = physicalFocalMM * 36.0 / sensorWidthMM
+
+        hqSaveQueue.async { [ciContext] in
             let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-            if let data = context.jpegRepresentation(of: ciImage, colorSpace: cs, options: [:]) {
-                try? data.write(to: url)
+            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+
+            guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+
+            let exif: [CFString: Any] = [
+                kCGImagePropertyExifFocalLength: physicalFocalMM,
+                kCGImagePropertyExifFocalLenIn35mmFilm: Int(focalLength35mm),
+                kCGImagePropertyExifPixelXDimension: w,
+                kCGImagePropertyExifPixelYDimension: h
+            ]
+            let tiff: [CFString: Any] = [
+                kCGImagePropertyTIFFMake: "Apple",
+                kCGImagePropertyTIFFModel: "iPhone"
+            ]
+            let properties: [CFString: Any] = [
+                kCGImagePropertyExifDictionary: exif,
+                kCGImagePropertyTIFFDictionary: tiff,
+                kCGImagePropertyOrientation: 1, // top-left
+                kCGImagePropertyDPIWidth: 72,
+                kCGImagePropertyDPIHeight: 72
+            ]
+
+            CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
+            let opts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.9]
+            CGImageDestinationSetProperties(dest, opts as CFDictionary)
+            CGImageDestinationFinalize(dest)
             }
         }
     }
