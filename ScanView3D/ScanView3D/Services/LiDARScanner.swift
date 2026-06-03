@@ -44,7 +44,7 @@ class LiDARScanner: NSObject, ObservableObject {
     private var captureMode: ScanSettings.CaptureMode = .fast
     private var captureFolderURL: URL?
     private var lastHighResSaveTime: TimeInterval = 0
-    private let highResInterval: TimeInterval = 0.35
+    private let highResInterval: TimeInterval = 0.25
     private let maxHighResFrames: Int = 250
     private let ciContext = CIContext()
     private let hqSaveQueue = DispatchQueue(label: "scanview.hq.save", qos: .utility)

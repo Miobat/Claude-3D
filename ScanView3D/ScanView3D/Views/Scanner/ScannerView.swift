@@ -417,11 +417,11 @@ struct ScannerView: View {
                 .background(Capsule().fill(Color.purple.opacity(0.2)))
             }
 
-            if settings.captureTexture {
+            if settings.captureMode == .highQuality || settings.captureMode == .splatExport {
                 HStack(spacing: 4) {
-                    Image(systemName: "camera.fill")
+                    Image(systemName: "photo.stack")
                         .font(.caption2)
-                    Text("\(scanner.capturedFrameCount)")
+                    Text("\(scanner.highResFrameCount)")
                         .font(.caption2)
                         .fontWeight(.medium)
                 }
@@ -652,7 +652,7 @@ struct ScannerView: View {
                         if !meshData.colors.isEmpty {
                             LabeledContent("Color Data", value: "Yes")
                         }
-                        LabeledContent("Photo Frames", value: "\(scanner.capturedFrameCount)")
+                        LabeledContent("Photo Frames", value: settings.captureMode == .highQuality || settings.captureMode == .splatExport ? "\(scanner.highResFrameCount)" : "\(scanner.capturedFrameCount)")
                         LabeledContent("Range", value: settings.scanRange.rawValue)
                         LabeledContent("Quality", value: settings.scanQuality.rawValue)
                         LabeledContent("Est. File Size", value: String(format: "%.1f MB", scanner.estimatedFileSizeMB))
