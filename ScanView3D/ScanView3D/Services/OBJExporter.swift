@@ -167,6 +167,88 @@ class OBJExporter {
         return objURL
     }
 
+    /// Export a UV-textured OBJ from a baked atlas (per-face-corner UVs).
+    /// Produces <name>.obj + <name>.mtl + <name>_texture.jpg.
+    static func exportTextured(
+        meshData: MeshData,
+        fileName: String,
+        baked: BakedTexture,
+        directory: URL? = nil
+    ) throws -> URL {
+        guard !meshData.vertices.isEmpty, meshData.faceCount > 0 else {
+            throw ExportError.noMeshData
+        }
+
+        let exportDir = directory ?? getDefaultExportDirectory()
+        try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+
+        let name = sanitizeFileName(fileName)
+        let objURL = exportDir.appendingPathComponent("\(name).obj")
+        let mtlURL = exportDir.appendingPathComponent("\(name).mtl")
+        let texName = "\(name)_texture.jpg"
+        let texURL = exportDir.appendingPathComponent(texName)
+
+        if let jpeg = baked.atlasImage.jpegData(compressionQuality: 0.92) {
+            try jpeg.write(to: texURL)
+        }
+
+        var obj = ""
+        obj += "# ScanView 3D - Textured OBJ Export\n"
+        obj += "# Exported: \(Date().formattedString)\n"
+        obj += "# Vertices: \(meshData.vertexCount)  Faces: \(meshData.faceCount)\n"
+        obj += "mtllib \(name).mtl\n"
+        obj += "o \(name)\n\n"
+
+        // Positions
+        for v in meshData.vertices {
+            obj += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
+        }
+
+        // Normals
+        let hasNormals = !meshData.normals.isEmpty
+        if hasNormals {
+            for n in meshData.normals {
+                obj += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
+            }
+        }
+
+        // Texture coordinates: one per face-corner, in face order (bottom-left origin)
+        for uv in baked.cornerUVs {
+            obj += String(format: "vt %.6f %.6f\n", uv.x, uv.y)
+        }
+
+        obj += "usemtl scan_material\n"
+
+        // Faces: v/vt/vn — vt index is per-corner (fi*3+k), v/vn share the vertex index
+        for (fi, face) in meshData.faces.enumerated() {
+            guard face.count == 3 else { continue }
+            let v0 = Int(face[0]) + 1, v1 = Int(face[1]) + 1, v2 = Int(face[2]) + 1
+            let t0 = fi * 3 + 1, t1 = fi * 3 + 2, t2 = fi * 3 + 3
+            if hasNormals {
+                obj += "f \(v0)/\(t0)/\(v0) \(v1)/\(t1)/\(v1) \(v2)/\(t2)/\(v2)\n"
+            } else {
+                obj += "f \(v0)/\(t0) \(v1)/\(t1) \(v2)/\(t2)\n"
+            }
+        }
+
+        try obj.write(to: objURL, atomically: true, encoding: .utf8)
+
+        let mtl = """
+        # ScanView 3D - Material Library
+
+        newmtl scan_material
+        Ka 1.0 1.0 1.0
+        Kd 1.0 1.0 1.0
+        Ks 0.0 0.0 0.0
+        d 1.0
+        illum 1
+        map_Kd \(texName)
+        """
+        try? mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
+
+        return objURL
+    }
+
     /// Export MeshData to binary PLY format (much smaller files than ASCII)
     static func exportPLY(
         meshData: MeshData,

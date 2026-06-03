@@ -116,7 +116,7 @@ class StorageManager: ObservableObject {
         name: String,
         toProject project: Project,
         format: ExportFormat = .obj,
-        textureAtlas: TextureAtlasResult? = nil
+        baked: BakedTexture? = nil
     ) throws -> Scan {
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
@@ -124,16 +124,27 @@ class StorageManager: ObservableObject {
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
+        let isTextured = (format == .obj && baked != nil)
+
         // Export based on format
         let fileURL: URL
         switch format {
         case .obj:
-            fileURL = try OBJExporter.export(
-                meshData: meshData,
-                fileName: scanId.uuidString,
-                textureAtlas: textureAtlas,
-                directory: scanDir
-            )
+            if let baked = baked {
+                fileURL = try OBJExporter.exportTextured(
+                    meshData: meshData,
+                    fileName: scanId.uuidString,
+                    baked: baked,
+                    directory: scanDir
+                )
+            } else {
+                fileURL = try OBJExporter.export(
+                    meshData: meshData,
+                    fileName: scanId.uuidString,
+                    textureAtlas: nil,
+                    directory: scanDir
+                )
+            }
         case .ply:
             fileURL = try OBJExporter.exportPLY(
                 meshData: meshData,
@@ -152,18 +163,24 @@ class StorageManager: ObservableObject {
             fileSize: fileSize
         )
         scan.hasColor = !meshData.colors.isEmpty
-        scan.hasTexture = textureAtlas != nil
+        scan.hasTexture = isTextured
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
 
-        // Store texture file name if we have a texture atlas
-        if textureAtlas != nil {
+        // Store texture file name if we baked a texture
+        if isTextured {
             scan.textureFileName = "\(scanId.uuidString)_texture.jpg"
         }
 
-        // Save native SceneKit scene for fast internal viewing
+        // Save native SceneKit scene for fast internal viewing.
+        // Use the UV-textured node when we have a baked atlas, otherwise per-vertex color.
         let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
-        let scnNode = MeshProcessor.createSceneKitNode(from: meshData)
+        let scnNode: SCNNode
+        if let baked = baked, isTextured {
+            scnNode = MeshProcessor.createTexturedNode(from: meshData, baked: baked)
+        } else {
+            scnNode = MeshProcessor.createSceneKitNode(from: meshData)
+        }
         let scene = SCNScene()
         scene.rootNode.addChildNode(scnNode)
         scene.write(to: scnURL, delegate: nil)
