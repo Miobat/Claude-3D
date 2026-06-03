@@ -1,5 +1,6 @@
 import Foundation
 import SceneKit
+import RealityKit
 #if !targetEnvironment(simulator)
 import ARKit
 #endif
@@ -628,3 +629,70 @@ class MeshProcessor {
         return maxDimension * 2.0
     }
 }
+
+// MARK: - Path B: On-Device Photogrammetry
+
+#if !targetEnvironment(simulator)
+/// Reconstructs a dense, textured USDZ from a folder of full-resolution photos
+/// using Apple's on-device PhotogrammetrySession. Supported on iPhone 12 Pro and
+/// later (Pro models). Always gate calls with `isSupported`.
+enum PhotogrammetryProcessor {
+
+    static var isSupported: Bool {
+        PhotogrammetrySession.isSupported
+    }
+
+    enum ProcessError: Error, LocalizedError {
+        case notSupported
+        case noImages
+        var errorDescription: String? {
+            switch self {
+            case .notSupported: return "High-quality reconstruction isn't supported on this device."
+            case .noImages: return "Not enough photos were captured for reconstruction."
+            }
+        }
+    }
+
+    /// Reconstruct a textured USDZ from a folder of images.
+    /// `progress` is called with values in 0...1 as the session works.
+    static func reconstruct(
+        inputFolder: URL,
+        outputUSDZ: URL,
+        detail: PhotogrammetrySession.Request.Detail = .reduced,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        guard isSupported else { throw ProcessError.notSupported }
+
+        let images = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
+        let imageCount = images.filter {
+            let l = $0.lowercased()
+            return l.hasSuffix(".jpg") || l.hasSuffix(".jpeg") || l.hasSuffix(".heic")
+        }.count
+        guard imageCount >= 3 else { throw ProcessError.noImages }
+
+        var configuration = PhotogrammetrySession.Configuration()
+        configuration.sampleOrdering = .sequential
+        configuration.featureSensitivity = .high
+
+        let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
+        try session.process(requests: [
+            .modelFile(url: outputUSDZ, detail: detail)
+        ])
+
+        for try await output in session.outputs {
+            switch output {
+            case .requestProgress(_, let fraction):
+                progress(fraction)
+            case .requestComplete:
+                progress(1.0)
+            case .processingComplete:
+                return
+            case .requestError(_, let error):
+                throw error
+            default:
+                continue
+            }
+        }
+    }
+}
+#endif

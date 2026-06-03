@@ -124,6 +124,34 @@ struct ScanSettings: Codable {
     var meshMode: MeshMode = .free
     var rangeValue: Float = 3.0       // Continuous range in meters (0.3 - 5.0)
     var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
+    var captureMode: CaptureMode = .fast
+
+    // MARK: - Capture Mode
+
+    /// Chosen BEFORE scanning. Determines what data is captured.
+    enum CaptureMode: String, Codable, CaseIterable {
+        /// A: light, mesh-focused. Downscaled frames + texture baking. Best for
+        /// large areas where accurate geometry/measurement matters.
+        case fast = "Fast"
+        /// B: saves full-resolution photos for after-scan photogrammetry
+        /// reconstruction (PhotogrammetrySession). Photoreal output, slower,
+        /// more storage.
+        case highQuality = "High Quality"
+
+        var description: String {
+            switch self {
+            case .fast: return "Quick mesh + baked texture. Best for big areas & measuring."
+            case .highQuality: return "Saves full-res photos for photoreal post-processing."
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .fast: return "bolt.fill"
+            case .highQuality: return "sparkles"
+            }
+        }
+    }
 
     // MARK: - Mesh Mode
 

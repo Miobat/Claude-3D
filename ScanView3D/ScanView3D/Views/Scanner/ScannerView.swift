@@ -125,7 +125,10 @@ struct ScannerView: View {
                             .font(.caption2)
                         Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
                             .font(.caption2)
-                        if scanner.capturedFrameCount > 0 {
+                        if settings.captureMode == .highQuality {
+                            Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack")
+                                .font(.caption2)
+                        } else if scanner.capturedFrameCount > 0 {
                             Label("\(scanner.capturedFrameCount)", systemImage: "camera.fill")
                                 .font(.caption2)
                         }
@@ -229,8 +232,54 @@ struct ScannerView: View {
 
     // MARK: - Pre-Scan Controls
 
+    private var highQualitySupported: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return PhotogrammetryProcessor.isSupported
+        #endif
+    }
+
     private var prescanControls: some View {
         VStack(spacing: 10) {
+            // Capture mode (must be chosen BEFORE scanning)
+            VStack(spacing: 4) {
+                HStack {
+                    Text("CAPTURE MODE")
+                        .font(.caption2).fontWeight(.bold).foregroundColor(.pink)
+                    Spacer()
+                }
+                HStack(spacing: 8) {
+                    ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
+                        let disabled = (mode == .highQuality && !highQualitySupported)
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { settings.captureMode = mode }
+                        } label: {
+                            VStack(spacing: 2) {
+                                Image(systemName: mode.icon).font(.system(size: 15))
+                                Text(mode.rawValue).font(.system(size: 10, weight: .semibold))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(settings.captureMode == mode ? Color.pink.opacity(0.3) : Color.white.opacity(0.1))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(settings.captureMode == mode ? Color.pink : Color.clear, lineWidth: 1.5)
+                            )
+                            .opacity(disabled ? 0.4 : 1.0)
+                        }
+                        .disabled(disabled)
+                        .foregroundColor(settings.captureMode == mode ? .white : .gray)
+                    }
+                }
+                Text(settings.captureMode.description)
+                    .font(.system(size: 10)).foregroundColor(.gray)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // Range slider (continuous)
             VStack(spacing: 4) {
                 HStack {
@@ -456,7 +505,8 @@ struct ScannerView: View {
                             quality: settings.scanQuality,
                             meshMode: settings.meshMode,
                             rangeMeters: settings.rangeValue,
-                            confidenceLevel: settings.confidenceLevel
+                            confidenceLevel: settings.confidenceLevel,
+                            captureMode: settings.captureMode
                         )
                     } label: {
                         VStack(spacing: 4) {
@@ -674,6 +724,16 @@ struct ScannerView: View {
             return
         }
 
+        // High-Quality (Path B): reconstruct with on-device photogrammetry
+        #if !targetEnvironment(simulator)
+        if settings.captureMode == .highQuality,
+           let inputFolder = scanner.getPhotogrammetryInputURL(),
+           PhotogrammetryProcessor.isSupported {
+            runPhotogrammetrySave(project: project, inputFolder: inputFolder)
+            return
+        }
+        #endif
+
         // For Area mode, try plane-based reconstruction first
         let rawMeshData: MeshData?
         #if !targetEnvironment(simulator)
@@ -736,6 +796,54 @@ struct ScannerView: View {
             }
         }
     }
+
+    #if !targetEnvironment(simulator)
+    /// Path B: run on-device photogrammetry on the captured photos, then save the USDZ.
+    private func runPhotogrammetrySave(project: Project, inputFolder: URL) {
+        isSaving = true
+        savingProgress = "Reconstructing… 0%"
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).usdz")
+
+        Task {
+            do {
+                try await PhotogrammetryProcessor.reconstruct(
+                    inputFolder: inputFolder,
+                    outputUSDZ: outputURL,
+                    detail: .reduced
+                ) { fraction in
+                    DispatchQueue.main.async {
+                        self.savingProgress = "Reconstructing… \(Int(fraction * 100))%"
+                    }
+                }
+
+                let scan = try storageManager.importProcessedModel(
+                    modelURL: outputURL,
+                    name: scanName,
+                    toProject: project
+                )
+                try? FileManager.default.removeItem(at: outputURL)
+
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    showingSaveDialog = false
+                    scanner.resetScanning()
+                    savedScan = scan
+                    savedProject = project
+                    showingSavedScan = true
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    errorMessage = "Reconstruction failed: \(error.localizedDescription)"
+                    showingError = true
+                }
+            }
+        }
+    }
+    #endif
 }
 
 // MARK: - Simulator Scan View
