@@ -242,8 +242,9 @@ class LiDARScanner: NSObject, ObservableObject {
         guard isScanning && !isPaused,
               let frame = arSession.currentFrame else { return }
 
-        // Path A: downscaled frames for texture baking (skipped in High-Quality mode)
-        if captureMode == .fast && captureTexture && !textureCapturePaused {
+        // Path A / Point Cloud: downscaled frames for color sampling
+        // (skipped only in High-Quality photogrammetry mode)
+        if captureMode != .highQuality && captureTexture && !textureCapturePaused {
             textureMapper.captureFrame(from: frame)
             DispatchQueue.main.async {
                 self.capturedFrameCount = self.textureMapper.frameCount

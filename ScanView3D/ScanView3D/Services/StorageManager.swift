@@ -237,6 +237,44 @@ class StorageManager: ObservableObject {
         return scan
     }
 
+    /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
+    func savePointCloud(meshData: MeshData, name: String, toProject project: Project) throws -> Scan {
+        let scanId = UUID()
+        let fileName = "\(scanId.uuidString).ply"
+        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+
+        let fileURL = try OBJExporter.exportPointCloudPLY(
+            meshData: meshData,
+            fileName: scanId.uuidString,
+            directory: scanDir
+        )
+        let fileSize = (try? fileManager.attributesOfItem(atPath: fileURL.path)[.size] as? Int64) ?? 0
+
+        var scan = Scan(name: name, fileName: fileName, vertexCount: meshData.vertexCount, faceCount: 0, fileSize: fileSize)
+        scan.hasColor = !meshData.colors.isEmpty
+        scan.boundingBoxMin = meshData.boundingBoxMin
+        scan.boundingBoxMax = meshData.boundingBoxMax
+
+        // Native point-cloud scene for fast in-app viewing
+        let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
+        let node = MeshProcessor.createPointCloudNode(from: meshData)
+        let scene = SCNScene()
+        scene.rootNode.addChildNode(node)
+        scene.write(to: scnURL, delegate: nil)
+
+        scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
+
+        if let index = projects.firstIndex(where: { $0.id == project.id }) {
+            projects[index].addScan(scan)
+            if scan.thumbnailData != nil {
+                projects[index].thumbnailData = scan.thumbnailData
+            }
+            saveProjects()
+        }
+        return scan
+    }
+
     /// Render a thumbnail from a model file (USDZ/OBJ/SCN).
     private func generateThumbnail(fromModelURL url: URL) -> Data? {
         guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }

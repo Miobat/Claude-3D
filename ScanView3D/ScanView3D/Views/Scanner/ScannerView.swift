@@ -734,6 +734,12 @@ struct ScannerView: View {
         }
         #endif
 
+        // Point Cloud (Path C foundation): save the colored world-space points
+        if settings.captureMode == .pointCloud, let cloud = scanner.getCombinedMeshData() {
+            savePointCloudFlow(project: project, cloud: cloud)
+            return
+        }
+
         // For Area mode, try plane-based reconstruction first
         let rawMeshData: MeshData?
         #if !targetEnvironment(simulator)
@@ -791,6 +797,33 @@ struct ScannerView: View {
                 DispatchQueue.main.async {
                     isSaving = false
                     errorMessage = "Failed to save: \(error.localizedDescription)"
+                    showingError = true
+                }
+            }
+        }
+    }
+
+    /// Path C foundation: save the scan's colored world-space points as a point cloud.
+    private func savePointCloudFlow(project: Project, cloud: MeshData) {
+        isSaving = true
+        savingProgress = "Saving point cloud…"
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let scan = try storageManager.savePointCloud(meshData: cloud, name: scanName, toProject: project)
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    showingSaveDialog = false
+                    scanner.resetScanning()
+                    savedScan = scan
+                    savedProject = project
+                    showingSavedScan = true
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    errorMessage = "Failed to save point cloud: \(error.localizedDescription)"
                     showingError = true
                 }
             }

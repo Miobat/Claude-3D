@@ -528,6 +528,42 @@ class MeshProcessor {
         return SCNNode(geometry: geometry)
     }
 
+    /// Build a colored point-cloud SceneKit node (Path C foundation / splat init).
+    static func createPointCloudNode(from meshData: MeshData) -> SCNNode {
+        let vertices = meshData.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+        let vertexSource = SCNGeometrySource(vertices: vertices)
+
+        var sources = [vertexSource]
+        if !meshData.colors.isEmpty {
+            let colorData = Data(bytes: meshData.colors, count: meshData.colors.count * MemoryLayout<SIMD4<Float>>.stride)
+            let colorSource = SCNGeometrySource(
+                data: colorData,
+                semantic: .color,
+                vectorCount: meshData.colors.count,
+                usesFloatComponents: true,
+                componentsPerVector: 4,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: MemoryLayout<SIMD4<Float>>.stride
+            )
+            sources.append(colorSource)
+        }
+
+        let indices = Array(0..<UInt32(vertices.count))
+        let element = SCNGeometryElement(indices: indices, primitiveType: .point)
+        element.pointSize = 6
+        element.minimumPointScreenSpaceRadius = 2
+        element.maximumPointScreenSpaceRadius = 8
+
+        let geometry = SCNGeometry(sources: sources, elements: [element])
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        geometry.materials = [material]
+
+        return SCNNode(geometry: geometry)
+    }
+
     /// Create a SceneKit node from an OBJ file URL
     static func createSceneKitNode(fromOBJ url: URL) -> SCNNode? {
         do {

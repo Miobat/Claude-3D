@@ -325,6 +325,55 @@ class OBJExporter {
         return plyURL
     }
 
+    /// Export a colored point cloud as a binary PLY (vertices + RGB, no faces).
+    static func exportPointCloudPLY(
+        meshData: MeshData,
+        fileName: String,
+        directory: URL? = nil
+    ) throws -> URL {
+        guard !meshData.vertices.isEmpty else { throw ExportError.noMeshData }
+
+        let exportDir = directory ?? getDefaultExportDirectory()
+        try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+
+        let sanitizedName = sanitizeFileName(fileName)
+        let plyURL = exportDir.appendingPathComponent("\(sanitizedName).ply")
+
+        let hasColors = !meshData.colors.isEmpty
+        var header = "ply\n"
+        header += "format binary_little_endian 1.0\n"
+        header += "comment ScanView 3D Point Cloud\n"
+        header += "element vertex \(meshData.vertices.count)\n"
+        header += "property float x\n"
+        header += "property float y\n"
+        header += "property float z\n"
+        if hasColors {
+            header += "property uchar red\n"
+            header += "property uchar green\n"
+            header += "property uchar blue\n"
+        }
+        header += "end_header\n"
+
+        var data = Data(header.utf8)
+        for i in 0..<meshData.vertices.count {
+            let v = meshData.vertices[i]
+            var xyz: [Float] = [v.x, v.y, v.z]
+            data.append(contentsOf: xyz.withUnsafeBytes { Data($0) })
+            if hasColors {
+                let c = i < meshData.colors.count ? meshData.colors[i] : SIMD4<Float>(0.7, 0.7, 0.7, 1)
+                let rgb: [UInt8] = [
+                    UInt8(min(max(c.x * 255, 0), 255)),
+                    UInt8(min(max(c.y * 255, 0), 255)),
+                    UInt8(min(max(c.z * 255, 0), 255))
+                ]
+                data.append(contentsOf: rgb)
+            }
+        }
+
+        try data.write(to: plyURL)
+        return plyURL
+    }
+
     // MARK: - Helpers
 
     private static func getDefaultExportDirectory() -> URL {

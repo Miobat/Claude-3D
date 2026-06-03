@@ -137,11 +137,16 @@ struct ScanSettings: Codable {
         /// reconstruction (PhotogrammetrySession). Photoreal output, slower,
         /// more storage.
         case highQuality = "High Quality"
+        /// C (foundation): accumulates a dense colored point cloud from LiDAR
+        /// depth + camera color. The initialization for Gaussian Splatting, and
+        /// exportable as PLY.
+        case pointCloud = "Point Cloud"
 
         var description: String {
             switch self {
             case .fast: return "Quick mesh + baked texture. Best for big areas & measuring."
             case .highQuality: return "Saves full-res photos for photoreal post-processing."
+            case .pointCloud: return "Dense colored point cloud (splat foundation). Exports PLY."
             }
         }
 
@@ -149,6 +154,7 @@ struct ScanSettings: Codable {
             switch self {
             case .fast: return "bolt.fill"
             case .highQuality: return "sparkles"
+            case .pointCloud: return "aqi.medium"
             }
         }
     }
