@@ -461,7 +461,7 @@ struct ModelViewerView: View {
                 DispatchQueue.main.async {
                     self.isProcessing = false
                     self.processingMessage = ""
-                    self.loadError = "Re-reconstruction failed: \(error.localizedDescription)"
+                    self.loadError = PhotogrammetryProcessor.friendlyMessage(for: error)
                 }
             }
         }

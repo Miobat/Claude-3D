@@ -1030,7 +1030,7 @@ struct ScannerView: View {
                 DispatchQueue.main.async {
                     isSaving = false
                     savingProgress = ""
-                    errorMessage = "Reconstruction failed: \(error.localizedDescription)"
+                    errorMessage = PhotogrammetryProcessor.friendlyMessage(for: error)
                     showingError = true
                 }
             }

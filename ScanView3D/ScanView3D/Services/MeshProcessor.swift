@@ -776,12 +776,26 @@ enum PhotogrammetryProcessor {
         }
     }
 
+    /// Turn a raw PhotogrammetrySession failure into actionable guidance.
+    /// Error code 6 == "alignment failed": the system couldn't work out the
+    /// camera positions, almost always due to too little overlap / texture.
+    static func friendlyMessage(for error: Error) -> String {
+        if let pe = error as? ProcessError { return pe.errorDescription ?? "\(error)" }
+        let ns = error as NSError
+        if ns.code == 6 {
+            return "Couldn't align the photos into a 3D model. This usually means the photos didn't overlap enough.\n\nTips: move slowly and keep the subject 1–2 m away, circle it with lots of overlap between shots, use good even lighting, and avoid blank/shiny surfaces (plain walls, glass). Then scan again."
+        }
+        return "Reconstruction failed: \(error.localizedDescription)"
+    }
+
     /// On-device reconstruction effort. iOS caps mesh detail at `.reduced`
-    /// (Apple limitation; `.medium`/`.full` are macOS-only), so this trades
-    /// feature-matching effort and photo count for speed — not a detail tier.
+    /// (Apple limitation; `.medium`/`.full` are macOS-only), so this only trades
+    /// feature-matching sensitivity for speed — not a detail tier. We never drop
+    /// photos: reducing frame overlap is the #1 cause of alignment failures
+    /// (PhotogrammetrySession error 6).
     enum Quality {
-        case draft   // fewer photos, normal sensitivity — fastest
-        case best    // all photos, high sensitivity — slower, sharper
+        case draft   // normal sensitivity — faster, slightly more failure-prone
+        case best    // high sensitivity — slower, most robust alignment + detail
     }
 
     /// Reconstruct a textured USDZ from a folder of images.
@@ -800,38 +814,19 @@ enum PhotogrammetryProcessor {
         let requestDetail: PhotogrammetrySession.Request.Detail = .reduced
 
         let allImages = (try? FileManager.default.contentsOfDirectory(atPath: inputFolder.path)) ?? []
-        let imageNames = allImages.filter {
+        let imageCount = allImages.filter {
             let l = $0.lowercased()
             return l.hasSuffix(".jpg") || l.hasSuffix(".jpeg") || l.hasSuffix(".heic")
-        }.sorted()
-        guard imageNames.count >= 3 else { throw ProcessError.noImages }
-
-        // Draft trades quality for speed by feeding a subset (every other photo)
-        // from a temporary folder of hard links, keeping the originals intact.
-        var workingFolder = inputFolder
-        var tempFolder: URL?
-        if quality == .draft && imageNames.count >= 12 {
-            let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("draft-\(UUID().uuidString)")
-            if (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil {
-                for (i, name) in imageNames.enumerated() where i % 2 == 0 {
-                    let src = inputFolder.appendingPathComponent(name)
-                    let dst = tmp.appendingPathComponent(name)
-                    try? FileManager.default.linkItem(at: src, to: dst)
-                }
-                if let n = try? FileManager.default.contentsOfDirectory(atPath: tmp.path), n.count >= 3 {
-                    workingFolder = tmp
-                    tempFolder = tmp
-                }
-            }
-        }
-        defer { if let t = tempFolder { try? FileManager.default.removeItem(at: t) } }
+        }.count
+        guard imageCount >= 3 else { throw ProcessError.noImages }
 
         var configuration = PhotogrammetrySession.Configuration()
         configuration.sampleOrdering = .sequential
+        // .high finds more feature tracks → more robust alignment; .normal is
+        // faster but likelier to fail on sparse-texture scenes.
         configuration.featureSensitivity = (quality == .best) ? .high : .normal
 
-        let session = try PhotogrammetrySession(input: workingFolder, configuration: configuration)
+        let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
         try session.process(requests: [
             .modelFile(url: outputUSDZ, detail: requestDetail)
         ])
