@@ -24,10 +24,10 @@ struct ModelViewerView: View {
     // Tools
     @State private var activeTool: ViewerTool = .orbit
 
-    // Measurement
-    @State private var measurementPoints: [SCNVector3] = []
-    @State private var measurementLabels: [MeasurementLabel] = []
+    // Measuring
+    @StateObject private var session = MeasurementSession()
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
+    @State private var showingClearMeasurements = false
 
     // Long-running work (re-reconstruction)
     @State private var isProcessing = false
@@ -78,9 +78,7 @@ struct ModelViewerView: View {
                 showBoundingBox: $showBoundingBox,
                 vizMode: $vizMode,
                 activeTool: $activeTool,
-                measurementPoints: $measurementPoints,
-                measurementLabels: $measurementLabels,
-                measurementUnit: $measurementUnit
+                session: session
             )
             .id(reloadToken)
             .ignoresSafeArea(edges: .bottom)
@@ -176,6 +174,125 @@ struct ModelViewerView: View {
                 ShareSheet(items: [url])
             }
         }
+        .onAppear {
+            session.unit = measurementUnit
+            session.load(storageManager.loadMeasurements(for: scan, in: project))
+            let store = storageManager, currentScan = scan, currentProject = project
+            session.onSave = { list in store.saveMeasurements(list, for: currentScan, in: currentProject) }
+        }
+        .onChange(of: activeTool) { _, tool in
+            session.isActive = (tool == .measure)
+        }
+        .confirmationDialog("Delete all measurements on this scan?", isPresented: $showingClearMeasurements,
+                            titleVisibility: .visible) {
+            Button("Delete All", role: .destructive) { session.clearAll() }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    // MARK: - Measuring Panel
+
+    private var measurePanel: some View {
+        VStack(spacing: 8) {
+            // Tools
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(ScanMeasurement.Kind.allCases, id: \.self) { kind in
+                        let selected = session.tool == kind
+                        Button { session.tool = kind } label: {
+                            Label(kind.rawValue, systemImage: kind.icon)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(selected ? Color.yellow : Color.white.opacity(0.15))
+                                .foregroundColor(selected ? .black : .white)
+                                .cornerRadius(8)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
+            Text(session.status)
+                .font(.caption)
+                .foregroundColor(session.message == nil ? .white : .yellow)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 30)
+
+            // Actions: Undo · Add point · Done · Snap
+            HStack(spacing: 22) {
+                Button { session.undo() } label: {
+                    Image(systemName: "arrow.uturn.backward.circle.fill").font(.system(size: 30))
+                }
+                .disabled(session.draftPoints.isEmpty && session.measurements.isEmpty)
+                .accessibilityLabel("Undo")
+
+                Button { session.placeAtCrosshair() } label: {
+                    ZStack {
+                        Circle().fill(Color.yellow).frame(width: 58, height: 58)
+                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(.black)
+                    }
+                }
+                .accessibilityLabel("Add point at crosshair")
+
+                if session.tool.autoCompleteCount == nil {
+                    Button("Done") { session.finish() }
+                        .font(.headline)
+                        .disabled(!session.canFinish)
+                }
+
+                Button { session.snappingEnabled.toggle() } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: "scope").font(.system(size: 22))
+                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.system(size: 9))
+                    }
+                    .opacity(session.snappingEnabled ? 1 : 0.45)
+                }
+            }
+            .foregroundColor(.white)
+
+            // Saved measurements (tap to select, then delete)
+            if !session.measurements.isEmpty {
+                HStack {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(session.measurements) { m in
+                                let selected = session.selectedID == m.id
+                                Button {
+                                    session.selectedID = selected ? nil : m.id
+                                } label: {
+                                    Label(m.summary(unit: measurementUnit), systemImage: m.kind.icon)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(selected ? Color.orange : Color.black.opacity(0.7))
+                                        .foregroundColor(.white)
+                                        .cornerRadius(8)
+                                }
+                            }
+                        }
+                    }
+                    if session.selectedID != nil {
+                        Button { session.deleteSelected() } label: {
+                            Image(systemName: "trash.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                        }
+                        .accessibilityLabel("Delete selected measurement")
+                    } else {
+                        Button { showingClearMeasurements = true } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                        }
+                        .accessibilityLabel("Delete all measurements")
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+        }
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.6)))
+        .padding(.horizontal, 8)
     }
 
     // MARK: - Processing Overlay
@@ -239,33 +356,12 @@ struct ModelViewerView: View {
 
     private var bottomToolbar: some View {
         VStack(spacing: 8) {
-            // Measurement display
-            if !measurementLabels.isEmpty {
-                HStack {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack {
-                            ForEach(measurementLabels) { label in
-                                HStack(spacing: 4) {
-                                    Circle().fill(Color.yellow).frame(width: 8, height: 8)
-                                    Text(label.text).font(.caption).fontWeight(.medium)
-                                }
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(Color.black.opacity(0.7)).cornerRadius(8)
-                            }
-                        }
-                    }
-                    Button {
-                        measurementPoints.removeAll()
-                        measurementLabels.removeAll()
-                        NotificationCenter.default.post(name: .clearMeasurements, object: nil)
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundColor(.red)
-                    }
-                }
-                .padding(.horizontal)
+            if activeTool == .measure {
+                measurePanel
             }
 
-            // Visualization mode selector
+            // Visualization mode selector (hidden while measuring to keep it simple)
+            if activeTool != .measure {
             HStack(spacing: 8) {
                 ForEach(VisualizationMode.allCases, id: \.self) { mode in
                     Button {
@@ -316,8 +412,9 @@ struct ModelViewerView: View {
             .background(.ultraThinMaterial)
             .cornerRadius(10)
             .padding(.horizontal, 8)
+            }
 
-            // Main action buttons (competitor-style)
+            // Main action buttons
             HStack(spacing: 0) {
                 // More
                 Button {
@@ -371,6 +468,14 @@ struct ModelViewerView: View {
         }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
             Button("Share Top-Down Image") { captureFloorplanImage() }
+            if !session.measurements.isEmpty {
+                Button("Export Measurements (CSV)") {
+                    if let url = storageManager.exportMeasurementsCSV(session.measurements, scanName: scan.name,
+                                                                      unit: measurementUnit) {
+                        ShareSheetPresenter.present([url])
+                    }
+                }
+            }
             if storageManager.splatBundleURL(for: scan, in: project) != nil {
                 Button("Send Splat Bundle (.zip)") { sendSplatBundle() }
             }
@@ -423,8 +528,8 @@ struct ModelViewerView: View {
                         .scans.first(where: { $0.id == self.scan.id }) {
                         self.scan = updated
                     }
-                    self.measurementPoints.removeAll()
-                    self.measurementLabels.removeAll()
+                    // The new model has a different scale; old measurements no longer apply.
+                    self.session.clearAll()
                     self.modelNode = nil
                     self.reloadToken = UUID()
                 }
@@ -557,12 +662,6 @@ struct VirtualJoystick: View {
 
 // MARK: - Supporting Types
 
-struct MeasurementLabel: Identifiable {
-    let id = UUID()
-    let text: String
-    let position: SCNVector3
-}
-
 extension Notification.Name {
     static let resetCameraView = Notification.Name("resetCameraView")
     static let joystickMove = Notification.Name("joystickMove")
@@ -570,7 +669,6 @@ extension Notification.Name {
     static let setCameraView = Notification.Name("setCameraView")
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")
-    static let clearMeasurements = Notification.Name("clearMeasurements")
     static let captureTopDownImage = Notification.Name("captureTopDownImage")
 }
 

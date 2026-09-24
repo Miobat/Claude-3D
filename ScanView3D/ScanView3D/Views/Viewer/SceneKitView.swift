@@ -1,5 +1,7 @@
 import SwiftUI
 import SceneKit
+import SpriteKit
+import Combine
 
 /// UIViewRepresentable wrapper for SceneKit 3D viewer
 struct SceneKitViewRepresentable: UIViewRepresentable {
@@ -13,9 +15,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     @Binding var showBoundingBox: Bool
     @Binding var vizMode: ModelViewerView.VisualizationMode
     @Binding var activeTool: ModelViewerView.ViewerTool
-    @Binding var measurementPoints: [SCNVector3]
-    @Binding var measurementLabels: [MeasurementLabel]
-    @Binding var measurementUnit: ScanSettings.MeasurementUnit
+    let session: MeasurementSession
 
     func makeUIView(context: Context) -> SCNView {
         let sceneView = SCNView(frame: .zero)
@@ -37,6 +37,14 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         sceneView.addGestureRecognizer(tapGesture)
 
         context.coordinator.sceneView = sceneView
+
+        // Flat measurement overlay (constant-size lines and labels) drawn by
+        // SpriteKit on top of the 3D view, refreshed from the render loop.
+        let overlay = MeasurementOverlayScene(size: CGSize(width: 400, height: 800))
+        sceneView.overlaySKScene = overlay
+        sceneView.delegate = context.coordinator
+        context.coordinator.attach(session: session, overlay: overlay)
+
         loadModel(sceneView: sceneView, context: context)
 
         // Register for all notifications
@@ -47,7 +55,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraView(_:)), name: .setCameraView, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraProjection(_:)), name: .setCameraProjection, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetVisualizationMode(_:)), name: .setVisualizationMode, object: nil)
-        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleClearMeasurements), name: .clearMeasurements, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleCaptureTopDown), name: .captureTopDownImage, object: nil)
 
         return sceneView
@@ -66,7 +73,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         } else if !showBoundingBox { bbNode?.removeFromParentNode() }
 
         context.coordinator.activeTool = activeTool
-        context.coordinator.measurementUnit = measurementUnit
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -237,6 +243,13 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     context.coordinator.modelExtent = extent
                     context.coordinator.viewDistance = distance
                     context.coordinator.collectPickablePoints(from: node)
+
+                    // Surface index for snapping (corners, edges, wall directions).
+                    let sources = ModelGeometryIndex.sources(in: node)
+                    DispatchQueue.global(qos: .utility).async {
+                        let index = ModelGeometryIndex.build(from: sources)
+                        DispatchQueue.main.async { context.coordinator.geometryIndex = index }
+                    }
                     self.isLoading = false
                 } else {
                     self.loadError = "Failed to load model file"
@@ -248,11 +261,17 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
     // MARK: - Coordinator
 
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, SCNSceneRendererDelegate, MeasurementGeometryProvider {
         var parent: SceneKitViewRepresentable
         var sceneView: SCNView?
         var activeTool: ModelViewerView.ViewerTool = .orbit
-        var measurementUnit: ScanSettings.MeasurementUnit = .meters
+        weak var session: MeasurementSession?
+        private var overlay: MeasurementOverlayScene?
+        var geometryIndex: ModelGeometryIndex?
+        private var previewTimer: Timer?
+        private var activeCancellable: AnyCancellable?
+        private var lastPreviewCamera: simd_float4x4?
+        private var lastPreviewDraftCount = -1
         var modelCenter: SCNVector3 = SCNVector3(0, 0, 0)
         var modelExtent = SIMD3<Float>(1, 1, 1)
         var viewDistance: Float = 5.0
@@ -277,12 +296,67 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         deinit {
             joystickMoveTimer?.invalidate()
             joystickLookTimer?.invalidate()
+            previewTimer?.invalidate()
         }
 
-        /// Marker/label sizes follow the model size so they stay readable on a
-        /// shoe box and on a whole garden.
-        private var markerRadius: CGFloat { CGFloat(max(0.003, viewDistance * 0.0025)) }
-        private var labelSize: CGFloat { CGFloat(max(0.01, viewDistance * 0.012)) }
+        func attach(session: MeasurementSession, overlay: MeasurementOverlayScene) {
+            self.session = session
+            self.overlay = overlay
+            session.geometry = self
+            session.renderSink = { [weak overlay] state in overlay?.update(state) }
+            activeCancellable = session.$isActive
+                .removeDuplicates()
+                .sink { [weak self] on in self?.measuringChanged(on) }
+        }
+
+        // MARK: - Overlay refresh (SceneKit render thread)
+
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+            guard let overlay = overlay, let pov = renderer.pointOfView else { return }
+            let height = overlay.size.height
+            let ortho: Double = (pov.camera?.usesOrthographicProjection ?? false) ? (pov.camera?.orthographicScale ?? 0) : -1
+            overlay.redrawIfNeeded(camera: pov.simdWorldTransform, ortho: ortho) { p in
+                let v = renderer.projectPoint(SCNVector3(p.x, p.y, p.z))
+                guard v.z > 0, v.z < 1 else { return nil }
+                return CGPoint(x: CGFloat(v.x), y: height - CGFloat(v.y))
+            }
+        }
+
+        // MARK: - Live snap preview at the crosshair
+
+        private func measuringChanged(_ on: Bool) {
+            sceneView?.rendersContinuously = on
+            previewTimer?.invalidate()
+            previewTimer = nil
+            lastPreviewCamera = nil
+            if on {
+                previewTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+                    self?.updatePreview()
+                }
+            } else if session?.preview != nil {
+                session?.preview = nil
+            }
+        }
+
+        private func updatePreview() {
+            guard let view = sceneView, let session = session, session.isActive,
+                  let camera = view.pointOfView?.simdWorldTransform else { return }
+            // Only recompute when the view or the measurement in progress changed.
+            if let last = lastPreviewCamera, Self.same(last, camera),
+               lastPreviewDraftCount == session.draftPoints.count + (session.snappingEnabled ? 1000 : 0) + session.tool.hashValue {
+                return
+            }
+            lastPreviewCamera = camera
+            lastPreviewDraftCount = session.draftPoints.count + (session.snappingEnabled ? 1000 : 0) + session.tool.hashValue
+            let result = snap(at: CGPoint(x: view.bounds.midX, y: view.bounds.midY))
+            if result != session.preview { session.preview = result }
+        }
+
+        private static func same(_ a: simd_float4x4, _ b: simd_float4x4) -> Bool {
+            simd_distance(a.columns.3, b.columns.3) < 1e-5 &&
+            simd_distance(a.columns.2, b.columns.2) < 1e-5 &&
+            simd_distance(a.columns.0, b.columns.0) < 1e-5
+        }
 
         // MARK: - Point Picking Support
 
@@ -456,115 +530,185 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Tap / Measure
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard activeTool == .measure, let sceneView = sceneView, let scene = sceneView.scene else { return }
-            let location = gesture.location(in: sceneView)
-
-            guard var point = surfacePoint(at: location, in: sceneView) else { return }
-
-            let pointCount = parent.measurementPoints.count
-            var snap: SnapKind = .none
-            if pointCount % 2 == 1 {
-                let first = parent.measurementPoints[pointCount - 1]
-                (point, snap) = snapped(point, to: first, in: sceneView)
+            guard activeTool == .measure, let sceneView = sceneView, let session = session else { return }
+            if let result = snap(at: gesture.location(in: sceneView)) {
+                session.place(result)
             }
-
-            parent.measurementPoints.append(point)
-            addMeasurementMarker(at: point, in: scene)
-
-            if parent.measurementPoints.count % 2 == 1 {
-                showVerticalGuide(at: point, in: scene)
-                return
-            }
-
-            removeAxisGuides(from: scene)
-            let p1 = parent.measurementPoints[parent.measurementPoints.count - 2]
-            let p2 = point
-            let text = measurementText(from: p1, to: p2, snap: snap)
-            addMeasurementLine(from: p1, to: p2, label: text, in: scene)
-            parent.measurementLabels.append(MeasurementLabel(text: text, position: SCNVector3(0, 0, 0)))
         }
 
-        /// The model surface under a screen location (mesh hit, or nearest point
-        /// for point clouds). Ignores helper geometry like markers and the grid.
-        private func surfacePoint(at location: CGPoint, in view: SCNView) -> SCNVector3? {
+        private let helperNames: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera"]
+
+        private func isHelper(_ node: SCNNode) -> Bool {
+            var n: SCNNode? = node
+            while let current = n {
+                if let name = current.name, helperNames.contains(name) { return true }
+                n = current.parent
+            }
+            return false
+        }
+
+        /// The model surface under a screen location: mesh hit (with its normal),
+        /// or the nearest point for point clouds.
+        private func surfaceHit(at location: CGPoint, in view: SCNView) -> (point: SIMD3<Float>, normal: SIMD3<Float>?)? {
             let hits = view.hitTest(location, options: [
                 .searchMode: SCNHitTestSearchMode.all.rawValue,
                 .ignoreHiddenNodes: true
             ])
-            let excluded: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera"]
-            let hit = hits.first { result in
-                var node: SCNNode? = result.node
-                while let n = node {
-                    if let name = n.name, excluded.contains(name) { return false }
-                    node = n.parent
+            if let hit = hits.first(where: { !isHelper($0.node) }) {
+                let p = hit.worldCoordinates, n = hit.worldNormal
+                return (SIMD3<Float>(p.x, p.y, p.z), simd_normalize(SIMD3<Float>(n.x, n.y, n.z)))
+            }
+            if let p = pickPoint(at: location, in: view) {
+                return (SIMD3<Float>(p.x, p.y, p.z), nil)
+            }
+            return nil
+        }
+
+        /// Model surfaces crossed by the segment a→b (world space).
+        private func segmentHits(from a: SIMD3<Float>, to b: SIMD3<Float>) -> [SIMD3<Float>] {
+            guard let root = sceneView?.scene?.rootNode else { return [] }
+            let results = root.hitTestWithSegment(
+                from: SCNVector3(a.x, a.y, a.z), to: SCNVector3(b.x, b.y, b.z),
+                options: [SCNHitTestOption.searchMode.rawValue: SCNHitTestSearchMode.all.rawValue,
+                          SCNHitTestOption.backFaceCulling.rawValue: false])
+            return results.filter { !isHelper($0.node) }.map {
+                SIMD3<Float>($0.worldCoordinates.x, $0.worldCoordinates.y, $0.worldCoordinates.z)
+            }
+        }
+
+        /// Where a tap (or the crosshair) should land, following the snapping rules:
+        /// existing point > corner > edge > vertical / wall direction > level > surface.
+        /// All thresholds are screen distances, so it behaves the same at any scale.
+        func snap(at location: CGPoint) -> SnapResult? {
+            guard let view = sceneView, let session = session,
+                  let hit = surfaceHit(at: location, in: view) else { return nil }
+            let p = hit.point
+            let surface = SnapResult(point: p, kind: .surface, normal: hit.normal)
+            guard session.snappingEnabled else { return surface }
+
+            func screenDistance(_ q: SIMD3<Float>) -> CGFloat {
+                let s = view.projectPoint(SCNVector3(q.x, q.y, q.z))
+                guard s.z > 0, s.z < 1 else { return .greatestFiniteMagnitude }
+                return hypot(CGFloat(s.x) - location.x, CGFloat(s.y) - location.y)
+            }
+
+            // 1. Existing points (to chain or close shapes)
+            var bestPoint: (SIMD3<Float>, CGFloat)?
+            for q in session.snapTargets {
+                let d = screenDistance(q)
+                if d < snapDistance, d < (bestPoint?.1 ?? .greatestFiniteMagnitude) { bestPoint = (q, d) }
+            }
+            if let bp = bestPoint { return SnapResult(point: bp.0, kind: .point, normal: hit.normal) }
+
+            // 2. Corners and edges: fit up to three flat surfaces around the tap.
+            var normal = hit.normal
+            var edgeCandidate: SnapResult?
+            if let index = geometryIndex {
+                let nb = index.neighbours(of: p, radius: index.radius * 1.5, limit: 1200)
+                if nb.count >= 30 {
+                    let planes = GeometryMath.ransacPlanes(nb, tolerance: max(0.004, index.radius * 0.12),
+                                                           maxPlanes: 3, minInliers: max(10, nb.count / 8))
+                    if normal == nil, let own = planes.min(by: { abs($0.signedDistance(p)) < abs($1.signedDistance(p)) }) {
+                        normal = own.normal
+                    }
+                    if planes.count >= 3, let c = GeometryMath.intersect(planes[0], planes[1], planes[2]),
+                       simd_distance(c, p) < index.radius * 2, screenDistance(c) < snapDistance {
+                        return SnapResult(point: c, kind: .corner, normal: normal)
+                    }
+                    if planes.count >= 2, let lineInfo = GeometryMath.intersect(planes[0], planes[1]) {
+                        let e = lineInfo.point + lineInfo.direction * simd_dot(p - lineInfo.point, lineInfo.direction)
+                        if simd_distance(e, p) < index.radius * 1.5, screenDistance(e) < snapDistance * 0.8 {
+                            edgeCandidate = SnapResult(point: e, kind: .edge, normal: normal)
+                        }
+                    }
                 }
-                return true
             }
-            if let hit = hit { return hit.worldCoordinates }
-            return pickPoint(at: location, in: view)
-        }
+            if let edge = edgeCandidate { return edge }
 
-        enum SnapKind { case none, vertical, level }
+            // 3. Straight up/down or along a wall direction from the previous point.
+            if session.tool.usesAxisSnapping, let a = session.draftPoints.last {
+                let near = view.unprojectPoint(SCNVector3(Float(location.x), Float(location.y), 0))
+                let far = view.unprojectPoint(SCNVector3(Float(location.x), Float(location.y), 1))
+                let o = SIMD3<Float>(near.x, near.y, near.z)
+                let d = SIMD3<Float>(far.x, far.y, far.z) - o
 
-        /// Snap the second point so the measurement is exactly vertical (straight
-        /// above/below the first point) or exactly level (same height), when the
-        /// tap is within a finger's width of that on screen. Screen-based, so it
-        /// behaves the same for a small object and a whole building.
-        private func snapped(_ p: SCNVector3, to ref: SCNVector3, in view: SCNView) -> (SCNVector3, SnapKind) {
-            let tap = view.projectPoint(p)
-            func screenDistance(_ q: SCNVector3) -> CGFloat {
-                let s = view.projectPoint(q)
-                return CGFloat(hypotf(s.x - tap.x, s.y - tap.y))
-            }
-            let vertical = SCNVector3(ref.x, p.y, ref.z)
-            let level = SCNVector3(p.x, ref.y, p.z)
-            let dv = screenDistance(vertical)
-            let dl = screenDistance(level)
-            // Don't call a nearly-flat measurement "vertical" or vice versa.
-            let dy = abs(p.y - ref.y)
-            let dh = hypotf(p.x - ref.x, p.z - ref.z)
-            if dv <= snapDistance && dv <= dl && dy > dh { return (vertical, .vertical) }
-            if dl <= snapDistance && dh >= dy { return (level, .level) }
-            return (p, .none)
-        }
+                var axes: [(SIMD3<Float>, SnapKind)] = [(SIMD3<Float>(0, 1, 0), .vertical)]
+                for w in geometryIndex?.wallAxes ?? [] { axes.append((w, .wallAxis)) }
 
-        private func measurementText(from p1: SCNVector3, to p2: SCNVector3, snap: SnapKind) -> String {
-            let dx = p2.x - p1.x, dy = p2.y - p1.y, dz = p2.z - p1.z
-            let total = sqrtf(dx * dx + dy * dy + dz * dz)
-            let unit = measurementUnit
-            switch snap {
-            case .vertical:
-                return "↕ \(unit.format(meters: abs(dy)))"
-            case .level:
-                return "↔ \(unit.format(meters: total))"
-            case .none:
-                // Show the height difference too — useful on slopes and terrain.
-                if abs(dy) >= 0.01 {
-                    return "\(unit.format(meters: total))  ↕ \(unit.format(meters: abs(dy)))"
+                var bestAxis: (SIMD3<Float>, SIMD3<Float>, SnapKind, CGFloat)?
+                for (u, kind) in axes {
+                    guard let x = GeometryMath.closestPoint(onLine: a, direction: u, toRay: o, direction: d),
+                          simd_distance(x, a) > 0.01 else { continue }
+                    let sd = screenDistance(x)
+                    if sd < snapDistance, sd < (bestAxis?.3 ?? .greatestFiniteMagnitude) { bestAxis = (x, u, kind, sd) }
                 }
-                return unit.format(meters: total)
+                if let best = bestAxis {
+                    let landed = landOnSurface(from: a, along: best.1, near: best.0) ?? best.0
+                    return SnapResult(point: landed, kind: best.2, normal: normal)
+                }
+
+                // Same height as the previous point (keeps the point on walls).
+                let level = SIMD3<Float>(p.x, a.y, p.z)
+                if abs(p.y - a.y) < simd_distance(SIMD2<Float>(p.x, p.z), SIMD2<Float>(a.x, a.z)),
+                   screenDistance(level) < snapDistance {
+                    return SnapResult(point: level, kind: .level, normal: normal)
+                }
             }
+
+            return SnapResult(point: p, kind: .surface, normal: normal)
         }
 
-        /// Dashed-style vertical guide through the first point (true vertical).
-        private func showVerticalGuide(at point: SCNVector3, in scene: SCNScene) {
-            removeAxisGuides(from: scene)
-            let length = max(viewDistance, modelExtent.y * 2)
-            let top = SCNVector3(point.x, point.y + length, point.z)
-            let bottom = SCNVector3(point.x, point.y - length, point.z)
-            let node = cylinder(from: bottom, to: top, radius: markerRadius * 0.25,
-                                color: UIColor.systemGreen.withAlphaComponent(0.6))
-            node.name = "axisGuide"
-            scene.rootNode.addChildNode(node)
+        /// Ray-cast from `a` along `u` and return the surface hit closest to `x`
+        /// (e.g. the ceiling exactly above a floor point). Meshes only.
+        private func landOnSurface(from a: SIMD3<Float>, along u: SIMD3<Float>, near x: SIMD3<Float>) -> SIMD3<Float>? {
+            let offset = x - a
+            let dist = simd_length(offset)
+            guard dist > 0.02 else { return nil }
+            let dir = simd_dot(offset, u) >= 0 ? u : -u
+            let reach = dist * 1.3 + (geometryIndex?.radius ?? 0.1)
+            let hits = segmentHits(from: a + dir * 0.01, to: a + dir * reach)
+            guard let closest = hits.min(by: { simd_distance($0, x) < simd_distance($1, x) }) else { return nil }
+            let tolerance = max(geometryIndex?.radius ?? 0.05, dist * 0.12)
+            return simd_distance(closest, x) < tolerance ? closest : nil
         }
 
-        private func removeAxisGuides(from scene: SCNScene) {
-            scene.rootNode.childNodes.filter { $0.name == "axisGuide" }.forEach { $0.removeFromParentNode() }
+        // MARK: - MeasurementGeometryProvider
+
+        func verticalSpan(at p: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>)? {
+            let up = SIMD3<Float>(0, 1, 0)
+            let reach = (geometryIndex.map { $0.maxY - $0.minY } ?? 10) + 1
+            func nearest(_ pts: [SIMD3<Float>]) -> SIMD3<Float>? {
+                pts.min(by: { simd_distance($0, p) < simd_distance($1, p) })
+            }
+            var top = nearest(segmentHits(from: p + up * 0.02, to: p + up * reach))
+            var bottom = nearest(segmentHits(from: p - up * 0.02, to: p - up * reach))
+            if top == nil && bottom == nil, let index = geometryIndex {
+                // Point clouds: look for points in a thin column instead.
+                let column = index.column(at: p, halfWidth: max(index.radius * 0.4, 0.02))
+                top = column.above.map { SIMD3<Float>(p.x, $0, p.z) }
+                bottom = column.below.map { SIMD3<Float>(p.x, $0, p.z) }
+            }
+            // Keep the measurement exactly vertical through the chosen point.
+            let t = top.map { SIMD3<Float>(p.x, $0.y, p.z) }
+            let b = bottom.map { SIMD3<Float>(p.x, $0.y, p.z) }
+            if let b = b, let t = t { return (b, t) }
+            if let t = t { return (p, t) }
+            if let b = b { return (b, p) }
+            return nil
         }
 
-        @objc func handleClearMeasurements() {
-            guard let sceneView = sceneView, let scene = sceneView.scene else { return }
-            clearAllMeasurements(in: scene)
+        func surfacePlane(at p: SIMD3<Float>, fallbackNormal: SIMD3<Float>?) -> (point: SIMD3<Float>, normal: SIMD3<Float>) {
+            let fallback = (p, fallbackNormal ?? SIMD3<Float>(0, 1, 0))
+            guard let index = geometryIndex else { return fallback }
+            let nb = index.neighbours(of: p, radius: index.radius, limit: 800)
+            guard nb.count >= 12 else { return fallback }
+            // Near a corner the neighbourhood holds several surfaces; use the one the point is on.
+            let planes = GeometryMath.ransacPlanes(nb, tolerance: max(0.004, index.radius * 0.12),
+                                                   maxPlanes: 3, minInliers: max(10, nb.count / 5))
+            guard let plane = planes.min(by: { abs($0.signedDistance(p)) < abs($1.signedDistance(p)) })
+                    ?? GeometryMath.fitPlane(nb) else { return fallback }
+            // Project onto the fitted surface: averages out LiDAR noise.
+            return (p - plane.normal * plane.signedDistance(p), plane.normal)
         }
 
         @objc func resetCamera() {
@@ -634,79 +778,6 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let newPitch = cameraNode.eulerAngles.x - Float(currentLookDY) * rotSpeed
             cameraNode.eulerAngles.x = max(-.pi / 2.5, min(.pi / 2.5, newPitch))
             SCNTransaction.commit()
-        }
-
-        // MARK: - Measurement Helpers
-
-        private func addMeasurementMarker(at position: SCNVector3, in scene: SCNScene) {
-            let sphere = SCNSphere(radius: markerRadius)
-            sphere.firstMaterial?.diffuse.contents = UIColor.systemYellow
-            sphere.firstMaterial?.emission.contents = UIColor.systemYellow
-            sphere.firstMaterial?.readsFromDepthBuffer = false   // always visible
-            let node = SCNNode(geometry: sphere)
-            node.position = position
-            node.name = "measurementNode"
-            node.renderingOrder = 100
-            scene.rootNode.addChildNode(node)
-        }
-
-        /// A cylinder between two points (thicker and easier to see than a 1px line).
-        private func cylinder(from a: SCNVector3, to b: SCNVector3, radius: CGFloat, color: UIColor) -> SCNNode {
-            let pa = SIMD3<Float>(a.x, a.y, a.z), pb = SIMD3<Float>(b.x, b.y, b.z)
-            let vector = pb - pa
-            let length = simd_length(vector)
-            let geometry = SCNCylinder(radius: radius, height: CGFloat(max(length, 0.0001)))
-            geometry.firstMaterial?.diffuse.contents = color
-            geometry.firstMaterial?.emission.contents = color
-            geometry.firstMaterial?.lightingModel = .constant
-            let node = SCNNode(geometry: geometry)
-            node.simdPosition = (pa + pb) / 2
-            if length > 1e-6 {
-                let dir = vector / length
-                let up = SIMD3<Float>(0, 1, 0)
-                if simd_dot(dir, up) < -0.9999 {
-                    node.simdOrientation = simd_quatf(angle: .pi, axis: SIMD3<Float>(1, 0, 0))
-                } else {
-                    node.simdOrientation = simd_quatf(from: up, to: dir)
-                }
-            }
-            return node
-        }
-
-        private func addMeasurementLine(from: SCNVector3, to: SCNVector3, label: String, in scene: SCNScene) {
-            let line = cylinder(from: from, to: to, radius: markerRadius * 0.35, color: UIColor.systemYellow)
-            line.name = "measurementNode"
-            line.renderingOrder = 99
-            line.geometry?.firstMaterial?.readsFromDepthBuffer = false
-            scene.rootNode.addChildNode(line)
-
-            // Billboard label above the midpoint
-            let text = SCNText(string: label, extrusionDepth: 0)
-            text.font = UIFont.systemFont(ofSize: labelSize, weight: .bold)
-            text.flatness = 0.05
-            text.firstMaterial?.diffuse.contents = UIColor.white
-            text.firstMaterial?.emission.contents = UIColor.white
-            text.firstMaterial?.isDoubleSided = true
-            text.firstMaterial?.readsFromDepthBuffer = false
-
-            let textNode = SCNNode(geometry: text)
-            textNode.name = "measurementNode"
-            textNode.renderingOrder = 101
-            let (textMin, textMax) = textNode.boundingBox
-            textNode.pivot = SCNMatrix4MakeTranslation((textMax.x + textMin.x) / 2, textMin.y, 0)
-            textNode.position = SCNVector3((from.x + to.x) / 2,
-                                           (from.y + to.y) / 2 + Float(markerRadius) * 2,
-                                           (from.z + to.z) / 2)
-            let billboard = SCNBillboardConstraint()
-            billboard.freeAxes = .all
-            textNode.constraints = [billboard]
-            scene.rootNode.addChildNode(textNode)
-        }
-
-        func clearAllMeasurements(in scene: SCNScene) {
-            scene.rootNode.childNodes
-                .filter { $0.name == "measurementNode" || $0.name == "axisGuide" }
-                .forEach { $0.removeFromParentNode() }
         }
     }
 }

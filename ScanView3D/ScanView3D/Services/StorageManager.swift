@@ -262,6 +262,43 @@ class StorageManager: ObservableObject {
         return scan
     }
 
+    // MARK: - Measurements
+
+    private func measurementsURL(for scan: Scan, in project: Project) -> URL {
+        let base = (scan.fileName as NSString).deletingPathExtension
+        return scansDirectory.appendingPathComponent(project.id.uuidString)
+            .appendingPathComponent("\(base)_measurements.json")
+    }
+
+    func loadMeasurements(for scan: Scan, in project: Project) -> [ScanMeasurement] {
+        guard let data = try? Data(contentsOf: measurementsURL(for: scan, in: project)),
+              let list = try? JSONDecoder().decode([ScanMeasurement].self, from: data) else { return [] }
+        return list
+    }
+
+    func saveMeasurements(_ measurements: [ScanMeasurement], for scan: Scan, in project: Project) {
+        let url = measurementsURL(for: scan, in: project)
+        if measurements.isEmpty {
+            try? fileManager.removeItem(at: url)
+        } else if let data = try? JSONEncoder().encode(measurements) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Measurements as a CSV file ready to share.
+    func exportMeasurementsCSV(_ measurements: [ScanMeasurement], scanName: String,
+                               unit: ScanSettings.MeasurementUnit) -> URL? {
+        let dir = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(exportBaseName(scanName))_measurements.csv")
+        do {
+            try ScanMeasurement.csv(measurements, unit: unit).write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Re-export / Re-process helpers
 
     /// URL of a saved Splat bundle zip, if this scan has one.
@@ -402,7 +439,7 @@ class StorageManager: ObservableObject {
     /// bundle zip, and the folder of kept High-Quality photos.
     private func companionFiles(of scan: Scan) -> [String] {
         let base = (scan.fileName as NSString).deletingPathExtension
-        var names = [scan.fileName, "\(base).mtl", "\(base).scn"]
+        var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json"]
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
         if let p = scan.captureFolderName { names.append(p) }
@@ -484,6 +521,7 @@ class StorageManager: ObservableObject {
             return (try? fileManager.copyItem(at: src, to: dst)) != nil ? newName : nil
         }
         _ = copyExtra("\(oldBase).scn", as: "\(newBase).scn")
+        _ = copyExtra("\(oldBase)_measurements.json", as: "\(newBase)_measurements.json")
 
         var newScan = Scan(
             name: "\(scan.name) (Copy)",
