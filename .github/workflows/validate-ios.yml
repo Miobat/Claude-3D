@@ -32,12 +32,11 @@ jobs:
         run: |
           set -o pipefail
           for SDK in iphoneos iphonesimulator; do
-            PLATFORM=iOS
-            if [ "$SDK" = iphonesimulator ]; then PLATFORM='iOS Simulator'; fi
+            # This is a compile check, not a simulator launch. Build the target
+            # against each SDK without requiring an installed simulator runtime.
             xcodebuild -project ScanView3D/ScanView3D.xcodeproj \
-              -scheme ScanView3D -configuration Debug -sdk "$SDK" \
-              -destination "generic/platform=$PLATFORM" \
-              -derivedDataPath "$RUNNER_TEMP/ScanView3D-$PLATFORM" \
+              -target ScanView3D -configuration Debug -sdk "$SDK" \
+              SYMROOT="$RUNNER_TEMP/ScanView3D-$SDK" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= PROVISIONING_PROFILE_SPECIFIER= \
               'SUPPORTED_PLATFORMS=iphoneos iphonesimulator' build \
               2>&1 | tee -a "$RUNNER_TEMP/validation.log"
