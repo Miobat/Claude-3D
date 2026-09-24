@@ -118,6 +118,9 @@ jobs:
           } | sed 's/\x1b\[[0-9;]*m//g' | awk '!seen[$0]++' | head -10 | while IFS= read -r line; do
             echo "::error title=Build failure::${line:0:900}"
           done
+          if grep -q "required agreement is missing or has expired" "$RUNNER_TEMP/fastlane.log" 2>/dev/null; then
+            echo "::error title=Action needed (Apple account)::Accept pending agreements in App Store Connect > Business and at developer.apple.com/account (Program License Agreement), then re-run. No code change needed."
+          fi
           echo "---- last 40 lines of fastlane output ----"
           tail -40 "$RUNNER_TEMP/fastlane.log" 2>/dev/null || true
 
