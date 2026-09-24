@@ -74,6 +74,100 @@ enum GeometryMath {
         return ([a[0][0], a[1][1], a[2][2]], v)
     }
 
+    /// Cyclic Jacobi for any small symmetric matrix (eigenvectors as COLUMNS).
+    static func symmetricEigen(n: Int, _ matrix: [[Double]]) -> (values: [Double], vectors: [[Double]]) {
+        var a = matrix
+        var v = (0..<n).map { i in (0..<n).map { j in i == j ? 1.0 : 0.0 } }
+        for _ in 0..<100 {
+            var p = 0, q = 1
+            var maxOff = 0.0
+            for i in 0..<n {
+                for j in (i + 1)..<n where abs(a[i][j]) > maxOff { p = i; q = j; maxOff = abs(a[i][j]) }
+            }
+            if maxOff < 1e-12 { break }
+            let theta = (a[q][q] - a[p][p]) / (2 * a[p][q])
+            let t = (theta >= 0 ? 1.0 : -1.0) / (abs(theta) + (theta * theta + 1).squareRoot())
+            let c = 1 / (t * t + 1).squareRoot()
+            let s = t * c
+            for k in 0..<n {
+                let akp = a[k][p], akq = a[k][q]
+                a[k][p] = c * akp - s * akq
+                a[k][q] = s * akp + c * akq
+            }
+            for k in 0..<n {
+                let apk = a[p][k], aqk = a[q][k]
+                a[p][k] = c * apk - s * aqk
+                a[q][k] = s * apk + c * aqk
+            }
+            for k in 0..<n {
+                let vkp = v[k][p], vkq = v[k][q]
+                v[k][p] = c * vkp - s * vkq
+                v[k][q] = s * vkp + c * vkq
+            }
+        }
+        return ((0..<n).map { a[$0][$0] }, v)
+    }
+
+    /// Best scale + rotation + translation mapping `source` points onto
+    /// `target` points (Horn's quaternion method). Returns the 4×4 transform
+    /// (target ≈ M · source), the scale, and the RMS error in target units.
+    static func similarity(from source: [SIMD3<Float>], to target: [SIMD3<Float>])
+        -> (transform: simd_float4x4, scale: Float, rms: Float)? {
+        let n = min(source.count, target.count)
+        guard n >= 3 else { return nil }
+        var cs = SIMD3<Double>(0, 0, 0), ct = SIMD3<Double>(0, 0, 0)
+        for i in 0..<n {
+            cs += SIMD3<Double>(source[i]); ct += SIMD3<Double>(target[i])
+        }
+        cs /= Double(n); ct /= Double(n)
+        var S = [[Double]](repeating: [0, 0, 0], count: 3)   // S[a][b] = Σ x_a y_b
+        var sourceVar = 0.0
+        for i in 0..<n {
+            let x = SIMD3<Double>(source[i]) - cs, y = SIMD3<Double>(target[i]) - ct
+            let xs = [x.x, x.y, x.z], ys = [y.x, y.y, y.z]
+            for a in 0..<3 { for b in 0..<3 { S[a][b] += xs[a] * ys[b] } }
+            sourceVar += simd_dot(x, x)
+        }
+        guard sourceVar > 1e-9 else { return nil }
+        let (sxx, sxy, sxz) = (S[0][0], S[0][1], S[0][2])
+        let (syx, syy, syz) = (S[1][0], S[1][1], S[1][2])
+        let (szx, szy, szz) = (S[2][0], S[2][1], S[2][2])
+        let N: [[Double]] = [
+            [sxx + syy + szz, syz - szy, szx - sxz, sxy - syx],
+            [syz - szy, sxx - syy - szz, sxy + syx, szx + sxz],
+            [szx - sxz, sxy + syx, -sxx + syy - szz, syz + szy],
+            [sxy - syx, szx + sxz, syz + szy, -sxx - syy + szz]
+        ]
+        let (values, vectors) = symmetricEigen(n: 4, N)
+        var best = 0
+        for i in 1..<4 where values[i] > values[best] { best = i }
+        var q = SIMD4<Double>(vectors[0][best], vectors[1][best], vectors[2][best], vectors[3][best])  // (w, x, y, z)
+        q /= simd_length(q)
+        let rotation = simd_matrix3x3(simd_quatd(ix: q.y, iy: q.z, iz: q.w, r: q.x))
+
+        var dotSum = 0.0
+        for i in 0..<n {
+            let x = SIMD3<Double>(source[i]) - cs, y = SIMD3<Double>(target[i]) - ct
+            dotSum += simd_dot(y, rotation * x)
+        }
+        let scale = dotSum / sourceVar
+        guard scale.isFinite, scale > 0 else { return nil }
+        let translation = ct - scale * (rotation * cs)
+
+        var err = 0.0
+        for i in 0..<n {
+            let mapped = scale * (rotation * SIMD3<Double>(source[i])) + translation
+            err += simd_distance_squared(mapped, SIMD3<Double>(target[i]))
+        }
+        let r = rotation * scale
+        let m = simd_float4x4(
+            SIMD4<Float>(Float(r.columns.0.x), Float(r.columns.0.y), Float(r.columns.0.z), 0),
+            SIMD4<Float>(Float(r.columns.1.x), Float(r.columns.1.y), Float(r.columns.1.z), 0),
+            SIMD4<Float>(Float(r.columns.2.x), Float(r.columns.2.y), Float(r.columns.2.z), 0),
+            SIMD4<Float>(Float(translation.x), Float(translation.y), Float(translation.z), 1))
+        return (m, Float(scale), Float((err / Double(n)).squareRoot()))
+    }
+
     /// Up to `maxPlanes` planes found one after another with RANSAC. Deterministic
     /// (fixed seed) so the same tap always gives the same snap.
     static func ransacPlanes(_ points: [SIMD3<Float>], tolerance: Float, maxPlanes: Int,

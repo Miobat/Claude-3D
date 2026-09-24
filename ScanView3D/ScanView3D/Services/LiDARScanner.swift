@@ -3,6 +3,7 @@ import ARKit
 import RealityKit
 import Combine
 import CoreImage
+import AVFoundation
 import os
 
 /// Manages LiDAR scanning sessions using ARKit
@@ -25,6 +26,9 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Plain-language tracking problem ("Move slower"), or nil when tracking is good.
     @Published var trackingWarning: String?
     @Published var photoLimitReached = false
+    /// Points in the LiDAR depth cloud (Point Cloud / Splat modes).
+    @Published var depthPointCount: Int = 0
+    @Published var pointBudgetReached = false
 
     // MARK: - Properties
 
@@ -60,12 +64,27 @@ class LiDARScanner: NSObject, ObservableObject {
     private var captureMode: ScanSettings.CaptureMode = .fast
     private var captureFolderURL: URL?
     private var lastHighResSaveTime: TimeInterval = 0
-    private let highResInterval: TimeInterval = 0.25
     private let maxHighResFrames: Int = 250
     private var pendingHighResSaves = 0
     private let ciContext = CIContext()
     private let hqSaveQueue = DispatchQueue(label: "scanview.hq.save", qos: .utility)
     private(set) var capturedPoses: [CapturedPose] = []
+    private var lastPhotoTransform: simd_float4x4?
+    private var useHighResPhotos = false
+    private var highResCaptureInFlight = false
+
+    // Motion (for blur rejection)
+    private var lastTickTransform: simd_float4x4?
+    private var lastTickTime: TimeInterval = 0
+
+    // Camera control: white balance is locked once it has settled, so colours
+    // stay consistent between the frames used for the texture.
+    private var captureDevice: AVCaptureDevice?
+    private var whiteBalanceLocked = false
+    private var normalTrackingSince: TimeInterval?
+
+    /// Dense coloured points straight from the LiDAR depth sensor.
+    private let depthCloud = DepthPointAccumulator()
 
     // Memory limits (MB). "Available" is the app's real remaining budget.
     private let maxTextureMemoryMB: Double = 800
@@ -115,7 +134,9 @@ class LiDARScanner: NSObject, ObservableObject {
         captureTexture: Bool = true,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        captureMode: ScanSettings.CaptureMode = .fast
+        captureMode: ScanSettings.CaptureMode = .fast,
+        detailMM: Float = 10,
+        highResPhotos: Bool = false
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -130,19 +151,41 @@ class LiDARScanner: NSObject, ObservableObject {
         self.captureMode = captureMode
         anchorPathIndex = PathRangeIndex(points: [], radius: rangeMeters + 4)
 
-        if captureMode == .highQuality || captureMode == .splatExport {
+        let usesPhotos = captureMode == .highQuality || captureMode == .splatExport
+        if usesPhotos {
             captureFolderURL = makeCaptureFolder()
         }
 
         textureMapper.configure(quality: scanQuality)
 
+        if captureMode == .pointCloud || captureMode == .splatExport {
+            // Budget the point cloud by the memory we can afford (~80 bytes/point).
+            let budget = Int(max(200, Self.availableMemoryMB() - 600) * 1_048_576 * 0.35 / 80)
+            depthCloud.configure(voxelSize: max(0.004, detailMM / 1000), maxPoints: min(4_000_000, budget))
+        }
+
         let configuration = ARWorldTrackingConfiguration()
         configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
             ? .meshWithClassification : .mesh
         configuration.planeDetection = [.horizontal, .vertical]
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+        // Depth is used to hide occluded surfaces when colouring and for the point cloud.
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
         }
+
+        // 12 MP stills (High Quality / Splat): needs a special camera format and disk space.
+        useHighResPhotos = false
+        if usesPhotos && highResPhotos {
+            if Self.freeDiskSpaceGB() < 3 {
+                scanError = "Not enough free storage for 12 MP photos (needs about 3 GB). Using standard photos."
+            } else if let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                configuration.videoFormat = format
+                useHighResPhotos = true
+            }
+        }
+        captureDevice = ARWorldTrackingConfiguration.configurableCaptureDeviceForPrimaryCamera
 
         // Tracking restarts from scratch; the scan origin is taken from the first
         // well-tracked frame of the NEW session (see captureCurrentFrame).
@@ -174,6 +217,8 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     func stopScanning() {
+        writePoseFile()
+        unlockWhiteBalance()
         arSession.pause()
         isScanning = false
         isPaused = false
@@ -214,12 +259,22 @@ class LiDARScanner: NSObject, ObservableObject {
         textureMapper.reset()
         if let folder = captureFolderURL {
             try? FileManager.default.removeItem(at: folder)
+            try? FileManager.default.removeItem(at: PoseFile.url(forPhotoFolder: folder))
         }
         captureFolderURL = nil
         highResFrameCount = 0
         lastHighResSaveTime = 0
         capturedPoses = []
         photoLimitReached = false
+        lastPhotoTransform = nil
+        highResCaptureInFlight = false
+        lastTickTransform = nil
+        lastTickTime = 0
+        normalTrackingSince = nil
+        unlockWhiteBalance()
+        depthCloud.reset()
+        depthPointCount = 0
+        pointBudgetReached = false
         captureMode = .fast
         cameraPath = []
         needsOrigin = true
@@ -262,17 +317,85 @@ class LiDARScanner: NSObject, ObservableObject {
             anchorPathIndex.insert(camPos)
         }
 
-        // Downscaled frames for colour (all modes except High-Quality photogrammetry)
-        if captureMode != .highQuality && captureTexture && !textureCapturePaused {
-            textureMapper.captureFrame(from: frame) { [weak self] count in
+        // Motion blur estimate from movement since the previous tick.
+        let now = frame.timestamp
+        var blurPixels = 0.0
+        if let prev = lastTickTransform, now > lastTickTime {
+            let dt = now - lastTickTime
+            let turn = Double(TextureMapper.angle(between: prev, and: frame.camera.transform))
+            let move = Double(simd_distance(prev.position, camPos))
+            let exposure = frame.camera.exposureDuration > 0 ? frame.camera.exposureDuration : 1.0 / 60.0
+            blurPixels = (turn / dt + move / dt / 1.5) * exposure * Double(frame.camera.intrinsics[0][0])
+        }
+        lastTickTransform = frame.camera.transform
+        lastTickTime = now
+
+        // Fast mode: colour keyframes (+ white balance lock once it has settled).
+        if captureMode == .fast && captureTexture && !textureCapturePaused {
+            if !whiteBalanceLocked {
+                if let since = normalTrackingSince {
+                    if now - since > 1.5 { lockWhiteBalance() }
+                } else {
+                    normalTrackingSince = now
+                }
+            }
+            textureMapper.captureFrame(from: frame, exposure: currentExposure()) { [weak self] count in
                 self?.capturedFrameCount = count
             }
         }
 
-        // Full-resolution posed photos (High-Quality and Splat)
-        if captureMode == .highQuality || captureMode == .splatExport {
-            saveHighResFrame(frame)
+        // Point Cloud / Splat: dense coloured points from the depth sensor.
+        if captureMode == .pointCloud || captureMode == .splatExport {
+            depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5)) { [weak self] count, full in
+                guard let self = self else { return }
+                self.depthPointCount = count
+                if full && !self.pointBudgetReached {
+                    self.pointBudgetReached = true
+                    self.scanProgress = "Point budget reached — tap Stop to save (or raise Detail)"
+                }
+            }
         }
+
+        // High Quality / Splat: posed photos.
+        if captureMode == .highQuality || captureMode == .splatExport {
+            considerPhoto(frame, blurPixels: blurPixels)
+        }
+    }
+
+    // MARK: - Camera control
+
+    private func currentExposure() -> (iso: Double, duration: Double)? {
+        guard let device = captureDevice else { return nil }
+        return (Double(device.iso), device.exposureDuration.seconds)
+    }
+
+    private func lockWhiteBalance() {
+        whiteBalanceLocked = true
+        guard let device = captureDevice, device.isWhiteBalanceModeSupported(.locked) else { return }
+        do {
+            try device.lockForConfiguration()
+            device.whiteBalanceMode = .locked
+            device.unlockForConfiguration()
+        } catch {
+            DebugLogger.shared.warn("Could not lock white balance: \(error)", category: "Scanner")
+        }
+    }
+
+    private func unlockWhiteBalance() {
+        guard whiteBalanceLocked else { return }
+        whiteBalanceLocked = false
+        guard let device = captureDevice, device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) else { return }
+        do {
+            try device.lockForConfiguration()
+            device.whiteBalanceMode = .continuousAutoWhiteBalance
+            device.unlockForConfiguration()
+        } catch {}
+    }
+
+    static func freeDiskSpaceGB() -> Double {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return Double(values?.volumeAvailableCapacityForImportantUsage ?? 0) / 1_000_000_000
     }
 
     // MARK: - High-Quality Capture
@@ -288,9 +411,10 @@ class LiDARScanner: NSObject, ObservableObject {
         }
     }
 
-    private func saveHighResFrame(_ frame: ARFrame) {
-        guard let folder = captureFolderURL else { return }
-
+    /// Take a photo when the camera has moved to a new viewpoint and isn't
+    /// blurred. Spreads photos over the scene instead of every fraction of a second.
+    private func considerPhoto(_ frame: ARFrame, blurPixels: Double) {
+        guard captureFolderURL != nil else { return }
         if highResFrameCount >= maxHighResFrames {
             if !photoLimitReached {
                 photoLimitReached = true
@@ -298,32 +422,59 @@ class LiDARScanner: NSObject, ObservableObject {
             }
             return
         }
-
         let now = frame.timestamp
-        guard now - lastHighResSaveTime >= highResInterval else { return }
-        // Don't queue up camera buffers if encoding falls behind: holding ARFrame
-        // buffers starves ARKit and makes the camera feed stutter.
-        guard pendingHighResSaves < 2 else { return }
+        guard now - lastHighResSaveTime >= 0.35, blurPixels <= 2.0,
+              pendingHighResSaves < 2, !highResCaptureInFlight else { return }
+        let transform = frame.camera.transform
+        if let last = lastPhotoTransform {
+            let moved = simd_distance(last.position, transform.position)
+            let turned = TextureMapper.angle(between: last, and: transform)
+            guard moved >= 0.10 || turned >= 10 * .pi / 180 else { return }
+        }
         lastHighResSaveTime = now
+        lastPhotoTransform = transform
 
+        guard useHighResPhotos, Self.availableMemoryMB() > 700 else {
+            savePhoto(frame)
+            return
+        }
+        highResCaptureInFlight = true
+        arSession.captureHighResolutionFrame { [weak self] hiRes, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.highResCaptureInFlight = false
+                guard self.isScanning else { return }
+                // Fall back to the regular frame if the 12 MP capture failed.
+                self.savePhoto(hiRes ?? frame)
+            }
+        }
+    }
+
+    private func savePhoto(_ frame: ARFrame) {
+        guard let folder = captureFolderURL, highResFrameCount < maxHighResFrames else { return }
         let index = highResFrameCount
         highResFrameCount = index + 1
 
         let pixelBuffer = frame.capturedImage
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
-        capturedPoses.append(CapturedPose(
-            index: index,
-            transform: frame.camera.transform,
-            intrinsics: frame.camera.intrinsics,
-            width: w,
-            height: h
-        ))
+
+        // Intrinsics must describe THIS image. If ARKit reports them for a
+        // different resolution (e.g. the video stream), rescale them.
+        var intrinsics = frame.camera.intrinsics
+        let res = frame.camera.imageResolution
+        if res.width > 0, res.height > 0, abs(Double(w) - Double(res.width)) > 1 {
+            let sx = Float(Double(w) / Double(res.width)), sy = Float(Double(h) / Double(res.height))
+            intrinsics[0][0] *= sx; intrinsics[2][0] *= sx
+            intrinsics[1][1] *= sy; intrinsics[2][1] *= sy
+        }
+        capturedPoses.append(CapturedPose(index: index, transform: frame.camera.transform,
+                                          intrinsics: intrinsics, width: w, height: h))
 
         // JPEG with EXIF focal length — PhotogrammetrySession needs it.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let url = folder.appendingPathComponent(String(format: "frame_%04d.jpg", index))
-        let focalLengthPx = Double(frame.camera.intrinsics[0][0])
+        let focalLengthPx = Double(intrinsics[0][0])
         let sensorWidthMM = 6.17   // approximate iPhone wide-camera sensor width
         let physicalFocalMM = focalLengthPx * sensorWidthMM / Double(w)
         let focalLength35mm = physicalFocalMM * 36.0 / sensorWidthMM
@@ -333,7 +484,6 @@ class LiDARScanner: NSObject, ObservableObject {
             defer { DispatchQueue.main.async { self.pendingHighResSaves -= 1 } }
             guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
                   let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
-
             let exif: [CFString: Any] = [
                 kCGImagePropertyExifFocalLength: physicalFocalMM,
                 kCGImagePropertyExifFocalLenIn35mmFilm: Int(focalLength35mm),
@@ -352,6 +502,22 @@ class LiDARScanner: NSObject, ObservableObject {
             ]
             CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
             CGImageDestinationFinalize(dest)
+        }
+    }
+
+    /// ARKit's camera pose for every photo, stored next to the photos so the
+    /// High-Quality model can later be aligned to real-world scale and gravity.
+    private func writePoseFile() {
+        guard let folder = captureFolderURL, !capturedPoses.isEmpty else { return }
+        let entries: [[String: Any]] = capturedPoses.map { p in
+            let m = p.transform
+            let cols = [m.columns.0, m.columns.1, m.columns.2, m.columns.3]
+            return ["index": p.index, "width": p.width, "height": p.height,
+                    "transform": cols.flatMap { [$0.x, $0.y, $0.z, $0.w] }.map { Double($0) }]
+        }
+        // Small file: write it right away so a following Reset can't race it.
+        if let data = try? JSONSerialization.data(withJSONObject: entries) {
+            try? data.write(to: PoseFile.url(forPhotoFolder: folder))
         }
     }
 
@@ -384,7 +550,7 @@ class LiDARScanner: NSObject, ObservableObject {
     private func updateMemoryStats() {
         let textureMemoryMB = textureMapper.estimatedMemoryUsageMB
         let meshMemoryMB = Double(vertexCount * 48 + faceCount * 12) / (1024.0 * 1024.0)
-        let totalMB = textureMemoryMB + meshMemoryMB
+        let totalMB = textureMemoryMB + meshMemoryMB + Double(depthPointCount * 80) / 1_048_576
         let estFileMB = Double(vertexCount * 80 + faceCount * 30) / (1024.0 * 1024.0)
         let available = Self.availableMemoryMB()
 
@@ -424,10 +590,16 @@ class LiDARScanner: NSObject, ObservableObject {
         let path = cameraPath.isEmpty ? [scanOrigin] : cameraPath
         let range = rangeMeters
         let mode = meshMode
-        let wantCameraColors = captureTexture
+        let wantCameraColors = captureTexture && captureMode == .fast
         let mapper = textureMapper
+        let cloud = (captureMode == .pointCloud || captureMode == .splatExport) ? depthCloud : nil
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // Point modes: the depth-sensor cloud is far denser than mesh vertices.
+            if let cloudMesh = cloud?.pointCloud() {
+                DispatchQueue.main.async { completion(cloudMesh) }
+                return
+            }
             var mesh = LiDARScanner.combine(anchors: anchors, path: path, range: range, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
                 let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals)
@@ -692,9 +864,200 @@ extension LiDARScanner: ARSessionDelegate {
         isPaused = false
     }
 }
+
+// MARK: - LiDAR depth point cloud
+
+/// Builds a dense coloured point cloud straight from the LiDAR depth maps
+/// (much denser than mesh vertices). Points are merged into a voxel grid at the
+/// Detail setting, so 5 mm really means one point per 5 mm cube.
+final class DepthPointAccumulator {
+    private struct Cell {
+        var position = SIMD3<Float>(0, 0, 0)
+        var color = SIMD3<Float>(0, 0, 0)
+        var count: Float = 0
+    }
+
+    private let queue = DispatchQueue(label: "scanview.depthcloud", qos: .utility)
+    private let lock = NSLock()
+    private var cells: [SIMD3<Int32>: Cell] = [:]
+    private var voxelSize: Float = 0.01
+    private var maxPoints = 2_000_000
+    private var full = false
+    private var inFlight = false          // main thread
+
+    var pointCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return cells.count
+    }
+
+    func configure(voxelSize: Float, maxPoints: Int) {
+        lock.lock()
+        self.voxelSize = voxelSize
+        self.maxPoints = max(100_000, maxPoints)
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        cells.removeAll()
+        full = false
+        lock.unlock()
+    }
+
+    /// Main thread. Converts one frame in the background (one at a time, so
+    /// ARKit's camera buffers are never held for long).
+    func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool) -> Void) {
+        guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+        inFlight = true
+        let depthMap = depthData.depthMap
+        let confidence = depthData.confidenceMap
+        let image = frame.capturedImage
+        let transform = frame.camera.transform
+        let intrinsics = frame.camera.intrinsics
+        let imageW = Float(CVPixelBufferGetWidth(image)), imageH = Float(CVPixelBufferGetHeight(image))
+
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let batch = DepthPointAccumulator.points(depth: depthMap, confidence: confidence, image: image,
+                                                     transform: transform, intrinsics: intrinsics,
+                                                     imageSize: SIMD2<Float>(imageW, imageH), maxDistance: maxDistance)
+            self.lock.lock()
+            let inv = 1 / self.voxelSize
+            for (p, c) in batch {
+                let s = p * inv
+                let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+                if var cell = self.cells[key] {
+                    cell.position += p; cell.color += c; cell.count += 1
+                    self.cells[key] = cell
+                } else if self.cells.count < self.maxPoints {
+                    self.cells[key] = Cell(position: p, color: c, count: 1)
+                } else {
+                    self.full = true
+                }
+            }
+            let count = self.cells.count
+            let isFull = self.full
+            self.lock.unlock()
+            DispatchQueue.main.async {
+                self.inFlight = false
+                onUpdate(count, isFull)
+            }
+        }
+    }
+
+    /// World-space points with camera colours from one frame.
+    private static func points(depth: CVPixelBuffer, confidence: CVPixelBuffer?, image: CVPixelBuffer,
+                               transform: simd_float4x4, intrinsics: simd_float3x3,
+                               imageSize: SIMD2<Float>, maxDistance: Float) -> [(SIMD3<Float>, SIMD3<Float>)] {
+        guard CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat32 else { return [] }
+        CVPixelBufferLockBaseAddress(depth, .readOnly)
+        CVPixelBufferLockBaseAddress(image, .readOnly)
+        if let c = confidence { CVPixelBufferLockBaseAddress(c, .readOnly) }
+        defer {
+            CVPixelBufferUnlockBaseAddress(depth, .readOnly)
+            CVPixelBufferUnlockBaseAddress(image, .readOnly)
+            if let c = confidence { CVPixelBufferUnlockBaseAddress(c, .readOnly) }
+        }
+        guard let depthBase = CVPixelBufferGetBaseAddress(depth) else { return [] }
+        let dw = CVPixelBufferGetWidth(depth), dh = CVPixelBufferGetHeight(depth)
+        let depthRow = CVPixelBufferGetBytesPerRow(depth)
+        let confBase = confidence.flatMap { CVPixelBufferGetBaseAddress($0) }
+        let confRow = confidence.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
+
+        // Camera colour (YCbCr 4:2:0 full range, as ARKit delivers it).
+        let isYCbCr = CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            && CVPixelBufferGetPlaneCount(image) >= 2
+        let yBase = isYCbCr ? CVPixelBufferGetBaseAddressOfPlane(image, 0) : nil
+        let cBase = isYCbCr ? CVPixelBufferGetBaseAddressOfPlane(image, 1) : nil
+        let yRow = isYCbCr ? CVPixelBufferGetBytesPerRowOfPlane(image, 0) : 0
+        let cRow = isYCbCr ? CVPixelBufferGetBytesPerRowOfPlane(image, 1) : 0
+        let iw = Int(imageSize.x), ih = Int(imageSize.y)
+
+        // Intrinsics are for the camera image; scale them to the depth map.
+        let sx = Float(dw) / imageSize.x, sy = Float(dh) / imageSize.y
+        let fx = intrinsics[0][0] * sx, fy = intrinsics[1][1] * sy
+        let cx = intrinsics[2][0] * sx, cy = intrinsics[2][1] * sy
+
+        var out: [(SIMD3<Float>, SIMD3<Float>)] = []
+        out.reserveCapacity(dw * dh / 4)
+        for y in stride(from: 0, to: dh, by: 2) {
+            let depthRowPtr = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float32.self)
+            for x in stride(from: 0, to: dw, by: 2) {
+                let d = depthRowPtr[x]
+                guard d.isFinite, d > 0.1, d <= maxDistance else { continue }
+                if let cb = confBase {
+                    // ARConfidenceLevel: 0 low, 1 medium, 2 high. Far points need high.
+                    let conf = cb.advanced(by: y * confRow + x).assumingMemoryBound(to: UInt8.self).pointee
+                    if conf < 1 || (d > 3 && conf < 2) { continue }
+                }
+                // Pixel → camera (vision convention) → ARKit camera space (Y up, -Z forward).
+                let u = Float(x) + 0.5, v = Float(y) + 0.5
+                let xc = (u - cx) / fx * d
+                let yc = (v - cy) / fy * d
+                let w = transform * SIMD4<Float>(xc, -yc, -d, 1)
+
+                var color = SIMD3<Float>(0.7, 0.7, 0.7)
+                if let yb = yBase, let cb2 = cBase {
+                    let ix = min(iw - 1, Int(u / sx)), iy = min(ih - 1, Int(v / sy))
+                    let yy = Float(yb.advanced(by: iy * yRow + ix).assumingMemoryBound(to: UInt8.self).pointee)
+                    let cptr = cb2.advanced(by: (iy / 2) * cRow + (ix / 2) * 2).assumingMemoryBound(to: UInt8.self)
+                    let cbv = Float(cptr[0]) - 128, crv = Float(cptr[1]) - 128
+                    color = SIMD3<Float>(yy + 1.402 * crv, yy - 0.344136 * cbv - 0.714136 * crv, yy + 1.772 * cbv) / 255
+                    color = simd_clamp(color, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+                }
+                out.append((SIMD3<Float>(w.x, w.y, w.z), color))
+            }
+        }
+        return out
+    }
+
+    /// Averaged point per voxel, ready to save / view.
+    func pointCloud() -> MeshData? {
+        lock.lock()
+        let snapshot = cells
+        lock.unlock()
+        guard !snapshot.isEmpty else { return nil }
+        var vertices: [SIMD3<Float>] = []
+        var colors: [SIMD4<Float>] = []
+        vertices.reserveCapacity(snapshot.count)
+        colors.reserveCapacity(snapshot.count)
+        for cell in snapshot.values {
+            vertices.append(cell.position / cell.count)
+            let c = cell.color / cell.count
+            colors.append(SIMD4<Float>(c.x, c.y, c.z, 1))
+        }
+        let (minB, maxB) = MeshData.bounds(of: vertices)
+        return MeshData(vertices: vertices, normals: [], faces: [], colors: colors,
+                        boundingBoxMin: minB, boundingBoxMax: maxB)
+    }
+}
 #endif
 
 // MARK: - Shared types (device + simulator)
+
+/// ARKit's camera pose for each High-Quality photo. Stored NEXT TO the photo
+/// folder ("<folder>_poses.json"), not inside it, so the photogrammetry input
+/// folder only ever contains images.
+enum PoseFile {
+    static let suffix = "_poses.json"
+
+    static func url(forPhotoFolder folder: URL) -> URL {
+        folder.deletingLastPathComponent().appendingPathComponent(folder.lastPathComponent + suffix)
+    }
+
+    /// Camera positions by photo index (world space, metres).
+    static func cameraPositions(forPhotoFolder folder: URL) -> [Int: SIMD3<Float>] {
+        guard let data = try? Data(contentsOf: url(forPhotoFolder: folder)),
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [:] }
+        var result: [Int: SIMD3<Float>] = [:]
+        for entry in list {
+            guard let index = entry["index"] as? Int,
+                  let t = entry["transform"] as? [Double], t.count == 16 else { continue }
+            result[index] = SIMD3<Float>(Float(t[12]), Float(t[13]), Float(t[14]))
+        }
+        return result
+    }
+}
 
 /// Combined mesh data from all scan anchors
 struct MeshData {

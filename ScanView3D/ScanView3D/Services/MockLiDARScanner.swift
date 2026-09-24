@@ -20,6 +20,8 @@ class MockLiDARScanner: ObservableObject {
     @Published var highResFrameCount: Int = 0
     @Published var trackingWarning: String?
     @Published var photoLimitReached = false
+    @Published var depthPointCount: Int = 0
+    @Published var pointBudgetReached = false
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
@@ -46,7 +48,9 @@ class MockLiDARScanner: ObservableObject {
         captureTexture: Bool = true,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        captureMode: ScanSettings.CaptureMode = .fast
+        captureMode: ScanSettings.CaptureMode = .fast,
+        detailMM: Float = 10,
+        highResPhotos: Bool = false
     ) {
         meshData = nil
         self.rangeMeters = rangeMeters

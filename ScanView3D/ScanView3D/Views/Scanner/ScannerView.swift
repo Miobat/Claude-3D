@@ -122,8 +122,12 @@ struct ScannerView: View {
 
                 if scanner.isScanning {
                     HStack(spacing: 12) {
-                        Label("\(scanner.vertexCount.formatted())", systemImage: "circle.fill")
-                        Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
+                        if scanner.depthPointCount > 0 {
+                            Label("\(scanner.depthPointCount.formatted()) pts", systemImage: "aqi.medium")
+                        } else {
+                            Label("\(scanner.vertexCount.formatted())", systemImage: "circle.fill")
+                            Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
+                        }
                         if usesPhotos {
                             Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack")
                         } else if scanner.capturedFrameCount > 0 {
@@ -291,7 +295,22 @@ struct ScannerView: View {
                 }
             }
 
-            // 5. Colour (Fast / Point Cloud)
+            // 5. Photo resolution (High Quality / Splat)
+            if settings.captureMode.usesPhotos {
+                Toggle(isOn: $settings.highResPhotos) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(settings.highResPhotos ? "12 MP photos" : "Standard photos")
+                            .font(.caption).foregroundColor(.white)
+                        Text(settings.highResPhotos
+                             ? "Sharpest detail. Uses about 1 GB of storage per scan."
+                             : "1920×1440 photos. Faster and smaller.")
+                            .font(.caption2).foregroundColor(.gray)
+                    }
+                }
+                .tint(.green)
+            }
+
+            // 6. Colour (Fast / Point Cloud)
             if settings.captureMode.usesColorToggle {
                 Toggle(isOn: $settings.captureTexture) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -392,7 +411,9 @@ struct ScannerView: View {
                         captureTexture: settings.captureTexture,
                         meshMode: settings.meshMode,
                         rangeMeters: settings.rangeValue,
-                        captureMode: settings.captureMode
+                        captureMode: settings.captureMode,
+                        detailMM: settings.detailMM,
+                        highResPhotos: settings.highResPhotos
                     )
                 } label: {
                     VStack(spacing: 4) {
@@ -684,11 +705,10 @@ struct ScannerView: View {
             do {
                 var meshData = MeshProcessor.postProcess(rawMesh, level: level)
 
-                // DETAIL slider: merge vertices closer than the chosen spacing, so a
-                // coarse setting (e.g. 20 mm) gives a much lighter mesh.
+                // DETAIL slider: simplify to about one vertex per chosen spacing, so
+                // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if detailMeters > 0.005 {
-                    meshData = MeshProcessor.weldNearbyVertices(meshData, threshold: detailMeters)
-                    meshData = MeshProcessor.recalculateNormals(meshData)
+                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters)
                 }
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)
@@ -800,7 +820,7 @@ struct ScannerView: View {
 
         Task {
             do {
-                try await PhotogrammetryProcessor.reconstruct(
+                let photoPositions = try await PhotogrammetryProcessor.reconstruct(
                     inputFolder: inputFolder,
                     outputUSDZ: outputURL,
                     quality: quality
@@ -810,12 +830,15 @@ struct ScannerView: View {
                     }
                 }
 
-                let modelScale = ScannerView.metricScale(forModel: outputURL, lidarExtent: lidarExtent)
+                let transform = ScannerView.alignmentTransform(
+                    photoPositions: photoPositions,
+                    arkitPositions: PoseFile.cameraPositions(forPhotoFolder: inputFolder),
+                    modelURL: outputURL, lidarExtent: lidarExtent)
                 let scan = try storageManager.importProcessedModel(
                     modelURL: outputURL,
                     name: name,
                     toProject: project,
-                    modelScale: modelScale,
+                    modelTransform: transform,
                     photosFolder: inputFolder
                 )
                 try? FileManager.default.removeItem(at: outputURL)
@@ -838,18 +861,66 @@ extension ScannerView {
         return (d.isFinite && d > 0.01) ? d : nil
     }
 
-    /// Uniform scale that makes a photogrammetry model (no inherent real-world
-    /// scale) match the metric size measured by LiDAR in the same session.
-    static func metricScale(forModel url: URL, lidarExtent: Float?) -> Float? {
-        guard let lidar = lidarExtent,
-              let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }
+    /// Diagonal (m) of a model file's bounding box.
+    static func modelDiagonal(_ url: URL) -> Float? {
+        guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }
         let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
-        let dx = Float(mx.x - mn.x), dy = Float(mx.y - mn.y), dz = Float(mx.z - mn.z)
-        let modelDiag = sqrtf(dx * dx + dy * dy + dz * dz)
-        guard modelDiag.isFinite, modelDiag > 0.0001 else { return nil }
+        let d = simd_distance(SIMD3<Float>(Float(mn.x), Float(mn.y), Float(mn.z)),
+                              SIMD3<Float>(Float(mx.x), Float(mx.y), Float(mx.z)))
+        return d.isFinite && d > 0.0001 ? d : nil
+    }
+
+    /// Uniform scale that makes a photogrammetry model match the LiDAR size
+    /// (fallback when camera poses can't be used).
+    static func metricScale(forModel url: URL, lidarExtent: Float?) -> Float? {
+        guard let lidar = lidarExtent, let modelDiag = modelDiagonal(url) else { return nil }
         let s = lidar / modelDiag
-        // Reject implausible ratios (poor LiDAR coverage etc.) to avoid worsening it.
         return (s > 0.02 && s < 50) ? s : nil
+    }
+
+    /// Transform that puts a photogrammetry model into the scan's real-world
+    /// space. Best case: match the camera positions Apple's reconstruction
+    /// estimated to the positions ARKit measured for the same photos. That gives
+    /// true metric scale, gravity-up and the same placement as the LiDAR scan.
+    /// Falls back to a size-only correction if that isn't reliable.
+    static func alignmentTransform(photoPositions: [Int: SIMD3<Float>], arkitPositions: [Int: SIMD3<Float>],
+                                   modelURL: URL, lidarExtent: Float?) -> simd_float4x4? {
+        let ids = photoPositions.keys.filter { arkitPositions[$0] != nil }.sorted()
+        if ids.count >= 6 {
+            var src = ids.compactMap { photoPositions[$0] }
+            var dst = ids.compactMap { arkitPositions[$0] }
+            var fit = GeometryMath.similarity(from: src, to: dst)
+            // Drop the worst 20 % of cameras (odd estimates) and refit.
+            if let f = fit, src.count >= 10 {
+                let residuals = zip(src, dst).map { s, d -> Float in
+                    let w = f.transform * SIMD4<Float>(s.x, s.y, s.z, 1)
+                    return simd_distance(SIMD3<Float>(w.x, w.y, w.z), d)
+                }
+                let cutoff = residuals.sorted()[Int(Double(residuals.count) * 0.8)]
+                let keep = residuals.indices.filter { residuals[$0] <= cutoff }
+                src = keep.map { src[$0] }
+                dst = keep.map { dst[$0] }
+                fit = GeometryMath.similarity(from: src, to: dst) ?? fit
+            }
+            if let f = fit {
+                let centre = dst.reduce(SIMD3<Float>(0, 0, 0), +) / Float(dst.count)
+                let spread = (dst.map { simd_distance_squared($0, centre) }.reduce(0, +) / Float(dst.count)).squareRoot()
+                var sane = spread > 0.15 && f.rms < max(0.05, spread * 0.15) && f.scale > 0.01 && f.scale < 100
+                if sane, let lidar = lidarExtent, let diag = modelDiagonal(modelURL) {
+                    let ratio = diag * f.scale / lidar
+                    sane = ratio > 0.5 && ratio < 2.0
+                }
+                if sane {
+                    DebugLogger.shared.info("HQ model aligned by \(src.count) cameras, scale \(f.scale), rms \(f.rms) m", category: "Photogrammetry")
+                    return f.transform
+                }
+                DebugLogger.shared.warn("Pose alignment rejected (spread \(spread), rms \(f.rms)); using size match", category: "Photogrammetry")
+            }
+        }
+        if let s = metricScale(forModel: modelURL, lidarExtent: lidarExtent) {
+            return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
+        }
+        return nil
     }
 }
 

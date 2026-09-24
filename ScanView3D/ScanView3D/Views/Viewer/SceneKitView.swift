@@ -161,13 +161,16 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         scene.rootNode.addChildNode(gridNode)
     }
 
-    /// World-space bounds of the model node (it sits at the origin, possibly scaled).
+    /// World-space bounds of the model node (its own box, moved by its transform).
     static func worldBounds(of node: SCNNode) -> (SIMD3<Float>, SIMD3<Float>) {
         let (mn, mx) = node.boundingBox
-        let s = node.simdScale
-        let a = SIMD3<Float>(Float(mn.x), Float(mn.y), Float(mn.z)) * s
-        let b = SIMD3<Float>(Float(mx.x), Float(mx.y), Float(mx.z)) * s
-        return (simd_min(a, b), simd_max(a, b))
+        let m = node.simdTransform
+        var corners: [SIMD3<Float>] = []
+        for x in [mn.x, mx.x] { for y in [mn.y, mx.y] { for z in [mn.z, mx.z] {
+            let w = m * SIMD4<Float>(Float(x), Float(y), Float(z), 1)
+            corners.append(SIMD3<Float>(w.x, w.y, w.z))
+        } } }
+        return MeshData.bounds(of: corners)
     }
 
     private func addBoundingBox(to scene: SCNScene, for model: SCNNode) {
@@ -222,8 +225,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     // Metric scale correction for photogrammetry models (which have
                     // no inherent real-world scale). Measurements use world-space
                     // hit coordinates, so scaling the node makes them read true metres.
-                    if let s = scan.modelScale, s > 0, abs(s - 1.0) > 0.0001 {
-                        node.simdScale = SIMD3<Float>(repeating: s)
+                    if let m = scan.modelMatrix {
+                        node.simdTransform = m
                     }
                     sceneView.scene?.rootNode.addChildNode(node)
                     self.modelNode = node

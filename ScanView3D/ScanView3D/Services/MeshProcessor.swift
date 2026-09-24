@@ -24,15 +24,15 @@ class MeshProcessor {
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.01)
             result = removeSmallComponents(result, minVertices: 80)
-            result = recalculateNormals(result)
             result = smoothVertexPositions(result, iterations: 1, factor: 0.3)
+            result = recalculateNormals(result)
             result = smoothNormals(result)
         case .high:
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.015)
             result = removeSmallComponents(result, minVertices: 150)
-            result = recalculateNormals(result)
             result = smoothVertexPositions(result, iterations: 3, factor: 0.4)
+            result = recalculateNormals(result)
             result = smoothNormals(result)
         }
 
@@ -359,69 +359,110 @@ class MeshProcessor {
         )
     }
 
-    // MARK: - Smooth Vertex Positions (Laplacian Smoothing)
+    // MARK: - Smooth Vertex Positions (Taubin)
 
-    /// Move each vertex toward the average of its neighbors to smooth the mesh surface
+    /// Noise-reducing smoothing that does NOT shrink the model (Taubin λ/μ):
+    /// each pass pulls vertices toward their neighbours, then pushes back out a
+    /// little. Plain averaging would shrink rooms and round corners, which makes
+    /// measurements read short. Vertices on open edges stay put so holes don't grow.
     static func smoothVertexPositions(_ meshData: MeshData, iterations: Int = 2, factor: Float = 0.3) -> MeshData {
         var positions = meshData.vertices
-        var colors = meshData.colors
+        let n = positions.count
+        guard n > 0, !meshData.faces.isEmpty else { return meshData }
 
-        // Build adjacency
-        var adjacency = [[Int]](repeating: [], count: positions.count)
-        for face in meshData.faces {
-            for i in 0..<face.count {
-                for j in (i+1)..<face.count {
-                    let a = Int(face[i]), b = Int(face[j])
-                    if a < positions.count && b < positions.count {
-                        adjacency[a].append(b)
-                        adjacency[b].append(a)
-                    }
-                }
+        // Unique neighbours + boundary detection (an edge used by one face).
+        var neighbourSets = [Set<Int32>](repeating: [], count: n)
+        var edgeUse: [UInt64: UInt8] = [:]
+        for face in meshData.faces where face.count == 3 {
+            for k in 0..<3 {
+                let a = Int(face[k]), b = Int(face[(k + 1) % 3])
+                guard a < n, b < n, a != b else { continue }
+                neighbourSets[a].insert(Int32(b))
+                neighbourSets[b].insert(Int32(a))
+                let key = UInt64(min(a, b)) << 32 | UInt64(max(a, b))
+                edgeUse[key, default: 0] &+= 1
             }
         }
+        var pinned = [Bool](repeating: false, count: n)
+        for (key, uses) in edgeUse where uses == 1 {
+            pinned[Int(key >> 32)] = true
+            pinned[Int(key & 0xFFFF_FFFF)] = true
+        }
+        let neighbours = neighbourSets.map { Array($0) }
 
+        let lambda = factor
+        let mu = -factor * 1.06
+        func step(_ weight: Float) {
+            var next = positions
+            for i in 0..<n where !pinned[i] && !neighbours[i].isEmpty {
+                var avg = SIMD3<Float>(0, 0, 0)
+                for j in neighbours[i] { avg += positions[Int(j)] }
+                avg /= Float(neighbours[i].count)
+                next[i] = positions[i] + (avg - positions[i]) * weight
+            }
+            positions = next
+        }
         for _ in 0..<iterations {
-            var newPositions = positions
-            var newColors = colors
-
-            for i in 0..<positions.count {
-                let neighbors = adjacency[i]
-                guard !neighbors.isEmpty else { continue }
-
-                // Average neighbor positions
-                var avgPos = SIMD3<Float>(0, 0, 0)
-                var avgColor = SIMD4<Float>(0, 0, 0, 0)
-                for n in neighbors {
-                    avgPos += positions[n]
-                    if n < colors.count { avgColor += colors[n] }
-                }
-                avgPos /= Float(neighbors.count)
-                avgColor /= Float(neighbors.count)
-
-                // Move vertex toward average by factor
-                newPositions[i] = positions[i] + (avgPos - positions[i]) * factor
-                if i < colors.count && !colors.isEmpty {
-                    newColors[i] = colors[i] + (avgColor - colors[i]) * factor * 0.5
-                }
-            }
-
-            positions = newPositions
-            colors = newColors
+            step(lambda)
+            step(mu)
         }
 
-        // Recalculate bounding box
-        var minB = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxB = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        for v in positions { minB = min(minB, v); maxB = max(maxB, v) }
+        let (minB, maxB) = MeshData.bounds(of: positions)
+        return MeshData(vertices: positions, normals: meshData.normals, faces: meshData.faces,
+                        colors: meshData.colors, boundingBoxMin: minB, boundingBoxMax: maxB)
+    }
 
-        return MeshData(
-            vertices: positions,
-            normals: meshData.normals,
-            faces: meshData.faces,
-            colors: colors,
-            boundingBoxMin: minB,
-            boundingBoxMax: maxB
-        )
+    // MARK: - Simplification (vertex clustering)
+
+    /// Simplify to roughly one vertex per `cellSize` cube: vertices in the same
+    /// cell merge into their average, triangles that collapse are dropped. Used
+    /// by the Detail setting (e.g. 20 mm for big outdoor areas).
+    static func clusterVertices(_ meshData: MeshData, cellSize: Float) -> MeshData {
+        guard cellSize > 0, !meshData.vertices.isEmpty else { return meshData }
+        let inv = 1 / cellSize
+        var cellIndex: [SIMD3<Int32>: Int32] = [:]
+        var remap = [Int32](repeating: 0, count: meshData.vertices.count)
+        var sums: [SIMD3<Float>] = []
+        var colorSums: [SIMD4<Float>] = []
+        var counts: [Float] = []
+
+        for (i, v) in meshData.vertices.enumerated() {
+            let s = v * inv
+            let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+            let c = i < meshData.colors.count ? meshData.colors[i] : SIMD4<Float>(0.7, 0.7, 0.7, 1)
+            if let idx = cellIndex[key] {
+                remap[i] = idx
+                sums[Int(idx)] += v
+                colorSums[Int(idx)] += c
+                counts[Int(idx)] += 1
+            } else {
+                let idx = Int32(sums.count)
+                cellIndex[key] = idx
+                remap[i] = idx
+                sums.append(v)
+                colorSums.append(c)
+                counts.append(1)
+            }
+        }
+
+        let vertices = zip(sums, counts).map { $0 / $1 }
+        let colors = zip(colorSums, counts).map { $0 / $1 }
+        var seen = Set<SIMD3<UInt32>>()
+        var faces: [[UInt32]] = []
+        faces.reserveCapacity(meshData.faces.count / 2)
+        for face in meshData.faces where face.count == 3 {
+            let a = UInt32(remap[Int(face[0])]), b = UInt32(remap[Int(face[1])]), c = UInt32(remap[Int(face[2])])
+            guard a != b, b != c, a != c else { continue }
+            // Drop duplicates (same triangle in any rotation).
+            let key: SIMD3<UInt32>
+            if a < b && a < c { key = SIMD3(a, b, c) } else if b < c { key = SIMD3(b, c, a) } else { key = SIMD3(c, a, b) }
+            if seen.insert(key).inserted { faces.append([a, b, c]) }
+        }
+
+        let (minB, maxB) = MeshData.bounds(of: vertices)
+        let simplified = MeshData(vertices: vertices, normals: [], faces: faces, colors: colors,
+                                  boundingBoxMin: minB, boundingBoxMax: maxB)
+        return recalculateNormals(simplified)
     }
 
     // MARK: - SceneKit Conversion
@@ -746,12 +787,16 @@ enum PhotogrammetryProcessor {
 
     /// Reconstruct a textured USDZ from a folder of images.
     /// `progress` is called with values in 0...1 as the session works.
+    /// Returns the camera position Apple's reconstruction estimated for each
+    /// photo (by photo index), used to align the model to real-world scale and
+    /// gravity. Empty if poses weren't available.
+    @discardableResult
     static func reconstruct(
         inputFolder: URL,
         outputUSDZ: URL,
         quality: Quality = .best,
         progress: @escaping (Double) -> Void
-    ) async throws {
+    ) async throws -> [Int: SIMD3<Float>] {
         guard isSupported else { throw ProcessError.notSupported }
 
         // iOS on-device PhotogrammetrySession only supports .reduced detail
@@ -774,23 +819,41 @@ enum PhotogrammetryProcessor {
 
         let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
         try session.process(requests: [
-            .modelFile(url: outputUSDZ, detail: requestDetail)
+            .modelFile(url: outputUSDZ, detail: requestDetail),
+            .poses
         ])
 
+        var cameraPositions: [Int: SIMD3<Float>] = [:]
         for try await output in session.outputs {
             switch output {
-            case .requestProgress(_, let fraction):
-                progress(fraction)
-            case .requestComplete:
-                progress(1.0)
+            case .requestProgress(let request, let fraction):
+                if case .modelFile = request { progress(fraction) }
+            case .requestComplete(let request, let result):
+                if case .modelFile = request { progress(1.0) }
+                if case .poses(let poses) = result {
+                    for (id, pose) in poses.posesBySample {
+                        guard let url = poses.urlsBySample[id],
+                              let index = photoIndex(from: url) else { continue }
+                        cameraPositions[index] = pose.translation
+                    }
+                }
             case .processingComplete:
-                return
-            case .requestError(_, let error):
-                throw error
+                return cameraPositions
+            case .requestError(let request, let error):
+                // Poses are a bonus; only a failed model is fatal.
+                if case .modelFile = request { throw error }
             default:
                 continue
             }
         }
+        return cameraPositions
+    }
+
+    /// "frame_0012.jpg" → 12
+    private static func photoIndex(from url: URL) -> Int? {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard let underscore = name.lastIndex(of: "_") else { return nil }
+        return Int(name[name.index(after: underscore)...])
     }
 }
 #endif
@@ -819,9 +882,14 @@ enum SplatExporter {
                 for r in 0..<4 {
                     rows.append([Double(m[0][r]), Double(m[1][r]), Double(m[2][r]), Double(m[3][r])])
                 }
+                // Per-frame camera (Nerfstudio reads these over the global values),
+                // so photos of different resolutions stay correct.
                 frames.append([
                     "file_path": String(format: "frame_%04d.jpg", p.index),
-                    "transform_matrix": rows
+                    "transform_matrix": rows,
+                    "fl_x": Double(p.intrinsics[0][0]), "fl_y": Double(p.intrinsics[1][1]),
+                    "cx": Double(p.intrinsics[2][0]), "cy": Double(p.intrinsics[2][1]),
+                    "w": p.width, "h": p.height
                 ])
             }
 

@@ -88,7 +88,20 @@ struct Scan: Identifiable, Codable {
     // keep decoding). Set only for the relevant capture modes.
     var splatBundleName: String?     // zip under the scan dir, re-shareable anytime (Splat mode)
     var captureFolderName: String?   // folder of source photos kept for later re-reconstruction (HQ mode)
-    var modelScale: Float?           // uniform metric scale correction for photogrammetry models
+    var modelScale: Float?           // uniform metric scale correction (older photogrammetry scans)
+    var modelTransform: [Float]?     // 4×4 column-major: puts a photogrammetry model into real-world space
+
+    /// Transform to apply to the stored model file when showing/measuring it.
+    var modelMatrix: simd_float4x4? {
+        if let t = modelTransform, t.count == 16 {
+            return simd_float4x4(SIMD4<Float>(t[0], t[1], t[2], t[3]), SIMD4<Float>(t[4], t[5], t[6], t[7]),
+                                 SIMD4<Float>(t[8], t[9], t[10], t[11]), SIMD4<Float>(t[12], t[13], t[14], t[15]))
+        }
+        if let s = modelScale, s > 0, abs(s - 1) > 0.0001 {
+            return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
+        }
+        return nil
+    }
 
     init(name: String, fileName: String, vertexCount: Int = 0, faceCount: Int = 0, fileSize: Int64 = 0) {
         self.id = UUID()
@@ -137,6 +150,23 @@ struct ScanSettings: Codable, Equatable {
     var meshMode: MeshMode = .free     // Fast only
     var captureTexture: Bool = true    // colour for Fast / Point Cloud
     var reconstructQuality: ReconstructQuality = .best
+    var highResPhotos: Bool = false    // 12 MP stills for High Quality / Splat
+
+    init() {}
+
+    // Tolerant decoding: settings saved by an older version keep their values,
+    // and any option added later simply starts at its default.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = ScanSettings()
+        captureMode = (try? c.decodeIfPresent(CaptureMode.self, forKey: .captureMode)) ?? d.captureMode
+        rangeValue = (try? c.decodeIfPresent(Float.self, forKey: .rangeValue)) ?? d.rangeValue
+        detailMM = (try? c.decodeIfPresent(Float.self, forKey: .detailMM)) ?? d.detailMM
+        meshMode = (try? c.decodeIfPresent(MeshMode.self, forKey: .meshMode)) ?? d.meshMode
+        captureTexture = (try? c.decodeIfPresent(Bool.self, forKey: .captureTexture)) ?? d.captureTexture
+        reconstructQuality = (try? c.decodeIfPresent(ReconstructQuality.self, forKey: .reconstructQuality)) ?? d.reconstructQuality
+        highResPhotos = (try? c.decodeIfPresent(Bool.self, forKey: .highResPhotos)) ?? d.highResPhotos
+    }
 
     // MARK: - Persistence
 
@@ -214,6 +244,8 @@ struct ScanSettings: Codable, Equatable {
         var usesColorToggle: Bool { self == .fast || self == .pointCloud }
         /// Whether the mesh filter (Everything / Structure / Room shell) applies.
         var usesMeshMode: Bool { self == .fast }
+        /// Whether this mode takes posed photos.
+        var usesPhotos: Bool { self == .highQuality || self == .splatExport }
     }
 
     // MARK: - Mesh Mode

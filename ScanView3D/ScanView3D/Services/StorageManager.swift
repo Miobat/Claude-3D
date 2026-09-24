@@ -219,11 +219,11 @@ class StorageManager: ObservableObject {
     }
 
     /// Register a scan from an already-produced model file (e.g. a photogrammetry USDZ).
-    /// - modelScale: uniform metric scale correction (photogrammetry has no real-world
+    /// - modelTransform: places the model in real-world space (photogrammetry has no real-world
     ///   scale; we derive this from the LiDAR mesh captured in the same session).
     /// - photosFolder: source photos to keep with the scan for later re-reconstruction.
     func importProcessedModel(modelURL: URL, name: String, toProject project: Project,
-                              modelScale: Float? = nil, photosFolder: URL? = nil) throws -> Scan {
+                              modelTransform: simd_float4x4? = nil, photosFolder: URL? = nil) throws -> Scan {
         let scanId = UUID()
         let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
         let fileName = "\(scanId.uuidString).\(ext)"
@@ -238,23 +238,25 @@ class StorageManager: ObservableObject {
         var scan = Scan(name: name, fileName: fileName, vertexCount: 0, faceCount: 0, fileSize: fileSize)
         scan.hasTexture = true
         scan.hasColor = true
-        scan.modelScale = modelScale
+        scan.modelTransform = modelTransform.map(StorageManager.array(of:))
         scan.thumbnailData = generateThumbnail(fromModelURL: destURL)
 
-        // Record true (scaled) dimensions so the info panel reads metric.
-        if let scene = try? SCNScene(url: destURL, options: [.checkConsistency: false]) {
-            let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
-            let s = modelScale ?? 1.0
-            scan.boundingBoxMin = SIMD3<Float>(Float(mn.x) * s, Float(mn.y) * s, Float(mn.z) * s)
-            scan.boundingBoxMax = SIMD3<Float>(Float(mx.x) * s, Float(mx.y) * s, Float(mx.z) * s)
+        // Record true (real-world) dimensions so the info panel reads metric.
+        if let bounds = StorageManager.transformedBounds(of: destURL, by: modelTransform) {
+            scan.boundingBoxMin = bounds.0
+            scan.boundingBoxMax = bounds.1
         }
 
-        // Keep the source photos so the user can re-reconstruct at higher effort later.
+        // Keep the source photos (and their ARKit poses) for re-reconstruction later.
         if let photosFolder = photosFolder {
             let kept = scanDir.appendingPathComponent("\(scanId.uuidString)_photos")
             try? fileManager.removeItem(at: kept)
             if (try? fileManager.copyItem(at: photosFolder, to: kept)) != nil {
                 scan.captureFolderName = kept.lastPathComponent
+                let poses = PoseFile.url(forPhotoFolder: photosFolder)
+                if fileManager.fileExists(atPath: poses.path) {
+                    try? fileManager.copyItem(at: poses, to: PoseFile.url(forPhotoFolder: kept))
+                }
             }
         }
 
@@ -333,7 +335,7 @@ class StorageManager: ObservableObject {
 
     /// Replace a photogrammetry scan's model file in place (used by re-reconstruct).
     func replacePhotogrammetryModel(scanID: UUID, in project: Project,
-                                    newModelURL: URL, modelScale: Float?) throws {
+                                    newModelURL: URL, modelTransform: simd_float4x4?) throws {
         guard let fileName = onMain({
             projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scanID })?.fileName
         }) else { return }
@@ -344,19 +346,14 @@ class StorageManager: ObservableObject {
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
         let thumbnail = generateThumbnail(fromModelURL: destURL)
-        var bounds: (SIMD3<Float>, SIMD3<Float>)?
-        if let scene = try? SCNScene(url: destURL, options: [.checkConsistency: false]) {
-            let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
-            let s = modelScale ?? 1.0
-            bounds = (SIMD3<Float>(Float(mn.x), Float(mn.y), Float(mn.z)) * s,
-                      SIMD3<Float>(Float(mx.x), Float(mx.y), Float(mx.z)) * s)
-        }
+        let bounds = StorageManager.transformedBounds(of: destURL, by: modelTransform)
 
         onMain {
             guard let pi = projects.firstIndex(where: { $0.id == project.id }),
                   let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
             projects[pi].scans[si].fileSize = fileSize
-            projects[pi].scans[si].modelScale = modelScale
+            projects[pi].scans[si].modelScale = nil
+            projects[pi].scans[si].modelTransform = modelTransform.map(StorageManager.array(of:))
             projects[pi].scans[si].thumbnailData = thumbnail
             if let b = bounds {
                 projects[pi].scans[si].boundingBoxMin = b.0
@@ -364,6 +361,23 @@ class StorageManager: ObservableObject {
             }
             saveProjects()
         }
+    }
+
+    static func array(of m: simd_float4x4) -> [Float] {
+        [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
+    }
+
+    /// Bounding box of a model file after applying a transform (8 corners).
+    static func transformedBounds(of url: URL, by transform: simd_float4x4?) -> (SIMD3<Float>, SIMD3<Float>)? {
+        guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return nil }
+        let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
+        let m = transform ?? matrix_identity_float4x4
+        var corners: [SIMD3<Float>] = []
+        for x in [mn.x, mx.x] { for y in [mn.y, mx.y] { for z in [mn.z, mx.z] {
+            let w = m * SIMD4<Float>(Float(x), Float(y), Float(z), 1)
+            corners.append(SIMD3<Float>(w.x, w.y, w.z))
+        } } }
+        return MeshData.bounds(of: corners)
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
@@ -442,7 +456,7 @@ class StorageManager: ObservableObject {
         var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json"]
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
-        if let p = scan.captureFolderName { names.append(p) }
+        if let p = scan.captureFolderName { names.append(p); names.append(p + PoseFile.suffix) }
         return Array(Set(names))
     }
 
@@ -540,6 +554,8 @@ class StorageManager: ObservableObject {
         newScan.textureFileName = copied.textureName
         newScan.splatBundleName = copyExtra(scan.splatBundleName, as: "\(newBase)_bundle.zip")
         newScan.captureFolderName = copyExtra(scan.captureFolderName, as: "\(newBase)_photos")
+        _ = copyExtra(scan.captureFolderName.map { $0 + PoseFile.suffix }, as: "\(newBase)_photos" + PoseFile.suffix)
+        newScan.modelTransform = scan.modelTransform
 
         if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
             projects[dstIndex].addScan(newScan)

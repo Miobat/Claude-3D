@@ -150,12 +150,11 @@ struct ModelViewerView: View {
                     if let node = modelNode {
                         // boundingBox is in the node's own space; include its scale
                         // (High-Quality models carry a metric scale correction).
-                        let (minBound, maxBound) = node.boundingBox
-                        let s = node.simdScale
+                        let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
                         Section("Dimensions") {
-                            Text("Width: \(measurementUnit.format(meters: Float(maxBound.x - minBound.x) * s.x))")
-                            Text("Height: \(measurementUnit.format(meters: Float(maxBound.y - minBound.y) * s.y))")
-                            Text("Depth: \(measurementUnit.format(meters: Float(maxBound.z - minBound.z) * s.z))")
+                            Text("Width: \(measurementUnit.format(meters: maxB.x - minB.x))")
+                            Text("Height: \(measurementUnit.format(meters: maxB.y - minB.y))")
+                            Text("Depth: \(measurementUnit.format(meters: maxB.z - minB.z))")
                         }
                     }
                     Section("Scan Info") {
@@ -508,14 +507,17 @@ struct ModelViewerView: View {
         }
         Task {
             do {
-                try await PhotogrammetryProcessor.reconstruct(
+                let photoPositions = try await PhotogrammetryProcessor.reconstruct(
                     inputFolder: photos, outputUSDZ: outputURL, quality: .best
                 ) { fraction in
                     DispatchQueue.main.async { self.processingMessage = "Reconstructing… \(Int(fraction * 100))%" }
                 }
-                let scale = ScannerView.metricScale(forModel: outputURL, lidarExtent: lidarExtent)
+                let transform = ScannerView.alignmentTransform(
+                    photoPositions: photoPositions,
+                    arkitPositions: PoseFile.cameraPositions(forPhotoFolder: photos),
+                    modelURL: outputURL, lidarExtent: lidarExtent)
                 try storageManager.replacePhotogrammetryModel(
-                    scanID: scan.id, in: project, newModelURL: outputURL, modelScale: scale
+                    scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform
                 )
                 try? FileManager.default.removeItem(at: outputURL)
                 DispatchQueue.main.async {
