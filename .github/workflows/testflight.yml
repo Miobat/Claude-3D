@@ -6,6 +6,7 @@ on:
       - main
       - master
       - 'claude/**'
+      - 'codex/**'
     paths:
       - 'ScanView3D/**'
       - '.github/workflows/**'
