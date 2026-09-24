@@ -311,12 +311,7 @@ class MockLiDARScanner: ObservableObject {
         }
 
         // Calculate bounding box
-        var minBound = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxBound = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        for vertex in vertices {
-            minBound = min(minBound, vertex)
-            maxBound = max(maxBound, vertex)
-        }
+        let (minBound, maxBound) = MeshData.bounds(of: vertices)
 
         return MeshData(
             vertices: vertices,
