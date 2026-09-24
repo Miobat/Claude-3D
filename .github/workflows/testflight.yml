@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Select Xcode 26+ (required for App Store upload)
         run: |
@@ -98,7 +98,23 @@ jobs:
           PROVISIONING_PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
           KEYCHAIN_NAME: app-signing.keychain-db
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: bundle exec fastlane beta_manual
+        run: |
+          set -o pipefail
+          bundle exec fastlane beta_manual 2>&1 | tee "$RUNNER_TEMP/fastlane.log"
+
+      # Surface the real failure reason as annotations so it's visible on the
+      # run summary page (and via the API) without digging through raw logs.
+      - name: Report build errors
+        if: failure()
+        run: |
+          {
+            grep -hE "error:|\[!\]|ERROR|expired|revoked|No profile|No signing certificate|agreement" \
+              "$RUNNER_TEMP/fastlane.log" ~/Library/Logs/gym/*.log 2>/dev/null || true
+          } | sed 's/\x1b\[[0-9;]*m//g' | awk '!seen[$0]++' | head -10 | while IFS= read -r line; do
+            echo "::error title=Build failure::${line:0:900}"
+          done
+          echo "---- last 40 lines of fastlane output ----"
+          tail -40 "$RUNNER_TEMP/fastlane.log" 2>/dev/null || true
 
       - name: Clean up keychain
         if: always()
