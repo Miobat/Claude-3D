@@ -1,3 +1,7 @@
+// PoseFile, MeshData and PathRangeIndex below are also compiled for simulator.
+import Foundation
+import simd
+
 #if !targetEnvironment(simulator)
 import ARKit
 import RealityKit
