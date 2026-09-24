@@ -11,6 +11,11 @@ on:
       - '.github/workflows/**'
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
+# A newer push supersedes an in-flight build on the same branch.
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-deploy:
     name: Build & Upload to TestFlight
