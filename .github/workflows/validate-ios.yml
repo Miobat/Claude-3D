@@ -31,9 +31,11 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          for PLATFORM in iOS 'iOS Simulator'; do
+          for SDK in iphoneos iphonesimulator; do
+            PLATFORM=iOS
+            if [ "$SDK" = iphonesimulator ]; then PLATFORM='iOS Simulator'; fi
             xcodebuild -project ScanView3D/ScanView3D.xcodeproj \
-              -scheme ScanView3D -configuration Debug \
+              -scheme ScanView3D -configuration Debug -sdk "$SDK" \
               -destination "generic/platform=$PLATFORM" \
               -derivedDataPath "$RUNNER_TEMP/ScanView3D-$PLATFORM" \
               CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= PROVISIONING_PROFILE_SPECIFIER= \
