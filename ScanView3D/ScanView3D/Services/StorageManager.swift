@@ -3,15 +3,20 @@ import SceneKit
 
 /// Manages persistent storage for projects and scan files
 class StorageManager: ObservableObject {
-    @Published var projects: [Project] = []
+    @Published private(set) var projects: [Project] = []
+    @Published var storageError: String?
+    @Published private(set) var isLibraryReadOnly = false
 
     private let fileManager = FileManager.default
     private let projectsFileName = "projects.json"
+    private let rootDirectory: URL
+    private lazy var persistence = LibraryPersistence<[Project]>(indexURL: projectsFile)
+    private typealias StorageFailure = LibraryPersistence<[Project]>.Failure
 
     // MARK: - Directories
 
     private var documentsDirectory: URL {
-        fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        rootDirectory
     }
 
     private var projectsDirectory: URL {
@@ -28,105 +33,110 @@ class StorageManager: ObservableObject {
 
     // MARK: - Initialization
 
-    init() {
-        createDirectoriesIfNeeded()
-        loadProjects()
-    }
-
-    private func createDirectoriesIfNeeded() {
-        try? fileManager.createDirectory(at: projectsDirectory, withIntermediateDirectories: true)
-        try? fileManager.createDirectory(at: scansDirectory, withIntermediateDirectories: true)
+    init(directory: URL? = nil) {
+        rootDirectory = directory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        do {
+            try fileManager.createDirectory(at: projectsDirectory, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: scansDirectory, withIntermediateDirectories: true)
+            projects = try persistence.load(default: [])
+        } catch {
+            isLibraryReadOnly = true
+            report(error, action: "Open library. Saving is disabled; existing files have been preserved")
+        }
     }
 
     // MARK: - Threading
 
     /// `projects` drives SwiftUI, so it may only change on the main thread.
     /// Saving runs on background queues and hops here for the bookkeeping.
-    private func onMain<T>(_ work: () -> T) -> T {
-        if Thread.isMainThread { return work() }
-        return DispatchQueue.main.sync(execute: work)
+    private func onMain<T>(_ work: () throws -> T) rethrows -> T {
+        if Thread.isMainThread { return try work() }
+        return try DispatchQueue.main.sync(execute: work)
     }
 
-    private func addScan(_ scan: Scan, to project: Project) {
+    func report(_ error: Error, action: String) {
         onMain {
-            if let index = projects.firstIndex(where: { $0.id == project.id }) {
-                projects[index].addScan(scan)
-                if scan.thumbnailData != nil {
-                    projects[index].thumbnailData = scan.thumbnailData
-                }
-                saveProjects()
-            }
+            storageError = "\(action): \(error.localizedDescription)"
+            DebugLogger.shared.error(storageError!, category: "Storage")
+        }
+    }
+
+    /// Persist first; SwiftUI must never present a change that failed to save.
+    private func commitProjects(_ candidate: [Project]) throws {
+        do {
+            try persistence.commit(candidate)
+            projects = candidate
+        } catch {
+            isLibraryReadOnly = persistence.isReadOnly
+            throw error
+        }
+    }
+
+    private func addScan(_ scan: Scan, to project: Project) throws {
+        try onMain {
+            var candidate = projects
+            guard let index = candidate.firstIndex(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
+            candidate[index].addScan(scan)
+            if scan.thumbnailData != nil { candidate[index].thumbnailData = scan.thumbnailData }
+            try commitProjects(candidate)
+        }
+    }
+
+    /// UI-only mutations report failures without losing their last committed state.
+    @discardableResult
+    private func perform(_ action: String, _ work: () throws -> Void) -> Bool {
+        onMain {
+            do { try work(); return true }
+            catch { report(error, action: action); return false }
         }
     }
 
     // MARK: - Project CRUD
 
-    func loadProjects() {
-        guard fileManager.fileExists(atPath: projectsFile.path) else {
-            projects = []
-            return
-        }
-
-        do {
-            let data = try Data(contentsOf: projectsFile)
-            projects = try JSONDecoder().decode([Project].self, from: data)
-        } catch {
-            DebugLogger.shared.error("Error loading projects: \(error)", category: "Storage")
-            projects = []
-        }
-    }
-
-    func saveProjects() {
-        do {
-            let data = try JSONEncoder().encode(projects)
-            try data.write(to: projectsFile, options: .atomicWrite)
-        } catch {
-            DebugLogger.shared.error("Error saving projects: \(error)", category: "Storage")
-        }
-    }
-
     @discardableResult
-    func createProject(name: String) -> Project {
+    func createProject(name: String) -> Project? {
         let project = Project(name: name)
-        projects.append(project)
-
-        // Create project directory
-        let projectDir = projectsDirectory.appendingPathComponent(project.id.uuidString)
-        try? fileManager.createDirectory(at: projectDir, withIntermediateDirectories: true)
-
-        // Create scan directory for this project
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        try? fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
-
-        saveProjects()
-        return project
+        return perform("Create project") {
+            try fileManager.createDirectory(at: projectsDirectory.appendingPathComponent(project.id.uuidString), withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: scansDirectory.appendingPathComponent(project.id.uuidString), withIntermediateDirectories: true)
+            try commitProjects(projects + [project])
+        } ? project : nil
     }
 
     func updateProject(_ project: Project) {
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index] = project
-            saveProjects()
+        perform("Update project") {
+            var candidate = projects
+            guard let index = candidate.firstIndex(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
+            candidate[index] = project
+            try commitProjects(candidate)
         }
     }
 
     func deleteProject(_ project: Project) {
-        // Delete project files
-        let projectDir = projectsDirectory.appendingPathComponent(project.id.uuidString)
-        try? fileManager.removeItem(at: projectDir)
-
-        // Delete associated scan files
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        try? fileManager.removeItem(at: scanDir)
-
-        projects.removeAll { $0.id == project.id }
-        saveProjects()
+        perform("Delete project") {
+            try commitProjects(projects.filter { $0.id != project.id })
+            // Remove files only AFTER the index commits. Interrupted cleanup leaves
+            // recoverable unused files, not a library pointing at missing models.
+            try removeExistingItems([
+                projectsDirectory.appendingPathComponent(project.id.uuidString),
+                scansDirectory.appendingPathComponent(project.id.uuidString)
+            ])
+        }
     }
 
     func renameProject(_ project: Project, newName: String) {
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].name = newName
-            projects[index].modifiedAt = Date()
-            saveProjects()
+        perform("Rename project") {
+            var candidate = projects
+            guard let index = candidate.firstIndex(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
+            candidate[index].name = newName
+            candidate[index].modifiedAt = Date()
+            try commitProjects(candidate)
+        }
+    }
+
+    private func removeExistingItems(_ urls: [URL]) throws {
+        for url in urls where fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
         }
     }
 
@@ -208,7 +218,7 @@ class StorageManager: ObservableObject {
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
-        addScan(scan, to: project)
+        try addScan(scan, to: project)
         return scan
     }
 
@@ -250,27 +260,27 @@ class StorageManager: ObservableObject {
         // Keep the source photos (and their ARKit poses) for re-reconstruction later.
         if let photosFolder = photosFolder {
             let kept = scanDir.appendingPathComponent("\(scanId.uuidString)_photos")
-            try? fileManager.removeItem(at: kept)
-            if (try? fileManager.copyItem(at: photosFolder, to: kept)) != nil {
-                scan.captureFolderName = kept.lastPathComponent
-                let poses = PoseFile.url(forPhotoFolder: photosFolder)
-                if fileManager.fileExists(atPath: poses.path) {
-                    try? fileManager.copyItem(at: poses, to: PoseFile.url(forPhotoFolder: kept))
-                }
+            try fileManager.copyItem(at: photosFolder, to: kept)
+            scan.captureFolderName = kept.lastPathComponent
+            let poses = PoseFile.url(forPhotoFolder: photosFolder)
+            if fileManager.fileExists(atPath: poses.path) {
+                try fileManager.copyItem(at: poses, to: PoseFile.url(forPhotoFolder: kept))
             }
         }
 
-        addScan(scan, to: project)
+        try addScan(scan, to: project)
         return scan
     }
 
     /// Change stored details of a saved scan.
-    func updateScan(_ scanID: UUID, in project: Project, _ change: (inout Scan) -> Void) {
-        onMain {
-            guard let pi = projects.firstIndex(where: { $0.id == project.id }),
-                  let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
-            change(&projects[pi].scans[si])
-            saveProjects()
+    func updateScan(_ scanID: UUID, in project: Project, _ change: (inout Scan) -> Void) throws {
+        try onMain {
+            var candidate = projects
+            guard let pi = candidate.firstIndex(where: { $0.id == project.id }),
+                  let si = candidate[pi].scans.firstIndex(where: { $0.id == scanID }) else { throw StorageFailure.missingItem }
+            change(&candidate[pi].scans[si])
+            candidate[pi].modifiedAt = Date()
+            try commitProjects(candidate)
         }
     }
 
@@ -283,17 +293,23 @@ class StorageManager: ObservableObject {
     }
 
     func loadMeasurements(for scan: Scan, in project: Project) -> [ScanMeasurement] {
-        guard let data = try? Data(contentsOf: measurementsURL(for: scan, in: project)),
-              let list = try? JSONDecoder().decode([ScanMeasurement].self, from: data) else { return [] }
-        return list
+        let url = measurementsURL(for: scan, in: project)
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        do { return try JSONDecoder().decode([ScanMeasurement].self, from: Data(contentsOf: url)) }
+        catch { report(error, action: "Read measurements. The original file has been preserved"); return [] }
     }
 
-    func saveMeasurements(_ measurements: [ScanMeasurement], for scan: Scan, in project: Project) {
-        let url = measurementsURL(for: scan, in: project)
-        if measurements.isEmpty {
-            try? fileManager.removeItem(at: url)
-        } else if let data = try? JSONEncoder().encode(measurements) {
-            try? data.write(to: url, options: .atomic)
+    func saveMeasurements(_ measurements: [ScanMeasurement], for scan: Scan, in project: Project) throws {
+        try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            guard let current = projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scan.id }),
+                  current.fileName == scan.fileName else { throw StorageFailure.missingItem }
+            let url = measurementsURL(for: scan, in: project)
+            if fileManager.fileExists(atPath: url.path) {
+                // A failed load must not turn into silently overwriting a corrupt file.
+                _ = try JSONDecoder().decode([ScanMeasurement].self, from: Data(contentsOf: url))
+            }
+            try JSONEncoder().encode(measurements).write(to: url, options: .atomic)
         }
     }
 
@@ -327,49 +343,44 @@ class StorageManager: ObservableObject {
         return fileManager.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Copy a prepared Splat zip next to the scan so it can be re-shared anytime.
-    func attachSplatBundle(zipURL: URL, toScan scanID: UUID, in project: Project) {
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        try? fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
-        let dest = scanDir.appendingPathComponent("\(scanID.uuidString)_bundle.zip")
-        try? fileManager.removeItem(at: dest)
-        guard (try? fileManager.copyItem(at: zipURL, to: dest)) != nil else { return }
-        onMain {
-            if let pi = projects.firstIndex(where: { $0.id == project.id }),
-               let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) {
-                projects[pi].scans[si].splatBundleName = dest.lastPathComponent
-                saveProjects()
-            }
-        }
-    }
-
-    /// Replace a photogrammetry scan's model file in place (used by re-reconstruct).
+    /// Publish a new model only after it is copied. The old model, measurements,
+    /// and metadata stay with the scan as recovery files, including across moves.
     func replacePhotogrammetryModel(scanID: UUID, in project: Project,
                                     newModelURL: URL, modelTransform: simd_float4x4?) throws {
-        guard let fileName = onMain({
-            projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scanID })?.fileName
-        }) else { return }
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        let destURL = scanDir.appendingPathComponent(fileName)
-        try? fileManager.removeItem(at: destURL)
-        try fileManager.copyItem(at: newModelURL, to: destURL)
-
-        let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
-        let thumbnail = generateThumbnail(fromModelURL: destURL)
-        let bounds = StorageManager.transformedBounds(of: destURL, by: modelTransform)
-
-        onMain {
+        try onMain {
             guard let pi = projects.firstIndex(where: { $0.id == project.id }),
-                  let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
-            projects[pi].scans[si].fileSize = fileSize
-            projects[pi].scans[si].modelScale = nil
-            projects[pi].scans[si].modelTransform = modelTransform.map(StorageManager.array(of:))
-            projects[pi].scans[si].thumbnailData = thumbnail
-            if let b = bounds {
-                projects[pi].scans[si].boundingBoxMin = b.0
-                projects[pi].scans[si].boundingBoxMax = b.1
+                  let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { throw StorageFailure.missingItem }
+            let original = projects[pi].scans[si]
+            let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
+            let base = UUID().uuidString
+            let dest = dir.appendingPathComponent("\(base).usdz")
+            let metadata = dir.appendingPathComponent("\(base)_previous.json")
+            try persistence.copyAndCommit([(newModelURL, dest)]) {
+                var updated = original
+                updated.fileName = dest.lastPathComponent
+                updated.fileSize = (try fileManager.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
+                updated.modelScale = nil
+                updated.modelTransform = modelTransform.map(StorageManager.array(of:))
+                updated.thumbnailData = generateThumbnail(fromModelURL: dest)
+                guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
+                    throw StorageFailure.missingItem
+                }
+                updated.boundingBoxMin = bounds.0
+                updated.boundingBoxMax = bounds.1
+                updated.retainedReconstructionFiles = companionFiles(of: original).filter {
+                    fileManager.fileExists(atPath: dir.appendingPathComponent($0).path)
+                } + [metadata.lastPathComponent]
+                do {
+                    try JSONEncoder().encode(original).write(to: metadata, options: .atomic)
+                    var candidate = projects
+                    candidate[pi].scans[si] = updated
+                    candidate[pi].modifiedAt = Date()
+                    try commitProjects(candidate)
+                } catch {
+                    try? fileManager.removeItem(at: metadata)
+                    throw error
+                }
             }
-            saveProjects()
         }
     }
 
@@ -391,7 +402,7 @@ class StorageManager: ObservableObject {
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
-    func savePointCloud(meshData: MeshData, name: String, toProject project: Project) throws -> Scan {
+    func savePointCloud(meshData: MeshData, name: String, toProject project: Project, splatBundle: URL? = nil) throws -> Scan {
         let scanId = UUID()
         let fileName = "\(scanId.uuidString).ply"
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
@@ -418,7 +429,12 @@ class StorageManager: ObservableObject {
 
         scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
 
-        addScan(scan, to: project)
+        if let bundle = splatBundle {
+            let destination = scanDir.appendingPathComponent("\(scanId.uuidString)_bundle.zip")
+            try fileManager.copyItem(at: bundle, to: destination)
+            scan.splatBundleName = destination.lastPathComponent
+        }
+        try addScan(scan, to: project)
         return scan
     }
 
@@ -467,56 +483,58 @@ class StorageManager: ObservableObject {
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
         if let p = scan.captureFolderName { names.append(p); names.append(p + PoseFile.suffix) }
-        return Array(Set(names))
+        names += scan.retainedReconstructionFiles ?? []
+        return Array(Set(names)).sorted()
     }
 
     func deleteScan(_ scan: Scan, from project: Project) {
-        let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        for name in companionFiles(of: scan) {
-            try? fileManager.removeItem(at: dir.appendingPathComponent(name))
-        }
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].scans.removeAll { $0.id == scan.id }
-            projects[index].modifiedAt = Date()
-            saveProjects()
+        perform("Delete scan") {
+            var candidate = projects
+            guard let index = candidate.firstIndex(where: { $0.id == project.id }),
+                  let current = candidate[index].scans.first(where: { $0.id == scan.id }) else { throw StorageFailure.missingItem }
+            candidate[index].scans.removeAll { $0.id == scan.id }
+            candidate[index].modifiedAt = Date()
+            try commitProjects(candidate)
+            let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
+            try removeExistingItems(companionFiles(of: current).map { dir.appendingPathComponent($0) })
         }
     }
 
     func renameScan(_ scan: Scan, in project: Project, newName: String) {
-        if let projIndex = projects.firstIndex(where: { $0.id == project.id }),
-           let scanIndex = projects[projIndex].scans.firstIndex(where: { $0.id == scan.id }) {
-            projects[projIndex].scans[scanIndex].name = newName
-            projects[projIndex].modifiedAt = Date()
-            saveProjects()
+        perform("Rename scan") {
+            try updateScan(scan.id, in: project) { $0.name = newName }
         }
     }
 
     /// Move a scan (and all its files) from one project to another
-    func moveScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) {
-        guard sourceProject.id != destProject.id else { return }
-        let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
-        let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
-        try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
-
-        for name in companionFiles(of: scan) {
-            let src = sourceDir.appendingPathComponent(name)
-            guard fileManager.fileExists(atPath: src.path) else { continue }
-            let dst = destDir.appendingPathComponent(name)
-            try? fileManager.removeItem(at: dst)
-            if (try? fileManager.moveItem(at: src, to: dst)) == nil {
-                try? fileManager.copyItem(at: src, to: dst)
-                try? fileManager.removeItem(at: src)
+    @discardableResult
+    func moveScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) -> Bool {
+        guard sourceProject.id != destProject.id else { return true }
+        return perform("Move scan") {
+            var candidate = projects
+            guard let srcIndex = candidate.firstIndex(where: { $0.id == sourceProject.id }),
+                  let dstIndex = candidate.firstIndex(where: { $0.id == destProject.id }),
+                  let current = candidate[srcIndex].scans.first(where: { $0.id == scan.id }),
+                  !candidate[dstIndex].scans.contains(where: { $0.id == scan.id }) else { throw StorageFailure.missingItem }
+            let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
+            let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
+            // The primary model and all explicitly registered companions are required.
+            let required = [current.fileName] + [current.textureFileName, current.splatBundleName, current.captureFolderName].compactMap { $0 }
+                + (current.retainedReconstructionFiles ?? [])
+            guard required.allSatisfy({ fileManager.fileExists(atPath: sourceDir.appendingPathComponent($0).path) }) else {
+                throw StorageFailure.missingItem
             }
+            try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
+            let files = companionFiles(of: current).filter { fileManager.fileExists(atPath: sourceDir.appendingPathComponent($0).path) }
+            let copies = files.map { (source: sourceDir.appendingPathComponent($0), destination: destDir.appendingPathComponent($0)) }
+            candidate[srcIndex].scans.removeAll { $0.id == scan.id }
+            candidate[srcIndex].modifiedAt = Date()
+            candidate[dstIndex].addScan(current)
+            try persistence.copyAndCommit(copies) { try commitProjects(candidate) }
+            // A cleanup failure after commit is safe: the new copy is already indexed.
+            do { try removeExistingItems(copies.map { $0.source }) }
+            catch { report(error, action: "Scan moved; some old copies could not be cleaned up") }
         }
-
-        if let srcIndex = projects.firstIndex(where: { $0.id == sourceProject.id }) {
-            projects[srcIndex].scans.removeAll { $0.id == scan.id }
-            projects[srcIndex].modifiedAt = Date()
-        }
-        if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
-            projects[dstIndex].addScan(scan)
-        }
-        saveProjects()
     }
 
     /// Duplicate a scan (and all its files) within the same or a different project
@@ -573,11 +591,8 @@ class StorageManager: ObservableObject {
         newScan.altitude = scan.altitude
         newScan.locationAccuracy = scan.locationAccuracy
 
-        if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
-            projects[dstIndex].addScan(newScan)
-            saveProjects()
-        }
-        return newScan
+        do { try addScan(newScan, to: destProject); return newScan }
+        catch { report(error, action: "Duplicate scan"); return nil }
     }
 
     // MARK: - Model Copying
@@ -718,7 +733,7 @@ class StorageManager: ObservableObject {
         scan.textureFileName = textureName
         scan.hasTexture = textureName != nil
 
-        addScan(scan, to: project)
+        try addScan(scan, to: project)
         return scan
     }
 

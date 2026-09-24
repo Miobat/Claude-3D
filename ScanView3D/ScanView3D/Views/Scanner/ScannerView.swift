@@ -698,7 +698,11 @@ struct ScannerView: View {
         }
         var updated = scan
         change(&updated)
-        storageManager.updateScan(scan.id, in: project, change)
+        do { try storageManager.updateScan(scan.id, in: project, change) }
+        catch {
+            failSave("The model was saved, but its details could not be saved. Capture data is still available. \(error.localizedDescription)")
+            return
+        }
 
         isSaving = false
         savingProgress = ""
@@ -776,41 +780,37 @@ struct ScannerView: View {
         }
         isSaving = true
         savingProgress = "Packaging for desktop…"
-        let cloud = pendingMesh
+        guard let cloud = pendingMesh, !cloud.vertices.isEmpty else {
+            failSave("No point cloud is available. Continue scanning before saving. Your photos have been kept.")
+            return
+        }
         let name = scanName
         let north = settings.alignToNorth
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // The bundle keeps ARKit's frame (it must match the camera poses).
-            SplatExporter.writeBundle(imageFolder: folder, poses: poses, pointCloud: cloud)
-            let zipURL = SplatExporter.zip(folder: folder)
+            do {
+                // Keep ARKit's frame in the bundle so geometry matches its poses.
+                try SplatExporter.writeBundle(imageFolder: folder, poses: poses, pointCloud: cloud)
+                guard let zipURL = SplatExporter.zip(folder: folder) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                let levelled = cloud.transformed(by: SceneFrame.compute(from: cloud, keepHeading: north))
+                _ = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project, splatBundle: zipURL)
 
-            // Keep an in-app (levelled) record so the scan shows up in Projects, with
-            // the zip stored next to it so it can be re-sent later.
-            let record = cloud.flatMap { c -> Scan? in
-                let levelled = c.transformed(by: SceneFrame.compute(from: c, keepHeading: north))
-                return try? storageManager.savePointCloud(meshData: levelled, name: name, toProject: project)
-            }
-            if let zipURL = zipURL, let record = record {
-                storageManager.attachSplatBundle(zipURL: zipURL, toScan: record.id, in: project)
-            }
-
-            DispatchQueue.main.async {
-                isSaving = false
-                savingProgress = ""
-                showingSaveDialog = false
-                pendingMesh = nil
-                scanner.resetScanning()
-                scanner.startPreview()
-                if let zipURL = zipURL {
+                DispatchQueue.main.async {
+                    isSaving = false
+                    savingProgress = ""
+                    showingSaveDialog = false
+                    pendingMesh = nil
+                    scanner.resetScanning()
+                    scanner.startPreview()
                     // Let the sheet finish closing before presenting the share sheet.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         presentShareSheet(url: zipURL)
                     }
-                } else {
-                    errorMessage = "Could not package the splat bundle."
-                    showingError = true
                 }
+            } catch {
+                DispatchQueue.main.async { failSave("Could not save the splat bundle. Capture data has been kept. \(error.localizedDescription)") }
             }
         }
     }

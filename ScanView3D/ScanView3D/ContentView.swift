@@ -37,5 +37,22 @@ struct ContentView: View {
         }
         .environmentObject(storageManager)
         .tint(.blue)
+        .safeAreaInset(edge: .top) {
+            if storageManager.isLibraryReadOnly {
+                Label("Library needs recovery — saving is disabled. Existing files are preserved.", systemImage: "exclamationmark.shield")
+                    .font(.callout)
+                    .padding()
+                    .frame(maxWidth: .infinity)
+                    .background(.orange.opacity(0.2))
+            }
+        }
+        .alert("Storage needs attention", isPresented: Binding(
+            get: { storageManager.storageError != nil },
+            set: { if !$0 { storageManager.storageError = nil } }
+        )) {
+            Button("OK", role: .cancel) { storageManager.storageError = nil }
+        } message: {
+            Text(storageManager.storageError ?? "The operation could not be saved.")
+        }
     }
 }

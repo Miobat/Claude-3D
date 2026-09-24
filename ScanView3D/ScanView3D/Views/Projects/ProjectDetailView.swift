@@ -213,8 +213,8 @@ struct ProjectDetailView: View {
                     }
                 }
                 .onDelete { indexSet in
-                    for index in indexSet {
-                        let scan = sortedScans[index]
+                    let selected = indexSet.map { sortedScans[$0] }
+                    for scan in selected {
                         storageManager.deleteScan(scan, from: liveProject)
                     }
                 }
@@ -401,8 +401,9 @@ struct MoveToProjectSheet: View {
                 Section("Move \"\(scan.name)\" to:") {
                     ForEach(storageManager.projects.filter { $0.id != sourceProject.id }) { project in
                         Button {
-                            storageManager.moveScan(scan, from: sourceProject, to: project)
-                            onDismiss()
+                            if storageManager.moveScan(scan, from: sourceProject, to: project) {
+                                onDismiss()
+                            }
                         } label: {
                             HStack {
                                 Image(systemName: "folder.fill")

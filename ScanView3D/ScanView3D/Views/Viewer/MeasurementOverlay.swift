@@ -59,7 +59,7 @@ final class MeasurementSession: ObservableObject {
     var unit: ScanSettings.MeasurementUnit = .meters { didSet { publish() } }
     weak var geometry: MeasurementGeometryProvider?
     /// Called whenever the saved list changes (persist it).
-    var onSave: (([ScanMeasurement]) -> Void)?
+    var onSave: (([ScanMeasurement]) throws -> Void)?
     /// Called with a fresh snapshot for the overlay to draw.
     var renderSink: ((MeasurementRenderState) -> Void)? { didSet { publish() } }
 
@@ -69,6 +69,8 @@ final class MeasurementSession: ObservableObject {
 
     func load(_ saved: [ScanMeasurement]) {
         measurements = saved
+        selectedID = nil
+        discardDraft()
         publish()
     }
 
@@ -145,34 +147,43 @@ final class MeasurementSession: ObservableObject {
             draftPoints.removeLast()
             if draftNormals.count > draftPoints.count { draftNormals.removeLast() }
         } else if !measurements.isEmpty {
-            measurements.removeLast()
-            onSave?(measurements)
+            _ = persist(Array(measurements.dropLast()))
         }
         publish()
     }
 
     func deleteSelected() {
         guard let id = selectedID else { return }
-        measurements.removeAll { $0.id == id }
+        guard persist(measurements.filter { $0.id != id }) else { return }
         selectedID = nil
-        onSave?(measurements)
         publish()
     }
 
     func clearAll() {
-        measurements.removeAll()
+        guard persist([]) else { return }
         selectedID = nil
         discardDraft()
-        onSave?(measurements)
     }
 
     private func commit(_ m: ScanMeasurement) {
-        measurements.append(m)
+        guard persist(measurements + [m]) else { return }
         draftPoints.removeAll()
         draftNormals.removeAll()
         selectedID = m.id
-        onSave?(measurements)
         publish()
+    }
+
+    /// Keep the saved list and drawing draft unchanged if persistence fails.
+    private func persist(_ candidate: [ScanMeasurement]) -> Bool {
+        do {
+            try onSave?(candidate)
+            measurements = candidate
+            return true
+        } catch {
+            message = "Could not save measurements: \(error.localizedDescription)"
+            publish()
+            return false
+        }
     }
 
     private func discardDraft() {

@@ -33,7 +33,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10030`/`B10030`). Deleting a file = remove those 4 lines too.
+(currently `A10031`/`B10031`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -119,3 +119,13 @@ add any new per-scan file there.
   a time to avoid conflicts; merge branch by branch.
 - Keep commit messages descriptive (what + why).
 - Don't commit secrets, `.env` files or signing material.
+
+## 7. Codex storage-integrity branch
+
+See `ScanView3D/STORAGE_INTEGRITY.md` for the implemented reliability slice,
+validation commands, recovery-file layout, device checklist and remaining work.
+`StorageManager.projects` is now read-only to callers; mutations must commit the
+index before publishing. `createProject` returns an optional; `updateScan` and
+measurement saves throw. Failed saves must not reset the capture.
+The shared `StorageCore` source is compiled directly by Xcode (A10030/B10030),
+and independently tested by Swift Package Manager. Validation gates TestFlight.

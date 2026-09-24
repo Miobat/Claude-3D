@@ -190,7 +190,7 @@ struct ModelViewerView: View {
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
-            session.onSave = { list in store.saveMeasurements(list, for: currentScan, in: currentProject) }
+            session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
         }
         .onChange(of: activeTool) { _, tool in
             session.isActive = (tool == .measure)
@@ -594,8 +594,12 @@ struct ModelViewerView: View {
                         .scans.first(where: { $0.id == self.scan.id }) {
                         self.scan = updated
                     }
-                    // The new model has a different scale; old measurements no longer apply.
-                    self.session.clearAll()
+                    // Old measurements remain with the previous model for recovery.
+                    // Bind future saves to the NEW filename, not the onAppear snapshot.
+                    self.session.load([])
+                    self.session.selectedID = nil
+                    let store = self.storageManager, currentScan = self.scan, currentProject = self.project
+                    self.session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
                     self.modelNode = nil
                     self.reloadToken = UUID()
                 }

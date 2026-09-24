@@ -96,6 +96,9 @@ struct Scan: Identifiable, Codable {
     var longitude: Double?
     var altitude: Double?
     var locationAccuracy: Double?    // metres
+    /// Previous reconstruction models, measurements and metadata retained for recovery.
+    /// Optional for compatibility with every existing projects.json file.
+    var retainedReconstructionFiles: [String]?
 
     /// Transform to apply to the stored model file when showing/measuring it.
     var modelMatrix: simd_float4x4? {

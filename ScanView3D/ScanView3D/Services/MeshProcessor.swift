@@ -869,7 +869,15 @@ enum SplatExporter {
 
     /// Write transforms.json (instant-ngp/nerfstudio convention), points3D.ply,
     /// and a README into the folder that already holds the captured frames.
-    static func writeBundle(imageFolder: URL, poses: [CapturedPose], pointCloud: MeshData?) {
+    static func writeBundle(imageFolder: URL, poses: [CapturedPose], pointCloud: MeshData?) throws {
+        guard !poses.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        // Do not claim a complete bundle when a pending/failed photo write is missing.
+        for pose in poses {
+            let image = imageFolder.appendingPathComponent(String(format: "frame_%04d.jpg", pose.index))
+            let attributes = try FileManager.default.attributesOfItem(atPath: image.path)
+            let size = (attributes[.size] as? Int64) ?? 0
+            guard size > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        }
         if let first = poses.first {
             let fx = Double(first.intrinsics[0][0])
             let fy = Double(first.intrinsics[1][1])
@@ -903,13 +911,12 @@ enum SplatExporter {
                 "ply_file_path": "points3D.ply",
                 "frames": frames
             ]
-            if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]) {
-                try? data.write(to: imageFolder.appendingPathComponent("transforms.json"))
-            }
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted])
+            try data.write(to: imageFolder.appendingPathComponent("transforms.json"), options: .atomic)
         }
 
         if let cloud = pointCloud, !cloud.vertices.isEmpty {
-            _ = try? OBJExporter.exportPointCloudPLY(meshData: cloud, fileName: "points3D", directory: imageFolder)
+            _ = try OBJExporter.exportPointCloudPLY(meshData: cloud, fileName: "points3D", directory: imageFolder)
         }
 
         let readme = """
@@ -932,7 +939,7 @@ enum SplatExporter {
         Tip: if a tool expects the opposite handedness, flip the Y and Z axes of each
         transform_matrix.
         """
-        try? readme.write(to: imageFolder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+        try readme.write(to: imageFolder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
     }
 
     /// Zip the bundle folder for sharing (uses the documented NSFileCoordinator trick).

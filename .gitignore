@@ -6,3 +6,7 @@ Forus/
 Storebaug/
 *.jpg
 *.png
+**/.build/
+**/.swiftpm/
+**/DerivedData/
+.validation-tools/

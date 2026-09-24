@@ -177,7 +177,8 @@ struct ProjectListView: View {
             } else if let first = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt }).first {
                 project = first
             } else {
-                project = storageManager.createProject(name: "Imported Scans")
+                guard let created = storageManager.createProject(name: "Imported Scans") else { return }
+                project = created
             }
 
             for url in urls {
@@ -185,7 +186,7 @@ struct ProjectListView: View {
                 do {
                     let _ = try storageManager.importOBJFile(from: url, name: name, toProject: project)
                 } catch {
-                    DebugLogger.shared.error("Import error: \(error)", category: "Import")
+                    storageManager.report(error, action: "Import \(name)")
                 }
             }
             importTargetProject = nil

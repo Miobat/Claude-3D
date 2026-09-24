@@ -1,0 +1,56 @@
+name: Validate iOS
+
+on:
+  pull_request:
+    paths:
+      - 'ScanView3D/**'
+      - '.github/workflows/**'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Storage regression tests and iOS builds
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode 26
+        shell: bash
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+          test -n "$XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+      - name: Storage failure-path tests
+        run: swift test --package-path ScanView3D/StorageCore
+      - name: Compile device and simulator without signing
+        shell: bash
+        run: |
+          set -o pipefail
+          for PLATFORM in iOS 'iOS Simulator'; do
+            xcodebuild -project ScanView3D/ScanView3D.xcodeproj \
+              -scheme ScanView3D -configuration Debug \
+              -destination "generic/platform=$PLATFORM" \
+              -derivedDataPath "$RUNNER_TEMP/ScanView3D-$PLATFORM" \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY= PROVISIONING_PROFILE_SPECIFIER= \
+              'SUPPORTED_PLATFORMS=iphoneos iphonesimulator' build \
+              2>&1 | tee -a "$RUNNER_TEMP/validation.log"
+          done
+      - name: Report compiler errors
+        if: failure()
+        shell: bash
+        run: |
+          grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null | head -20 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+      - name: Keep compiler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-validation-log
+          path: ${{ runner.temp }}/validation.log
+          if-no-files-found: ignore
