@@ -114,8 +114,9 @@ class MeshProcessor {
 
         let thresholdSq = threshold * threshold
 
-        // Simple spatial bucketing for performance
-        let bucketSize: Float = threshold * 10
+        // Hash grid with cell size = threshold: any vertex within `threshold` is
+        // guaranteed to be in one of the 27 neighbouring cells checked below.
+        let bucketSize: Float = max(threshold, 1e-5)
         var buckets: [SIMD3<Int32>: [Int]] = [:]
 
         for i in 0..<count {
@@ -681,62 +682,7 @@ class MeshProcessor {
         }
     }
 
-    #if !targetEnvironment(simulator)
-    // MARK: - Point Cloud from Depth
-
-    static func createPointCloud(from frame: ARFrame) -> [SIMD3<Float>]? {
-        guard let depthMap = frame.sceneDepth?.depthMap ?? frame.smoothedSceneDepth?.depthMap else {
-            return nil
-        }
-
-        let width = CVPixelBufferGetWidth(depthMap)
-        let height = CVPixelBufferGetHeight(depthMap)
-
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(depthMap) else {
-            return nil
-        }
-
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
-        let intrinsics = frame.camera.intrinsics
-        let cameraTransform = frame.camera.transform
-
-        var points: [SIMD3<Float>] = []
-
-        let step = 4
-        for y in stride(from: 0, to: height, by: step) {
-            for x in stride(from: 0, to: width, by: step) {
-                let depthPointer = baseAddress.advanced(by: y * bytesPerRow + x * MemoryLayout<Float32>.size)
-                let depth = depthPointer.assumingMemoryBound(to: Float32.self).pointee
-
-                guard depth > 0 && depth < 5.0 else { continue }
-
-                let fx = intrinsics[0][0]
-                let fy = intrinsics[1][1]
-                let cx = intrinsics[2][0]
-                let cy = intrinsics[2][1]
-
-                let xWorld = (Float(x) - cx) * depth / fx
-                let yWorld = (Float(y) - cy) * depth / fy
-                let localPoint = SIMD4<Float>(xWorld, yWorld, depth, 1.0)
-
-                let worldPoint = cameraTransform * localPoint
-                points.append(SIMD3<Float>(worldPoint.x, worldPoint.y, worldPoint.z))
-            }
-        }
-
-        return points
-    }
-    #endif
-
     // MARK: - Bounding Box
-
-    static func calculateBoundingBox(for node: SCNNode) -> (min: SCNVector3, max: SCNVector3) {
-        let (minVec, maxVec) = node.boundingBox
-        return (minVec, maxVec)
-    }
 
     static func calculateCenter(min: SCNVector3, max: SCNVector3) -> SCNVector3 {
         return SCNVector3(

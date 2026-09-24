@@ -129,41 +129,45 @@ struct Scan: Identifiable, Codable {
     }
 }
 
-/// Settings for the scanning session
-struct ScanSettings: Codable {
-    var captureTexture: Bool = true
-    var meshDetail: MeshDetail = .medium
-    var unit: MeasurementUnit = .meters
-    var autoSave: Bool = true
-    var scanRange: ScanRange = .room
-    var scanQuality: ScanQuality = .standard
-    var meshMode: MeshMode = .free
-    var rangeValue: Float = 3.0       // Continuous range in meters (0.3 - 5.0)
-    var confidenceLevel: Int = 1      // 0=Low, 1=Medium, 2=High
+/// Settings chosen on the scan screen. Remembered between launches.
+struct ScanSettings: Codable, Equatable {
     var captureMode: CaptureMode = .fast
-    var detailMM: Float = 10.0        // Point/mesh grid spacing in mm (5 = fine, 20 = coarse)
-    var reconstructQuality: ReconstructQuality = .best  // High-Quality photogrammetry effort
+    var rangeValue: Float = 3.0        // metres (0.3 – 5.0)
+    var detailMM: Float = 10.0         // grid spacing, Fast / Point Cloud (5 fine – 20 coarse)
+    var meshMode: MeshMode = .free     // Fast only
+    var captureTexture: Bool = true    // colour for Fast / Point Cloud
+    var reconstructQuality: ReconstructQuality = .best
+
+    // MARK: - Persistence
+
+    private static let storageKey = "scanSettings.v2"
+
+    static func load() -> ScanSettings {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let settings = try? JSONDecoder().decode(ScanSettings.self, from: data) else {
+            return ScanSettings()
+        }
+        return settings
+    }
+
+    func save() {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: ScanSettings.storageKey)
+        }
+    }
 
     // MARK: - Reconstruction Quality (High-Quality / photogrammetry)
 
     /// On-device iOS photogrammetry is capped at `.reduced` mesh detail by Apple,
-    /// so this controls reconstruction *effort* (feature matching + how many photos
-    /// are used), trading speed against fidelity — not a higher detail tier.
+    /// so this only trades feature-matching effort for speed.
     enum ReconstructQuality: String, Codable, CaseIterable {
-        case draft = "Draft"   // fewer photos, normal sensitivity — fastest
-        case best = "Best"     // all photos, high sensitivity — slower, sharper
+        case draft = "Draft"
+        case best = "Best"
 
         var description: String {
             switch self {
-            case .draft: return "Fast preview. Uses fewer photos. Re-do as Best later."
-            case .best: return "Slower, sharpest the device can do (reduced detail)."
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .draft: return "hare"
-            case .best: return "tortoise"
+            case .draft: return "Faster, may fail on plain surfaces. Photos are kept, so you can re-run as Best."
+            case .best: return "Slower, most reliable and sharpest result on the phone."
             }
         }
     }
@@ -172,28 +176,26 @@ struct ScanSettings: Codable {
 
     /// Chosen BEFORE scanning. Determines what data is captured.
     enum CaptureMode: String, Codable, CaseIterable {
-        /// A: light, mesh-focused. Downscaled frames + texture baking. Best for
-        /// large areas where accurate geometry/measurement matters.
         case fast = "Fast"
-        /// B: saves full-resolution photos for after-scan photogrammetry
-        /// reconstruction (PhotogrammetrySession). Photoreal output, slower,
-        /// more storage.
         case highQuality = "High Quality"
-        /// C (foundation): accumulates a dense colored point cloud from LiDAR
-        /// depth + camera color. The initialization for Gaussian Splatting, and
-        /// exportable as PLY.
         case pointCloud = "Point Cloud"
-        /// Splat (Desktop): captures posed full-res photos + point cloud and
-        /// exports a bundle (images + transforms.json + points3D.ply) so a
-        /// computer can train a Gaussian splat, skipping COLMAP.
         case splatExport = "Splat (Desktop)"
+
+        var shortName: String {
+            switch self {
+            case .fast: return "Fast"
+            case .highQuality: return "HQ"
+            case .pointCloud: return "Points"
+            case .splatExport: return "Splat"
+            }
+        }
 
         var description: String {
             switch self {
-            case .fast: return "Quick mesh + baked texture. Best for big areas & measuring."
-            case .highQuality: return "Saves full-res photos for photoreal post-processing."
-            case .pointCloud: return "Dense colored point cloud (splat foundation). Exports PLY."
-            case .splatExport: return "Posed photos + point cloud, exported for desktop splat training."
+            case .fast: return "Mesh with photo texture. Best for big areas and measuring."
+            case .highQuality: return "Takes photos, then builds a photoreal model after the scan."
+            case .pointCloud: return "Coloured point cloud (PLY). Good for survey and CAD tools."
+            case .splatExport: return "Photos + camera positions to train a Gaussian splat on a PC."
             }
         }
 
@@ -205,117 +207,59 @@ struct ScanSettings: Codable {
             case .splatExport: return "square.and.arrow.up.on.square"
             }
         }
+
+        /// Whether the Detail slider affects this mode.
+        var usesDetail: Bool { self == .fast || self == .pointCloud }
+        /// Whether the colour on/off switch affects this mode.
+        var usesColorToggle: Bool { self == .fast || self == .pointCloud }
+        /// Whether the mesh filter (Everything / Structure / Room shell) applies.
+        var usesMeshMode: Bool { self == .fast }
     }
 
     // MARK: - Mesh Mode
 
     enum MeshMode: String, Codable, CaseIterable {
-        case free = "Free"
-        case hybrid = "Hybrid"
+        case free = "Everything"
         case structure = "Structure"
-        case area = "Area"
+        case area = "Room Shell"
 
         var description: String {
             switch self {
-            case .free: return "Raw mesh, all surfaces captured as-is"
-            case .hybrid: return "Align to detected objects while keeping detail"
-            case .structure: return "Walls, floors, ceiling, doors, windows"
-            case .area: return "Outline only - floor, walls, ceiling"
+            case .free: return "Everything the LiDAR sees."
+            case .structure: return "Walls, floor, ceiling, doors, windows and furniture. Drops clutter."
+            case .area: return "Only floor, walls and ceiling, as clean flat surfaces."
             }
         }
 
         var icon: String {
             switch self {
             case .free: return "scribble.variable"
-            case .hybrid: return "square.on.square.dashed"
             case .structure: return "building"
             case .area: return "square.dashed"
             }
         }
 
-        /// Which ARMeshClassification types to include in this mode
-        func shouldIncludeVertex(classification: UInt8) -> Bool {
+        /// Whether a triangle with this ARKit classification (per face) is kept.
+        func includes(classification: UInt8) -> Bool {
+            guard let cls = ARMeshClassificationCompat(rawValue: Int(classification)) else { return true }
             switch self {
             case .free:
-                return true // Everything
-            case .hybrid:
-                return true // Everything, but structure gets priority (handled at export)
+                return true
             case .structure:
-                // Only structural elements + furniture
-                guard let cls = ARMeshClassificationCompat(rawValue: Int(classification)) else { return true }
-                switch cls {
-                case .wall, .floor, .ceiling, .door, .window, .table, .seat:
-                    return true
-                case .none:
-                    return false // Skip unclassified clutter
-                }
+                return cls != ARMeshClassificationCompat.none
             case .area:
-                // Only room shell - floor, walls, ceiling
-                guard let cls = ARMeshClassificationCompat(rawValue: Int(classification)) else { return true }
                 switch cls {
-                case .wall, .floor, .ceiling:
-                    return true
-                case .door, .window:
-                    return true // Include openings as part of room shell
-                case .none, .table, .seat:
-                    return false
+                case .wall, .floor, .ceiling, .door, .window: return true
+                case .none, .table, .seat: return false
                 }
             }
         }
     }
 
-    // MARK: - Scan Range
-
-    enum ScanRange: String, Codable, CaseIterable {
-        case closeUp = "Close-up"
-        case near = "Near"
-        case room = "Room"
-        case extended = "Extended"
-
-        var maxDistance: Float {
-            switch self {
-            case .closeUp: return 0.5
-            case .near: return 1.5
-            case .room: return 3.0
-            case .extended: return 5.0
-            }
-        }
-
-        var description: String {
-            switch self {
-            case .closeUp: return "Small objects, high precision (0.5m)"
-            case .near: return "Furniture and desk items (1.5m)"
-            case .room: return "Room interiors (3m)"
-            case .extended: return "Large spaces (5m)"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .closeUp: return "scope"
-            case .near: return "cube"
-            case .room: return "house"
-            case .extended: return "building.2"
-            }
-        }
-    }
-
-    // MARK: - Scan Quality
+    // MARK: - Texture Capture Quality (internal)
 
     enum ScanQuality: String, Codable, CaseIterable {
-        case preview = "Preview"
-        case standard = "Standard"
-        case high = "High"
-        case ultra = "Ultra"
-
-        var confidenceThreshold: Float {
-            switch self {
-            case .preview: return 0.3
-            case .standard: return 0.5
-            case .high: return 0.6
-            case .ultra: return 0.7
-            }
-        }
+        case preview, standard, high, ultra
 
         var textureCaptureInterval: TimeInterval {
             switch self {
@@ -335,15 +279,6 @@ struct ScanSettings: Codable {
             }
         }
 
-        var textureAtlasTileSize: Int {
-            switch self {
-            case .preview: return 512
-            case .standard: return 768
-            case .high: return 768
-            case .ultra: return 1024
-            }
-        }
-
         /// Width to downscale captured camera frames to
         var textureDownscaleWidth: Int {
             switch self {
@@ -354,47 +289,12 @@ struct ScanSettings: Codable {
             }
         }
 
-        /// Size (px) of the baked UV texture atlas. Larger = sharper surface detail.
+        /// Size (px) of the baked UV texture atlas.
         var bakeAtlasSize: Int {
             switch self {
             case .preview: return 2048
             case .standard: return 6144
-            case .high: return 8192
-            case .ultra: return 8192
-            }
-        }
-
-        var description: String {
-            switch self {
-            case .preview: return "Fast scan, lower detail"
-            case .standard: return "Good balance of speed and detail"
-            case .high: return "Detailed scan, slower"
-            case .ultra: return "Maximum detail, large files"
-            }
-        }
-
-        var icon: String {
-            switch self {
-            case .preview: return "hare"
-            case .standard: return "circle.grid.2x2"
-            case .high: return "circle.grid.3x3"
-            case .ultra: return "sparkles"
-            }
-        }
-    }
-
-    // MARK: - Mesh Detail (kept for backward compatibility)
-
-    enum MeshDetail: String, Codable, CaseIterable {
-        case low = "Low"
-        case medium = "Medium"
-        case high = "High"
-
-        var description: String {
-            switch self {
-            case .low: return "Faster, smaller files"
-            case .medium: return "Balanced quality"
-            case .high: return "Best detail, larger files"
+            case .high, .ultra: return 8192
             }
         }
     }
@@ -403,15 +303,22 @@ struct ScanSettings: Codable {
 
     enum MeasurementUnit: String, Codable, CaseIterable {
         case meters = "Meters"
-        case feet = "Feet"
         case centimeters = "Centimeters"
+        case feet = "Feet & Inches"
         case inches = "Inches"
+
+        static let storageKey = "measurementUnit"
+
+        /// The unit chosen in Settings.
+        static var preferred: MeasurementUnit {
+            UserDefaults.standard.string(forKey: storageKey).flatMap(MeasurementUnit.init(rawValue:)) ?? .meters
+        }
 
         var abbreviation: String {
             switch self {
             case .meters: return "m"
-            case .feet: return "ft"
             case .centimeters: return "cm"
+            case .feet: return "ft"
             case .inches: return "in"
             }
         }
@@ -422,6 +329,34 @@ struct ScanSettings: Codable {
             case .feet: return value * 3.28084
             case .centimeters: return value * 100.0
             case .inches: return value * 39.3701
+            }
+        }
+
+        /// Human-readable length. LiDAR is good to about a centimetre, so we
+        /// don't show millimetres.
+        func format(meters value: Float) -> String {
+            switch self {
+            case .meters:
+                return String(format: "%.2f m", value)
+            case .centimeters:
+                return String(format: "%.0f cm", value * 100)
+            case .inches:
+                return String(format: "%.1f in", value * 39.3701)
+            case .feet:
+                let totalInches = abs(value) * 39.3701
+                var feet = Int(totalInches / 12)
+                var inches = (totalInches - Float(feet) * 12).rounded()
+                if inches >= 12 { feet += 1; inches = 0 }
+                return "\(value < 0 ? "-" : "")\(feet)′ \(Int(inches))″"
+            }
+        }
+
+        func format(squareMeters value: Float) -> String {
+            switch self {
+            case .meters, .centimeters:
+                return String(format: "%.2f m²", value)
+            case .feet, .inches:
+                return String(format: "%.1f ft²", value * 10.7639)
             }
         }
     }

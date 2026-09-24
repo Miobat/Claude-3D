@@ -99,6 +99,9 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
                         meshEntities[id] = anchorEntity
                         meshVersions[id] = currentVertexCount
                     }
+                } else if let existing = meshEntities[id] {
+                    // ARKit refines anchor positions over time; keep the overlay aligned.
+                    existing.transform = Transform(matrix: anchor.transform)
                 }
             }
 

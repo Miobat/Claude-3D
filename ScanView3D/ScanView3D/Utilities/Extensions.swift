@@ -79,18 +79,20 @@ extension simd_float4x4 {
 // MARK: - ARMeshGeometry Vertex Access
 
 extension ARMeshGeometry {
+    // Buffers hold packed float3 (12 bytes); read three floats rather than a
+    // 16-byte SIMD3 so we never read past the buffer or rely on alignment.
     func vertex(at index: UInt32) -> SIMD3<Float> {
-        assert(vertices.format == MTLVertexFormat.float3, "Expected float3 vertex format")
-        let vertexPointer = vertices.buffer.contents().advanced(by: vertices.offset + (vertices.stride * Int(index)))
-        let vertex = vertexPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-        return vertex
+        let p = vertices.buffer.contents()
+            .advanced(by: vertices.offset + vertices.stride * Int(index))
+            .assumingMemoryBound(to: Float.self)
+        return SIMD3<Float>(p[0], p[1], p[2])
     }
 
     func normal(at index: UInt32) -> SIMD3<Float> {
-        assert(normals.format == MTLVertexFormat.float3, "Expected float3 normal format")
-        let normalPointer = normals.buffer.contents().advanced(by: normals.offset + (normals.stride * Int(index)))
-        let normal = normalPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-        return normal
+        let p = normals.buffer.contents()
+            .advanced(by: normals.offset + normals.stride * Int(index))
+            .assumingMemoryBound(to: Float.self)
+        return SIMD3<Float>(p[0], p[1], p[2])
     }
 
     func vertexIndicesOf(face faceIndex: Int) -> [UInt32] {

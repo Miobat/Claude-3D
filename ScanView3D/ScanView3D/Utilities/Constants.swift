@@ -27,13 +27,4 @@ enum AppConstants {
         static let thumbnailSize: CGFloat = 60
         static let buttonHeight: CGFloat = 44
     }
-
-    enum Scanner {
-        static let defaultConfidence: Float = 0.5
-        static let maxMeshAnchors: Int = 256
-        static let meshUpdateInterval: TimeInterval = 0.1
-        static let defaultScanRange: Float = 3.0
-        static let defaultTextureCaptureInterval: TimeInterval = 0.8
-        static let maxTextureCaptureFrames: Int = 30
-    }
 }

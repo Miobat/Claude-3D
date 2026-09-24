@@ -10,7 +10,6 @@ class MockLiDARScanner: ObservableObject {
     @Published var scanProgress: String = "Ready to scan (Simulator Mode)"
     @Published var vertexCount: Int = 0
     @Published var faceCount: Int = 0
-    @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
     @Published var detectedPlaneCount: Int = 0
@@ -19,13 +18,13 @@ class MockLiDARScanner: ObservableObject {
     @Published var estimatedFileSizeMB: Double = 0
     @Published var scanCapacityPercent: Double = 0
     @Published var highResFrameCount: Int = 0
+    @Published var trackingWarning: String?
+    @Published var photoLimitReached = false
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
     private var meshData: MeshData?
-    private(set) var currentRange: ScanSettings.ScanRange = .room
     private(set) var rangeMeters: Float = 3.0
-    private var scanQuality: ScanSettings.ScanQuality = .standard
     private(set) var meshMode: ScanSettings.MeshMode = .free
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
 
@@ -44,47 +43,37 @@ class MockLiDARScanner: ObservableObject {
     }
 
     func startScanning(
-        detail: ScanSettings.MeshDetail = .medium,
         captureTexture: Bool = true,
-        range: ScanSettings.ScanRange = .room,
-        quality: ScanSettings.ScanQuality = .standard,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        confidenceLevel: Int = 1,
-        captureMode: ScanSettings.CaptureMode = .fast,
-        detailMM: Float = 10.0
+        captureMode: ScanSettings.CaptureMode = .fast
     ) {
-        self.currentRange = range
+        meshData = nil
         self.rangeMeters = rangeMeters
-        self.scanQuality = quality
         self.meshMode = meshMode
         isScanning = true
         isPaused = false
         scanError = nil
         simulatedProgress = 0
         scanProgress = "Scanning... (Simulated)"
+        startTimer()
+    }
 
-        // Simulate progressive mesh building
+    private func startTimer() {
+        scanTimer?.invalidate()
         scanTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
             guard let self = self, !self.isPaused else { return }
             self.simulatedProgress += 0.05
-
-            // Progressively increase counts to simulate real scanning
             let progress = min(self.simulatedProgress, 1.0)
-            let totalVerts = Int(Float(Self.sampleRoomVertexCount) * progress)
-            let totalFaces = Int(Float(Self.sampleRoomFaceCount) * progress)
-
-            self.vertexCount = totalVerts
-            self.faceCount = totalFaces
+            self.vertexCount = Int(Float(Self.sampleRoomVertexCount) * progress)
+            self.faceCount = Int(Float(Self.sampleRoomFaceCount) * progress)
             self.scanProgress = "Scanning... \(Int(progress * 100))%"
-
-            // Simulate frame capture count
-            self.capturedFrameCount = Int(progress * Float(quality.maxTextureFrames))
+            self.capturedFrameCount = Int(progress * 80)
 
             if self.simulatedProgress >= 1.0 {
                 self.scanTimer?.invalidate()
                 self.scanProgress = "Scan complete - \(self.vertexCount) vertices captured"
-                self.meshData = Self.generateSampleRoomMesh(range: range)
+                self.meshData = Self.generateSampleRoomMesh(range: self.rangeMeters)
             }
         }
     }
@@ -106,11 +95,18 @@ class MockLiDARScanner: ObservableObject {
         isPaused = false
 
         if meshData == nil {
-            meshData = Self.generateSampleRoomMesh(range: currentRange)
-            vertexCount = meshData!.vertexCount
-            faceCount = meshData!.faceCount
+            let mesh = Self.generateSampleRoomMesh(range: rangeMeters)
+            meshData = mesh
+            vertexCount = mesh.vertexCount
+            faceCount = mesh.faceCount
         }
         scanProgress = "Scan complete"
+    }
+
+    func continueScanning() {
+        isScanning = true
+        isPaused = false
+        scanProgress = "Scanning... (Simulated)"
     }
 
     func resetScanning() {
@@ -122,8 +118,9 @@ class MockLiDARScanner: ObservableObject {
         scanProgress = "Ready to scan (Simulator Mode)"
     }
 
-    func getCombinedMeshData() -> MeshData? {
-        return meshData ?? Self.generateSampleRoomMesh(range: currentRange)
+    func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
+        let mesh = meshData ?? Self.generateSampleRoomMesh(range: rangeMeters)
+        DispatchQueue.main.async { completion(mesh) }
     }
 
     func getPlaneBasedMeshData() -> MeshData? {
@@ -150,14 +147,14 @@ class MockLiDARScanner: ObservableObject {
     private static let sampleRoomFaceCount = 2000
 
     /// Generates a sample room mesh with floor, walls, a table, and a chair
-    static func generateSampleRoomMesh(range: ScanSettings.ScanRange = .room) -> MeshData {
+    static func generateSampleRoomMesh(range: Float = 3.0) -> MeshData {
         var vertices: [SIMD3<Float>] = []
         var normals: [SIMD3<Float>] = []
         var faces: [[UInt32]] = []
         var colors: [SIMD4<Float>] = []
 
         // Scale room based on range
-        let scale = min(range.maxDistance / 3.0, 1.0)
+        let scale = min(range / 3.0, 1.0)
 
         // Room dimensions (meters)
         let roomWidth: Float = 4.0 * scale

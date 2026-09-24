@@ -10,7 +10,6 @@ struct ModelViewerView: View {
 
     // Bumped to force the SceneKit view to rebuild (e.g. after re-reconstruction).
     @State private var reloadToken = UUID()
-    @State private var sceneView: SCNView?
     @State private var modelNode: SCNNode?
     @State private var isLoading = true
     @State private var loadError: String?
@@ -18,7 +17,7 @@ struct ModelViewerView: View {
     // Visualization
     @State private var vizMode: VisualizationMode = .textured
     @State private var cameraProjection: CameraProjection = .perspective
-    @State private var showGrid = false
+    @State private var showGrid: Bool = (UserDefaults.standard.object(forKey: "showGridByDefault") as? Bool) ?? true
     @State private var showBoundingBox = false
     @State private var showJoysticks = false
 
@@ -28,16 +27,14 @@ struct ModelViewerView: View {
     // Measurement
     @State private var measurementPoints: [SCNVector3] = []
     @State private var measurementLabels: [MeasurementLabel] = []
-    @State private var measurementUnit: ScanSettings.MeasurementUnit = .meters
+    @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
 
-    // Processing
-    @State private var showingProcessMenu = false
+    // Long-running work (re-reconstruction)
     @State private var isProcessing = false
     @State private var processingMessage = ""
 
     // Share
     @State private var showingShareSheet = false
-    @State private var showingShareMenu = false
     @State private var shareURL: URL?
 
     // More menu
@@ -46,23 +43,12 @@ struct ModelViewerView: View {
     enum ViewerTool: String, CaseIterable {
         case orbit = "Orbit"
         case measure = "Measure"
-        case inspect = "Inspect"
     }
 
     enum VisualizationMode: String, CaseIterable {
-        case flat = "Flat"
         case textured = "Textured"
-        case normals = "Normals"
+        case flat = "Flat"
         case wireframe = "Wireframe"
-
-        var icon: String {
-            switch self {
-            case .flat: return "cube.fill"
-            case .textured: return "cube.fill"
-            case .normals: return "arrow.up.right.and.arrow.down.left.rectangle.fill"
-            case .wireframe: return "cube.transparent"
-            }
-        }
     }
 
     enum CameraProjection: String, CaseIterable {
@@ -164,12 +150,14 @@ struct ModelViewerView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
                     if let node = modelNode {
+                        // boundingBox is in the node's own space; include its scale
+                        // (High-Quality models carry a metric scale correction).
                         let (minBound, maxBound) = node.boundingBox
-                        let size = SCNVector3(maxBound.x - minBound.x, maxBound.y - minBound.y, maxBound.z - minBound.z)
+                        let s = node.simdScale
                         Section("Dimensions") {
-                            Text(String(format: "Width: %.3f m", size.x))
-                            Text(String(format: "Height: %.3f m", size.y))
-                            Text(String(format: "Depth: %.3f m", size.z))
+                            Text("Width: \(measurementUnit.format(meters: Float(maxBound.x - minBound.x) * s.x))")
+                            Text("Height: \(measurementUnit.format(meters: Float(maxBound.y - minBound.y) * s.y))")
+                            Text("Depth: \(measurementUnit.format(meters: Float(maxBound.z - minBound.z) * s.z))")
                         }
                     }
                     Section("Scan Info") {
@@ -254,13 +242,17 @@ struct ModelViewerView: View {
             // Measurement display
             if !measurementLabels.isEmpty {
                 HStack {
-                    ForEach(measurementLabels.indices, id: \.self) { index in
-                        HStack(spacing: 4) {
-                            Circle().fill(Color.yellow).frame(width: 8, height: 8)
-                            Text(measurementLabels[index].text).font(.caption).fontWeight(.medium)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack {
+                            ForEach(measurementLabels) { label in
+                                HStack(spacing: 4) {
+                                    Circle().fill(Color.yellow).frame(width: 8, height: 8)
+                                    Text(label.text).font(.caption).fontWeight(.medium)
+                                }
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(Color.black.opacity(0.7)).cornerRadius(8)
+                            }
                         }
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Color.black.opacity(0.7)).cornerRadius(8)
                     }
                     Button {
                         measurementPoints.removeAll()
@@ -341,21 +333,6 @@ struct ModelViewerView: View {
                 .background(Color(white: 0.25))
                 .cornerRadius(12)
 
-                Spacer().frame(width: 8)
-
-                // Process
-                Button {
-                    showingProcessMenu = true
-                } label: {
-                    Text("Process")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .foregroundColor(.white)
-                .background(Color(white: 0.25))
-                .cornerRadius(12)
 
                 Spacer().frame(width: 8)
 
@@ -392,15 +369,8 @@ struct ModelViewerView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
         }
-        .confirmationDialog("Process Scan", isPresented: $showingProcessMenu) {
-            Button("Smooth Scan") { runProcessing(.smooth) }
-            Button("Simplify Scan (50%)") { runProcessing(.simplify) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Apply post-processing to improve scan quality")
-        }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
-            Button("Capture Floorplan Image") { captureFloorplanImage() }
+            Button("Share Top-Down Image") { captureFloorplanImage() }
             if storageManager.splatBundleURL(for: scan, in: project) != nil {
                 Button("Send Splat Bundle (.zip)") { sendSplatBundle() }
             }
@@ -453,7 +423,8 @@ struct ModelViewerView: View {
                         .scans.first(where: { $0.id == self.scan.id }) {
                         self.scan = updated
                     }
-                    NotificationCenter.default.post(name: .clearMeasurements, object: nil)
+                    self.measurementPoints.removeAll()
+                    self.measurementLabels.removeAll()
                     self.modelNode = nil
                     self.reloadToken = UUID()
                 }
@@ -496,178 +467,20 @@ struct ModelViewerView: View {
         )
     }
 
-    // MARK: - Processing Actions
-
-    private func runProcessing(_ type: ProcessingType) {
-        guard let model = modelNode else { return }
-        isProcessing = true
-        processingMessage = type == .smooth ? "Smoothing mesh..." : "Simplifying mesh..."
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Apply processing directly to the SceneKit geometry
-            func processNode(_ node: SCNNode) {
-                guard let geometry = node.geometry,
-                      let vertexSource = geometry.sources(for: .vertex).first else { return }
-
-                let vertexCount = vertexSource.vectorCount
-                guard vertexCount > 0 else { return }
-
-                // Extract vertex positions
-                let stride = vertexSource.dataStride
-                let offset = vertexSource.dataOffset
-                let data = vertexSource.data
-
-                var positions = [SCNVector3]()
-                data.withUnsafeBytes { rawPtr in
-                    let bytes = rawPtr.baseAddress!
-                    for i in 0..<vertexCount {
-                        let ptr = bytes.advanced(by: offset + stride * i)
-                        let x = ptr.assumingMemoryBound(to: Float.self).pointee
-                        let y = ptr.advanced(by: 4).assumingMemoryBound(to: Float.self).pointee
-                        let z = ptr.advanced(by: 8).assumingMemoryBound(to: Float.self).pointee
-                        positions.append(SCNVector3(x, y, z))
-                    }
-                }
-
-                // Build adjacency from geometry elements
-                var adjacency = [[Int]](repeating: [], count: vertexCount)
-                for element in geometry.elements {
-                    let indexData = element.data
-                    let bytesPerIndex = element.bytesPerIndex
-                    let primitiveCount = element.primitiveCount
-
-                    indexData.withUnsafeBytes { rawPtr in
-                        let bytes = rawPtr.baseAddress!
-                        for p in 0..<primitiveCount {
-                            var indices = [Int]()
-                            for v in 0..<3 {
-                                let ptr = bytes.advanced(by: (p * 3 + v) * bytesPerIndex)
-                                let idx: Int
-                                if bytesPerIndex == 4 {
-                                    idx = Int(ptr.assumingMemoryBound(to: UInt32.self).pointee)
-                                } else {
-                                    idx = Int(ptr.assumingMemoryBound(to: UInt16.self).pointee)
-                                }
-                                indices.append(idx)
-                            }
-                            for i in 0..<3 {
-                                for j in (i+1)..<3 {
-                                    if indices[i] < vertexCount && indices[j] < vertexCount {
-                                        adjacency[indices[i]].append(indices[j])
-                                        adjacency[indices[j]].append(indices[i])
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Apply Laplacian smoothing
-                let iterations = type == .smooth ? 3 : 1
-                let factor: Float = type == .smooth ? 0.4 : 0.2
-                var smoothed = positions
-
-                for _ in 0..<iterations {
-                    var newPositions = smoothed
-                    for i in 0..<vertexCount {
-                        let neighbors = adjacency[i]
-                        guard !neighbors.isEmpty else { continue }
-                        var avg = SCNVector3(0, 0, 0)
-                        for n in neighbors {
-                            avg.x += smoothed[n].x
-                            avg.y += smoothed[n].y
-                            avg.z += smoothed[n].z
-                        }
-                        let count = Float(neighbors.count)
-                        avg.x /= count; avg.y /= count; avg.z /= count
-                        newPositions[i].x += (avg.x - smoothed[i].x) * factor
-                        newPositions[i].y += (avg.y - smoothed[i].y) * factor
-                        newPositions[i].z += (avg.z - smoothed[i].z) * factor
-                    }
-                    smoothed = newPositions
-                }
-
-                // Create new vertex source with smoothed positions
-                let newVertexSource = SCNGeometrySource(vertices: smoothed)
-
-                // Rebuild geometry with smoothed vertices
-                var sources = [newVertexSource]
-                for source in geometry.sources(for: .normal) { sources.append(source) }
-                for source in geometry.sources(for: .color) { sources.append(source) }
-                for source in geometry.sources(for: .texcoord) { sources.append(source) }
-
-                let newGeometry = SCNGeometry(sources: sources, elements: geometry.elements)
-                newGeometry.materials = geometry.materials
-
-                DispatchQueue.main.async {
-                    node.geometry = newGeometry
-                }
-            }
-
-            // Process the model and all children
-            processNode(model)
-            model.enumerateChildNodes { child, _ in processNode(child) }
-
-            // Simulate processing time for user feedback
-            Thread.sleep(forTimeInterval: 0.5)
-
-            DispatchQueue.main.async {
-                isProcessing = false
-                processingMessage = ""
-            }
-        }
-    }
-
-    enum ProcessingType { case smooth, simplify }
-
     // MARK: - Floorplan Capture
 
+    /// Switch to a top-down orthographic view, then snapshot and share it.
     private func captureFloorplanImage() {
-        // Switch to top-down view first
         cameraProjection = .floorPlan
-        applyCameraProjection(.floorPlan)
+        NotificationCenter.default.post(name: .captureTopDownImage, object: nil)
     }
 
     // MARK: - Helpers
 
-    private func getFileURL() -> URL? {
-        return storageManager.getScanFileURL(scan: scan, project: project)
-    }
-
     private func exportAndShare() {
-        // Collect all files related to this scan for sharing
-        var shareItems: [Any] = []
-
-        if let url = storageManager.exportScan(scan, from: project) {
-            shareItems.append(url)
-
-            // Also include MTL file if OBJ
-            let mtlURL = url.deletingPathExtension().appendingPathExtension("mtl")
-            if FileManager.default.fileExists(atPath: mtlURL.path) {
-                shareItems.append(mtlURL)
-            }
-
-            // Include texture file if exists
-            if let texName = scan.textureFileName {
-                let texURL = url.deletingLastPathComponent().appendingPathComponent(texName)
-                if FileManager.default.fileExists(atPath: texURL.path) {
-                    shareItems.append(texURL)
-                }
-            }
-        }
-
-        if !shareItems.isEmpty {
-            shareURL = shareItems.first as? URL
-            // Use UIActivityViewController directly for multiple items
-            let activityVC = UIActivityViewController(activityItems: shareItems, applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                var topVC = rootVC
-                while let presented = topVC.presentedViewController { topVC = presented }
-                activityVC.popoverPresentationController?.sourceView = topVC.view
-                topVC.present(activityVC, animated: true)
-            }
-        }
+        // Textured OBJs come back as one .zip (obj + mtl + texture), others as the file itself.
+        guard let url = storageManager.exportScan(scan, from: project) else { return }
+        ShareSheetPresenter.present([url])
     }
 }
 
@@ -758,6 +571,24 @@ extension Notification.Name {
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")
     static let clearMeasurements = Notification.Name("clearMeasurements")
+    static let captureTopDownImage = Notification.Name("captureTopDownImage")
+}
+
+/// Presents the system share sheet from whatever is currently on screen.
+enum ShareSheetPresenter {
+    static func present(_ items: [Any]) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard !items.isEmpty,
+              let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first,
+              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+                ?? scene.windows.first?.rootViewController else { return }
+        var top = root
+        while let presented = top.presentedViewController { top = presented }
+        let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        activity.popoverPresentationController?.sourceView = top.view
+        activity.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 0, height: 0)
+        top.present(activity, animated: true)
+    }
 }
 
 struct ShareSheet: UIViewControllerRepresentable {

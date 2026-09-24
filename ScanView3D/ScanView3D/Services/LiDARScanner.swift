@@ -3,6 +3,7 @@ import ARKit
 import RealityKit
 import Combine
 import CoreImage
+import os
 
 /// Manages LiDAR scanning sessions using ARKit
 class LiDARScanner: NSObject, ObservableObject {
@@ -10,12 +11,9 @@ class LiDARScanner: NSObject, ObservableObject {
 
     @Published var isScanning = false
     @Published var isPaused = false
-    @Published var meshAnchors: [ARMeshAnchor] = []
-    @Published var planeAnchors: [ARPlaneAnchor] = []
     @Published var scanProgress: String = "Ready to scan"
     @Published var vertexCount: Int = 0
     @Published var faceCount: Int = 0
-    @Published var confidenceThreshold: Float = 0.5
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
     @Published var detectedPlaneCount: Int = 0
@@ -24,45 +22,55 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var estimatedFileSizeMB: Double = 0
     @Published var scanCapacityPercent: Double = 0
     @Published var highResFrameCount: Int = 0
+    /// Plain-language tracking problem ("Move slower"), or nil when tracking is good.
+    @Published var trackingWarning: String?
+    @Published var photoLimitReached = false
 
     // MARK: - Properties
 
     private(set) var arSession: ARSession
-    private var meshDetail: ScanSettings.MeshDetail = .medium
     private var captureTexture: Bool = true
-    private(set) var currentRange: ScanSettings.ScanRange = .room
     private(set) var rangeMeters: Float = 3.0
-    private var scanQuality: ScanSettings.ScanQuality = .standard
+    private let scanQuality: ScanSettings.ScanQuality = .standard
     private(set) var meshMode: ScanSettings.MeshMode = .free
     let textureMapper = TextureMapper()
     private var frameCaptureTimer: Timer?
     private var memoryMonitorTimer: Timer?
-    private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
+
+    // Anchors change several times a second, so they are deliberately not
+    // @Published: SwiftUI only needs the counts, not a re-render per update.
+    private var meshAnchorsByID: [UUID: ARMeshAnchor] = [:]
+    private var planeAnchorsByID: [UUID: ARPlaneAnchor] = [:]
+    var meshAnchors: [ARMeshAnchor] { Array(meshAnchorsByID.values) }
+    var planeAnchors: [ARPlaneAnchor] { Array(planeAnchorsByID.values) }
+
+    /// Where the device was when tracking first became reliable in this scan.
+    private(set) var scanOrigin = SIMD3<Float>(0, 0, 0)
+    private var needsOrigin = true
     private var textureCapturePaused = false
 
-    // Camera path: positions the device has visited during the scan. Used so the
-    // pre-scan range actually limits captured geometry — vertices are kept only
-    // if they're within `rangeMeters` of SOME point on the path the user walked,
-    // not just the single start position. Downsampled to ~10cm moves, capped.
+    // Camera path: geometry is kept only if the device passed within
+    // `rangeMeters` of it, so the range setting follows the walked route.
     private(set) var cameraPath: [SIMD3<Float>] = []
-    private let cameraPathMinStep: Float = 0.1
-    private let cameraPathMaxCount: Int = 600
-    // Detail/accuracy grid spacing in meters (pre-scan slider, 0.005 … 0.020).
-    private var detailMeters: Float = 0.010
+    private let cameraPathMinStep: Float = 0.2
+    private let cameraPathMaxCount = 20_000          // ~4 km of walking
+    private var anchorPathIndex = PathRangeIndex(points: [], radius: 7)
 
-    // High-Quality (Path B) full-resolution photo capture
+    // High-Quality / Splat full-resolution photo capture
     private var captureMode: ScanSettings.CaptureMode = .fast
     private var captureFolderURL: URL?
     private var lastHighResSaveTime: TimeInterval = 0
     private let highResInterval: TimeInterval = 0.25
     private let maxHighResFrames: Int = 250
+    private var pendingHighResSaves = 0
     private let ciContext = CIContext()
     private let hqSaveQueue = DispatchQueue(label: "scanview.hq.save", qos: .utility)
     private(set) var capturedPoses: [CapturedPose] = []
 
-    // Memory limits
-    private let maxMemoryUsageMB: Double = 800
-    private let criticalMemoryMB: Double = 100 // available memory threshold
+    // Memory limits (MB). "Available" is the app's real remaining budget.
+    private let maxTextureMemoryMB: Double = 800
+    private let pauseTexturesBelowMB: Double = 400
+    private let pauseScanBelowMB: Double = 200
 
     // MARK: - Initialization
 
@@ -90,7 +98,6 @@ class LiDARScanner: NSObject, ObservableObject {
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
-        // No mesh reconstruction in preview - just camera feed
         arSession.run(configuration)
         isPreviewing = true
         scanProgress = "Point camera at area to scan"
@@ -105,83 +112,40 @@ class LiDARScanner: NSObject, ObservableObject {
     // MARK: - Session Control
 
     func startScanning(
-        detail: ScanSettings.MeshDetail = .medium,
         captureTexture: Bool = true,
-        range: ScanSettings.ScanRange = .room,
-        quality: ScanSettings.ScanQuality = .standard,
         meshMode: ScanSettings.MeshMode = .free,
         rangeMeters: Float = 3.0,
-        confidenceLevel: Int = 1,
-        captureMode: ScanSettings.CaptureMode = .fast,
-        detailMM: Float = 10.0
+        captureMode: ScanSettings.CaptureMode = .fast
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
             return
         }
 
-        self.meshDetail = detail
+        clearScanData()
+
         self.captureTexture = captureTexture
         self.rangeMeters = rangeMeters
-        self.currentRange = range
-        self.scanQuality = quality
         self.meshMode = meshMode
-        self.confidenceThreshold = [0.3, 0.5, 0.7][min(confidenceLevel, 2)]
-        self.textureCapturePaused = false
-        self.detailMeters = max(0.001, detailMM / 1000.0)
-        self.cameraPath = []
-
-        // High-Quality / Splat-export: prepare a fresh folder for full-res posed photos
         self.captureMode = captureMode
-        self.highResFrameCount = 0
-        self.lastHighResSaveTime = 0
-        self.capturedPoses = []
+        anchorPathIndex = PathRangeIndex(points: [], radius: rangeMeters + 4)
+
         if captureMode == .highQuality || captureMode == .splatExport {
-            self.captureFolderURL = makeCaptureFolder()
-        } else {
-            self.captureFolderURL = nil
+            captureFolderURL = makeCaptureFolder()
         }
 
-        // Configure texture mapper
-        textureMapper.configure(quality: quality)
-        textureMapper.reset()
-        capturedFrameCount = 0
-        memoryUsageMB = 0
-        estimatedFileSizeMB = 0
-        scanCapacityPercent = 0
-
-        // Record scan origin from current camera position
-        if let frame = arSession.currentFrame {
-            let t = frame.camera.transform
-            scanOrigin = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-        } else {
-            scanOrigin = SIMD3<Float>(0, 0, 0)
-        }
-        cameraPath = [scanOrigin]
+        textureMapper.configure(quality: scanQuality)
 
         let configuration = ARWorldTrackingConfiguration()
-
-        // Enable mesh reconstruction
-        if LiDARScanner.isLiDARWithClassificationAvailable {
-            configuration.sceneReconstruction = .meshWithClassification
-        } else {
-            configuration.sceneReconstruction = .mesh
-        }
-
-        // Always enable environment texturing for camera capture
-        configuration.environmentTexturing = .automatic
-
-        // Enable plane detection for better mesh alignment
+        configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
+            ? .meshWithClassification : .mesh
         configuration.planeDetection = [.horizontal, .vertical]
-
-        // Set frame semantics for depth
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics.insert(.sceneDepth)
         }
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            configuration.frameSemantics.insert(.smoothedSceneDepth)
-        }
 
+        // Tracking restarts from scratch; the scan origin is taken from the first
+        // well-tracked frame of the NEW session (see captureCurrentFrame).
         arSession.run(configuration, options: [.removeExistingAnchors, .resetTracking])
 
         isPreviewing = false
@@ -190,7 +154,6 @@ class LiDARScanner: NSObject, ObservableObject {
         scanProgress = "Scanning... Move slowly around the area"
         scanError = nil
 
-        // Start periodic frame capture for texture mapping
         startFrameCapture()
         startMemoryMonitor()
     }
@@ -219,27 +182,49 @@ class LiDARScanner: NSObject, ObservableObject {
         stopMemoryMonitor()
     }
 
+    /// Continue a stopped (not reset) scan, keeping everything captured so far.
+    func continueScanning() {
+        guard let config = arSession.configuration, !isScanning else { return }
+        arSession.run(config)
+        isScanning = true
+        isPaused = false
+        scanProgress = "Scanning... Move slowly around the area"
+        startFrameCapture()
+        startMemoryMonitor()
+    }
+
     func resetScanning() {
         stopScanning()
-        meshAnchors.removeAll()
-        planeAnchors.removeAll()
+        clearScanData()
+        scanProgress = "Ready to scan"
+    }
+
+    /// Drop everything from the previous scan, including its temporary photo folder.
+    private func clearScanData() {
+        meshAnchorsByID.removeAll()
+        planeAnchorsByID.removeAll()
         vertexCount = 0
         faceCount = 0
+        detectedPlaneCount = 0
         capturedFrameCount = 0
         memoryUsageMB = 0
         estimatedFileSizeMB = 0
         scanCapacityPercent = 0
+        textureCapturePaused = false
         textureMapper.reset()
-        // Clean up any High-Quality capture folder
         if let folder = captureFolderURL {
             try? FileManager.default.removeItem(at: folder)
         }
         captureFolderURL = nil
         highResFrameCount = 0
+        lastHighResSaveTime = 0
         capturedPoses = []
+        photoLimitReached = false
         captureMode = .fast
         cameraPath = []
-        scanProgress = "Ready to scan"
+        needsOrigin = true
+        scanOrigin = SIMD3<Float>(0, 0, 0)
+        trackingWarning = nil
     }
 
     // MARK: - Frame Capture
@@ -260,34 +245,37 @@ class LiDARScanner: NSObject, ObservableObject {
         guard isScanning && !isPaused,
               let frame = arSession.currentFrame else { return }
 
-        // Record where the device has travelled so the range filter follows the
-        // walked path, not just the start point. Only log meaningful moves.
-        let t = frame.camera.transform
-        let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-        if let last = cameraPath.last {
-            if length(camPos - last) >= cameraPathMinStep && cameraPath.count < cameraPathMaxCount {
-                cameraPath.append(camPos)
-            }
-        } else {
+        // Poses are unreliable while tracking is limited (starting up, moving too
+        // fast, too dark). Capturing then produces smeared textures and bad photos.
+        guard case .normal = frame.camera.trackingState else { return }
+
+        let camPos = frame.camera.transform.position
+        if needsOrigin {
+            scanOrigin = camPos
+            cameraPath = [camPos]
+            anchorPathIndex.insert(camPos)
+            needsOrigin = false
+        } else if let last = cameraPath.last,
+                  simd_distance(camPos, last) >= cameraPathMinStep,
+                  cameraPath.count < cameraPathMaxCount {
             cameraPath.append(camPos)
+            anchorPathIndex.insert(camPos)
         }
 
-        // Path A / Point Cloud: downscaled frames for color sampling
-        // (skipped only in High-Quality photogrammetry mode)
+        // Downscaled frames for colour (all modes except High-Quality photogrammetry)
         if captureMode != .highQuality && captureTexture && !textureCapturePaused {
-            textureMapper.captureFrame(from: frame)
-            DispatchQueue.main.async {
-                self.capturedFrameCount = self.textureMapper.frameCount
+            textureMapper.captureFrame(from: frame) { [weak self] count in
+                self?.capturedFrameCount = count
             }
         }
 
-        // Path B / Splat export: full-resolution posed photos saved to disk
+        // Full-resolution posed photos (High-Quality and Splat)
         if captureMode == .highQuality || captureMode == .splatExport {
             saveHighResFrame(frame)
         }
     }
 
-    // MARK: - High-Quality Capture (Path B)
+    // MARK: - High-Quality Capture
 
     private func makeCaptureFolder() -> URL? {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
@@ -302,14 +290,25 @@ class LiDARScanner: NSObject, ObservableObject {
 
     private func saveHighResFrame(_ frame: ARFrame) {
         guard let folder = captureFolderURL else { return }
+
+        if highResFrameCount >= maxHighResFrames {
+            if !photoLimitReached {
+                photoLimitReached = true
+                scanProgress = "Photo limit reached (\(maxHighResFrames)) — tap Stop to save"
+            }
+            return
+        }
+
         let now = frame.timestamp
-        guard now - lastHighResSaveTime >= highResInterval, highResFrameCount < maxHighResFrames else { return }
+        guard now - lastHighResSaveTime >= highResInterval else { return }
+        // Don't queue up camera buffers if encoding falls behind: holding ARFrame
+        // buffers starves ARKit and makes the camera feed stutter.
+        guard pendingHighResSaves < 2 else { return }
         lastHighResSaveTime = now
 
         let index = highResFrameCount
         highResFrameCount = index + 1
 
-        // Record this keyframe's pose + intrinsics (for desktop splat export)
         let pixelBuffer = frame.capturedImage
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
@@ -321,25 +320,19 @@ class LiDARScanner: NSObject, ObservableObject {
             height: h
         ))
 
-        // Save full-res JPEG with EXIF metadata (focal length + gravity).
-        // PhotogrammetrySession requires this metadata to reconstruct.
+        // JPEG with EXIF focal length — PhotogrammetrySession needs it.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let url = folder.appendingPathComponent(String(format: "frame_%04d.jpg", index))
-        let intrinsics = frame.camera.intrinsics
-        let gravity = frame.camera.transform // used for orientation
-        let focalLengthPx = Double(intrinsics[0][0]) // fx in pixels
-
-        // Approximate 35mm-equivalent focal length.
-        // iPhone sensor width ~6.17mm; 35mm film width = 36mm
-        let sensorWidthMM = 6.17
+        let focalLengthPx = Double(frame.camera.intrinsics[0][0])
+        let sensorWidthMM = 6.17   // approximate iPhone wide-camera sensor width
         let physicalFocalMM = focalLengthPx * sensorWidthMM / Double(w)
         let focalLength35mm = physicalFocalMM * 36.0 / sensorWidthMM
 
+        pendingHighResSaves += 1
         hqSaveQueue.async { [ciContext] in
-            let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-
-            guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+            defer { DispatchQueue.main.async { self.pendingHighResSaves -= 1 } }
+            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
+                  let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
 
             let exif: [CFString: Any] = [
                 kCGImagePropertyExifFocalLength: physicalFocalMM,
@@ -354,14 +347,10 @@ class LiDARScanner: NSObject, ObservableObject {
             let properties: [CFString: Any] = [
                 kCGImagePropertyExifDictionary: exif,
                 kCGImagePropertyTIFFDictionary: tiff,
-                kCGImagePropertyOrientation: 1, // top-left
-                kCGImagePropertyDPIWidth: 72,
-                kCGImagePropertyDPIHeight: 72
+                kCGImagePropertyOrientation: 1,
+                kCGImageDestinationLossyCompressionQuality: 0.9
             ]
-
             CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
-            let opts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.9]
-            CGImageDestinationSetProperties(dest, opts as CFDictionary)
             CGImageDestinationFinalize(dest)
         }
     }
@@ -394,252 +383,184 @@ class LiDARScanner: NSObject, ObservableObject {
 
     private func updateMemoryStats() {
         let textureMemoryMB = textureMapper.estimatedMemoryUsageMB
-        let meshMemoryMB = Double(vertexCount * 48 + faceCount * 12) / (1024.0 * 1024.0) // rough estimate
+        let meshMemoryMB = Double(vertexCount * 48 + faceCount * 12) / (1024.0 * 1024.0)
         let totalMB = textureMemoryMB + meshMemoryMB
-
-        // Estimate file size: vertices * ~80 bytes (pos + normal + color + uv) + faces * ~30 bytes
         let estFileMB = Double(vertexCount * 80 + faceCount * 30) / (1024.0 * 1024.0)
-        // Add texture atlas size estimate
-        let textureSizeMB = textureMapper.estimatedAtlasSizeMB
+        let available = Self.availableMemoryMB()
 
-        // Available memory check
-        let availableMemory = Self.availableMemoryMB()
+        memoryUsageMB = totalMB
+        estimatedFileSizeMB = estFileMB + textureMapper.estimatedAtlasSizeMB
+        // Capacity = share of the app's real memory budget in use.
+        scanCapacityPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
 
-        DispatchQueue.main.async {
-            self.memoryUsageMB = totalMB
-            self.estimatedFileSizeMB = estFileMB + textureSizeMB
+        if (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
+            textureCapturePaused = true
+            scanProgress = "Photo capture paused (memory) — scan continues"
+            DebugLogger.shared.warn("Texture capture paused: available=\(Int(available))MB", category: "Scanner")
+        }
 
-            // Capacity is based on memory pressure
-            let memoryPressure = totalMB / self.maxMemoryUsageMB
-            self.scanCapacityPercent = min(memoryPressure * 100, 100)
-
-            // Auto-pause texture capture if memory is getting tight (scan continues)
-            if availableMemory < self.criticalMemoryMB || totalMB > self.maxMemoryUsageMB {
-                if !self.textureCapturePaused {
-                    self.textureCapturePaused = true
-                    self.scanProgress = "Photo capture paused (memory) - scan continues"
-                    DebugLogger.shared.warn("Texture capture paused: available=\(Int(availableMemory))MB, used=\(Int(totalMB))MB", category: "Scanner")
-                }
-            }
-
-            // Critical: only stop if truly about to crash (very low memory)
-            if availableMemory < 50 {
-                self.scanProgress = "Low memory - stopping scan"
-                DebugLogger.shared.error("Critical memory: \(Int(availableMemory))MB available, force stopping", category: "Scanner")
-                self.stopScanning()
-            }
+        // Pause (not stop) so the user can still tap Stop and save everything.
+        if available < pauseScanBelowMB && !isPaused {
+            pauseScanning()
+            scanProgress = "Memory nearly full — tap Stop to save"
+            scanError = "Your phone is running out of memory, so scanning was paused. Tap Stop to save what you have."
+            DebugLogger.shared.error("Low memory: \(Int(available))MB available, pausing", category: "Scanner")
         }
     }
 
+    /// Memory the app can still use before iOS terminates it (MB).
     static func availableMemoryMB() -> Double {
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-        let result = withUnsafeMutablePointer(to: &info) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-            }
-        }
-        if result == KERN_SUCCESS {
-            let usedMB = Double(info.resident_size) / (1024.0 * 1024.0)
-            let totalMB = Double(ProcessInfo.processInfo.physicalMemory) / (1024.0 * 1024.0)
-            return totalMB - usedMB
-        }
-        return 500 // fallback assumption
+        let bytes = os_proc_available_memory()
+        return bytes > 0 ? Double(bytes) / 1_048_576 : 1024
     }
 
     // MARK: - Mesh Data Access
 
-    /// True if `p` is within `maxDist` of ANY position on the walked camera path.
-    /// This makes the pre-scan range actually limit captured geometry: a point is
-    /// kept only if the device passed within range of it while scanning, so a
-    /// small range trims far walls/clutter even as the user moves around.
-    private func isWithinRangeOfPath(_ p: SIMD3<Float>, maxDist: Float) -> Bool {
-        let maxSq = maxDist * maxDist
-        // Fall back to scan origin if the path hasn't been populated yet.
-        if cameraPath.isEmpty {
-            return distance_squared(p, scanOrigin) <= maxSq
+    /// Combine the scan into one mesh on a background queue.
+    /// Anchor data is snapshotted on the main thread first, so it is safe to call
+    /// while ARKit is still delivering updates.
+    func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
+        let anchors = meshAnchors
+        let path = cameraPath.isEmpty ? [scanOrigin] : cameraPath
+        let range = rangeMeters
+        let mode = meshMode
+        let wantCameraColors = captureTexture
+        let mapper = textureMapper
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var mesh = LiDARScanner.combine(anchors: anchors, path: path, range: range, meshMode: mode)
+            if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
+                let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals)
+                mesh = MeshData(vertices: m.vertices, normals: m.normals, faces: m.faces, colors: colors,
+                                boundingBoxMin: m.boundingBoxMin, boundingBoxMax: m.boundingBoxMax)
+            }
+            DispatchQueue.main.async { completion(mesh) }
         }
-        for c in cameraPath {
-            if distance_squared(p, c) <= maxSq { return true }
-        }
-        return false
     }
 
-    /// Returns all mesh data combined from all anchors, filtered by scan range
-    func getCombinedMeshData() -> MeshData? {
-        guard !meshAnchors.isEmpty else { return nil }
-
-        let maxDist = rangeMeters
+    /// Merge anchors into world space, keeping triangles within `range` of the
+    /// walked path whose ARKit classification passes the mesh mode.
+    private static func combine(anchors: [ARMeshAnchor], path: [SIMD3<Float>], range: Float,
+                                meshMode: ScanSettings.MeshMode) -> MeshData? {
+        guard !anchors.isEmpty else { return nil }
+        let vertexIndex = PathRangeIndex(points: path, radius: range)
+        let anchorIndex = PathRangeIndex(points: path, radius: range + 4)
 
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
         var allFaces: [[UInt32]] = []
         var allColors: [SIMD4<Float>] = []
-        var vertexOffset: UInt32 = 0
 
-        for anchor in meshAnchors {
-            let geometry = anchor.geometry
+        for anchor in anchors {
             let transform = anchor.transform
+            // Anchor blocks span a few metres; skip ones the camera never came near.
+            guard anchorIndex.contains(transform.position) else { continue }
 
-            // Cull whole anchors that the camera never came near (generous margin
-            // since an anchor block spans several metres).
-            let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-            if !isWithinRangeOfPath(anchorPos, maxDist: maxDist + 4.0) { continue }
-
-            var localVertices: [SIMD3<Float>] = []
-            var localNormals: [SIMD3<Float>] = []
-            var localColors: [SIMD4<Float>] = []
-            var vertexInRange = [Bool]()
-            var localIndexMap = [UInt32](repeating: 0, count: geometry.vertices.count)
-
-            for i in 0..<geometry.vertices.count {
-                let localVertex = geometry.vertex(at: UInt32(i))
-                let worldVertex4 = transform * SIMD4<Float>(localVertex.x, localVertex.y, localVertex.z, 1.0)
-                let worldVertex = SIMD3<Float>(worldVertex4.x, worldVertex4.y, worldVertex4.z)
-
-                if isWithinRangeOfPath(worldVertex, maxDist: maxDist) {
-                    localIndexMap[i] = UInt32(localVertices.count)
-                    localVertices.append(worldVertex)
-                    vertexInRange.append(true)
-
-                    let localNormal = geometry.normal(at: UInt32(i))
-                    let rotationMatrix = simd_float3x3(
-                        SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
-                        SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
-                        SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
-                    )
-                    let worldNormal = rotationMatrix * localNormal
-                    localNormals.append(worldNormal)
-
-                    // Get classification for mesh mode filtering
-                    var classIndex: UInt8 = 0
-                    if let classification = anchor.geometry.classification {
-                        classIndex = classification.buffer.contents()
-                            .advanced(by: classification.offset + classification.stride * Int(i))
-                            .assumingMemoryBound(to: UInt8.self).pointee
-                    }
-
-                    // Apply mesh mode filter
-                    if !meshMode.shouldIncludeVertex(classification: classIndex) {
-                        vertexInRange.append(false)
-                        continue
-                    }
-
-                    localColors.append(colorForClassification(classIndex))
-                } else {
-                    vertexInRange.append(false)
-                }
-            }
-
-            for f in 0..<geometry.faces.count {
-                let indices = geometry.vertexIndicesOf(face: f)
-                let allInRange = indices.allSatisfy { idx in
-                    Int(idx) < vertexInRange.count && vertexInRange[Int(idx)]
-                }
-                guard allInRange else { continue }
-                let mappedIndices = indices.map { localIndexMap[Int($0)] + vertexOffset }
-                allFaces.append(mappedIndices)
-            }
-
-            allVertices.append(contentsOf: localVertices)
-            allNormals.append(contentsOf: localNormals)
-            allColors.append(contentsOf: localColors)
-            vertexOffset += UInt32(localVertices.count)
-        }
-
-        guard !allVertices.isEmpty else { return nil }
-
-        // Replace classification colors with camera colors if available
-        if captureTexture && textureMapper.frameCount > 0 {
-            let cameraColors = textureMapper.sampleVertexColors(vertices: allVertices, normals: allNormals)
-            allColors = cameraColors
-        }
-
-        var minBound = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxBound = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        for vertex in allVertices {
-            minBound = min(minBound, vertex)
-            maxBound = max(maxBound, vertex)
-        }
-
-        return MeshData(
-            vertices: allVertices,
-            normals: allNormals,
-            faces: allFaces,
-            colors: allColors,
-            boundingBoxMin: minBound,
-            boundingBoxMax: maxBound
-        )
-    }
-
-    /// Build clean room geometry from detected planes (for Area mode)
-    func getPlaneBasedMeshData() -> MeshData? {
-        guard !planeAnchors.isEmpty else { return nil }
-
-        let maxDist = rangeMeters
-        var allVertices: [SIMD3<Float>] = []
-        var allNormals: [SIMD3<Float>] = []
-        var allFaces: [[UInt32]] = []
-        var allColors: [SIMD4<Float>] = []
-
-        for plane in planeAnchors {
-            let transform = plane.transform
-            let planeCenter = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-
-            // Range check (against the walked path)
-            if !isWithinRangeOfPath(planeCenter, maxDist: maxDist) { continue }
-
-            // Get plane extent
-            let extent = plane.extent
-            let hw = extent.x / 2.0
-            let hz = extent.z / 2.0
-
-            // Color based on plane classification
-            let color: SIMD4<Float>
-            switch plane.classification {
-            case .floor:
-                color = SIMD4<Float>(0.6, 0.6, 0.65, 1.0)
-            case .ceiling:
-                color = SIMD4<Float>(0.85, 0.85, 0.9, 1.0)
-            case .wall:
-                color = SIMD4<Float>(0.9, 0.9, 0.85, 1.0)
-            case .door:
-                color = SIMD4<Float>(0.55, 0.35, 0.15, 1.0)
-            case .window:
-                color = SIMD4<Float>(0.5, 0.7, 0.9, 1.0)
-            default:
-                // Skip non-structural planes
-                continue
-            }
-
-            // Build a subdivided quad for the plane (subdivisions help with lighting)
-            let subdivisions = 4
-            let baseIndex = UInt32(allVertices.count)
-
-            // Get plane normal in world space
-            let localNormal = SIMD3<Float>(0, 1, 0) // ARKit planes face up in local space
-            let rotationMatrix = simd_float3x3(
+            let geometry = anchor.geometry
+            let vertexCount = geometry.vertices.count
+            let rotation = simd_float3x3(
                 SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
                 SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
                 SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
             )
-            let worldNormal = normalize(rotationMatrix * localNormal)
 
-            // Generate vertices in a grid
+            var world = [SIMD3<Float>](repeating: .zero, count: vertexCount)
+            var inRange = [Bool](repeating: false, count: vertexCount)
+            for i in 0..<vertexCount {
+                let v = geometry.vertex(at: UInt32(i))
+                let w = transform * SIMD4<Float>(v.x, v.y, v.z, 1)
+                world[i] = SIMD3<Float>(w.x, w.y, w.z)
+                inRange[i] = vertexIndex.contains(world[i])
+            }
+
+            // ARKit classifies FACES (one UInt8 per triangle), not vertices.
+            let classification = geometry.classification
+            var localIndex = [Int32](repeating: -1, count: vertexCount)
+
+            for f in 0..<geometry.faces.count {
+                let indices = geometry.vertexIndicesOf(face: f)
+                guard indices.count == 3,
+                      indices.allSatisfy({ Int($0) < vertexCount && inRange[Int($0)] }) else { continue }
+
+                var faceClass: UInt8 = 0
+                if let c = classification {
+                    faceClass = c.buffer.contents()
+                        .advanced(by: c.offset + c.stride * f)
+                        .assumingMemoryBound(to: UInt8.self).pointee
+                }
+                guard meshMode.includes(classification: faceClass) else { continue }
+
+                var mapped: [UInt32] = []
+                mapped.reserveCapacity(3)
+                for vi in indices {
+                    let v = Int(vi)
+                    if localIndex[v] < 0 {
+                        localIndex[v] = Int32(allVertices.count)
+                        allVertices.append(world[v])
+                        let n = rotation * geometry.normal(at: vi)
+                        let len = simd_length(n)
+                        allNormals.append(len > 1e-6 ? n / len : SIMD3<Float>(0, 1, 0))
+                        allColors.append(colorForClassification(faceClass))
+                    }
+                    mapped.append(UInt32(localIndex[v]))
+                }
+                allFaces.append(mapped)
+            }
+        }
+
+        guard !allVertices.isEmpty else { return nil }
+        let (minB, maxB) = MeshData.bounds(of: allVertices)
+        return MeshData(vertices: allVertices, normals: allNormals, faces: allFaces, colors: allColors,
+                        boundingBoxMin: minB, boundingBoxMax: maxB)
+    }
+
+    /// Build clean room geometry from detected planes (for Area mode)
+    func getPlaneBasedMeshData() -> MeshData? {
+        let planes = planeAnchors
+        guard !planes.isEmpty else { return nil }
+
+        let index = PathRangeIndex(points: cameraPath.isEmpty ? [scanOrigin] : cameraPath, radius: rangeMeters)
+        var allVertices: [SIMD3<Float>] = []
+        var allNormals: [SIMD3<Float>] = []
+        var allFaces: [[UInt32]] = []
+        var allColors: [SIMD4<Float>] = []
+
+        for plane in planes {
+            let transform = plane.transform
+            guard index.contains(transform.position) else { continue }
+
+            let color: SIMD4<Float>
+            switch plane.classification {
+            case .floor: color = SIMD4<Float>(0.6, 0.6, 0.65, 1.0)
+            case .ceiling: color = SIMD4<Float>(0.85, 0.85, 0.9, 1.0)
+            case .wall: color = SIMD4<Float>(0.9, 0.9, 0.85, 1.0)
+            case .door: color = SIMD4<Float>(0.55, 0.35, 0.15, 1.0)
+            case .window: color = SIMD4<Float>(0.5, 0.7, 0.9, 1.0)
+            default: continue   // non-structural planes
+            }
+
+            let hw = plane.extent.x / 2.0
+            let hz = plane.extent.z / 2.0
+            let subdivisions = 4
+            let baseIndex = UInt32(allVertices.count)
+            let rotation = simd_float3x3(
+                SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+                SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+                SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+            )
+            let worldNormal = simd_normalize(rotation * SIMD3<Float>(0, 1, 0))
+
             for row in 0...subdivisions {
                 for col in 0...subdivisions {
                     let lx = -hw + (2.0 * hw) * Float(col) / Float(subdivisions)
                     let lz = -hz + (2.0 * hz) * Float(row) / Float(subdivisions)
-                    let localPos = SIMD4<Float>(plane.center.x + lx, plane.center.y, plane.center.z + lz, 1.0)
-                    let worldPos = transform * localPos
-
+                    let worldPos = transform * SIMD4<Float>(plane.center.x + lx, plane.center.y, plane.center.z + lz, 1.0)
                     allVertices.append(SIMD3<Float>(worldPos.x, worldPos.y, worldPos.z))
                     allNormals.append(worldNormal)
                     allColors.append(color)
                 }
             }
 
-            // Generate faces
             let stride = UInt32(subdivisions + 1)
             for row in 0..<UInt32(subdivisions) {
                 for col in 0..<UInt32(subdivisions) {
@@ -654,168 +575,126 @@ class LiDARScanner: NSObject, ObservableObject {
         }
 
         guard !allVertices.isEmpty else { return nil }
-
-        var minB = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-        var maxB = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
-        for v in allVertices {
-            minB = min(minB, v)
-            maxB = max(maxB, v)
-        }
-
-        return MeshData(
-            vertices: allVertices,
-            normals: allNormals,
-            faces: allFaces,
-            colors: allColors,
-            boundingBoxMin: minB,
-            boundingBoxMax: maxB
-        )
+        let (minB, maxB) = MeshData.bounds(of: allVertices)
+        return MeshData(vertices: allVertices, normals: allNormals, faces: allFaces, colors: allColors,
+                        boundingBoxMin: minB, boundingBoxMax: maxB)
     }
 
-    /// Bake a high-resolution UV texture atlas for the current mesh data.
+    /// Bake a high-resolution UV texture atlas for the given mesh (any thread).
     func bakeTexture(meshData: MeshData) -> BakedTexture? {
-        return textureMapper.bakeTexture(
-            meshData: meshData,
-            atlasSize: scanQuality.bakeAtlasSize
-        )
+        textureMapper.bakeTexture(meshData: meshData, atlasSize: scanQuality.bakeAtlasSize)
     }
 
-    /// Returns the current camera frame for texture capture
-    func getCurrentFrame() -> ARFrame? {
-        return arSession.currentFrame
-    }
+    // MARK: - Counts for display
 
-    // MARK: - Filtered counts for display
-
-    /// Get vertex/face counts respecting the range filter
-    func getFilteredCounts() -> (vertices: Int, faces: Int) {
+    private func updateMeshCounts() {
         var totalVertices = 0
         var totalFaces = 0
-        let maxDist = rangeMeters
-
-        for anchor in meshAnchors {
-            let transform = anchor.transform
-            let anchorPos = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
-            let anchorDist = length(anchorPos - scanOrigin)
-            if anchorDist <= maxDist + 2.0 {
-                totalVertices += anchor.geometry.vertices.count
-                totalFaces += anchor.geometry.faces.count
-            }
+        for anchor in meshAnchorsByID.values where anchorPathIndex.contains(anchor.transform.position) {
+            totalVertices += anchor.geometry.vertices.count
+            totalFaces += anchor.geometry.faces.count
         }
-
-        return (totalVertices, totalFaces)
+        if totalVertices != vertexCount { vertexCount = totalVertices }
+        if totalFaces != faceCount { faceCount = totalFaces }
     }
 
     // MARK: - Helpers
 
-    private func colorForClassification(_ classIndex: UInt8) -> SIMD4<Float> {
+    private static func colorForClassification(_ classIndex: UInt8) -> SIMD4<Float> {
         switch ARMeshClassification(rawValue: Int(classIndex)) {
-        case .ceiling:
-            return SIMD4<Float>(0.8, 0.8, 0.9, 1.0)
-        case .door:
-            return SIMD4<Float>(0.6, 0.4, 0.2, 1.0)
-        case .floor:
-            return SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
-        case .seat:
-            return SIMD4<Float>(0.3, 0.6, 0.3, 1.0)
-        case .table:
-            return SIMD4<Float>(0.6, 0.4, 0.1, 1.0)
-        case .wall:
-            return SIMD4<Float>(0.9, 0.9, 0.85, 1.0)
-        case .window:
-            return SIMD4<Float>(0.5, 0.7, 0.9, 1.0)
-        default:
-            return SIMD4<Float>(0.7, 0.7, 0.7, 1.0)
+        case .ceiling: return SIMD4<Float>(0.8, 0.8, 0.9, 1.0)
+        case .door: return SIMD4<Float>(0.6, 0.4, 0.2, 1.0)
+        case .floor: return SIMD4<Float>(0.5, 0.5, 0.5, 1.0)
+        case .seat: return SIMD4<Float>(0.3, 0.6, 0.3, 1.0)
+        case .table: return SIMD4<Float>(0.6, 0.4, 0.1, 1.0)
+        case .wall: return SIMD4<Float>(0.9, 0.9, 0.85, 1.0)
+        case .window: return SIMD4<Float>(0.5, 0.7, 0.9, 1.0)
+        default: return SIMD4<Float>(0.7, 0.7, 0.7, 1.0)
         }
     }
 
-    private func updateMeshCounts() {
-        let filtered = getFilteredCounts()
-        self.vertexCount = filtered.vertices
-        self.faceCount = filtered.faces
+    static func trackingMessage(for state: ARCamera.TrackingState) -> String? {
+        switch state {
+        case .normal:
+            return nil
+        case .notAvailable:
+            return "Tracking unavailable"
+        case .limited(let reason):
+            switch reason {
+            case .excessiveMotion: return "Move slower"
+            case .insufficientFeatures: return "Too little detail — add light or aim at textured surfaces"
+            case .initializing: return "Starting up — move the phone slowly"
+            case .relocalizing: return "Finding position — return to where you were"
+            @unknown default: return "Tracking limited"
+            }
+        }
     }
 }
 
 // MARK: - ARSessionDelegate
+// Delegate callbacks arrive on the main queue (ARSession.delegateQueue is nil).
 
 extension LiDARScanner: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        let newMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        let newPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
-        DispatchQueue.main.async {
-            if !newMeshAnchors.isEmpty {
-                self.meshAnchors.append(contentsOf: newMeshAnchors)
-                self.updateMeshCounts()
-            }
-            if !newPlaneAnchors.isEmpty {
-                self.planeAnchors.append(contentsOf: newPlaneAnchors)
-                self.detectedPlaneCount = self.planeAnchors.count
-            }
-        }
+        handle(anchors: anchors)
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        let updatedMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        let updatedPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
-        DispatchQueue.main.async {
-            for updated in updatedMeshAnchors {
-                if let index = self.meshAnchors.firstIndex(where: { $0.identifier == updated.identifier }) {
-                    self.meshAnchors[index] = updated
-                }
+        handle(anchors: anchors)
+    }
+
+    private func handle(anchors: [ARAnchor]) {
+        guard isScanning else { return }
+        var meshChanged = false
+        var planesChanged = false
+        for anchor in anchors {
+            if let mesh = anchor as? ARMeshAnchor {
+                meshAnchorsByID[mesh.identifier] = mesh
+                meshChanged = true
+            } else if let plane = anchor as? ARPlaneAnchor {
+                planeAnchorsByID[plane.identifier] = plane
+                planesChanged = true
             }
-            for updated in updatedPlaneAnchors {
-                if let index = self.planeAnchors.firstIndex(where: { $0.identifier == updated.identifier }) {
-                    self.planeAnchors[index] = updated
-                } else {
-                    self.planeAnchors.append(updated)
-                }
-            }
-            if !updatedMeshAnchors.isEmpty { self.updateMeshCounts() }
-            if !updatedPlaneAnchors.isEmpty { self.detectedPlaneCount = self.planeAnchors.count }
+        }
+        if meshChanged { updateMeshCounts() }
+        if planesChanged && detectedPlaneCount != planeAnchorsByID.count {
+            detectedPlaneCount = planeAnchorsByID.count
         }
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
-        let removedMeshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
-        let removedPlaneAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
-        DispatchQueue.main.async {
-            if !removedMeshAnchors.isEmpty {
-                self.meshAnchors.removeAll { anchor in
-                    removedMeshAnchors.contains { $0.identifier == anchor.identifier }
-                }
-                self.updateMeshCounts()
-            }
-            if !removedPlaneAnchors.isEmpty {
-                self.planeAnchors.removeAll { anchor in
-                    removedPlaneAnchors.contains { $0.identifier == anchor.identifier }
-                }
-                self.detectedPlaneCount = self.planeAnchors.count
-            }
+        var meshChanged = false
+        for anchor in anchors {
+            if meshAnchorsByID.removeValue(forKey: anchor.identifier) != nil { meshChanged = true }
+            planeAnchorsByID.removeValue(forKey: anchor.identifier)
         }
+        if meshChanged { updateMeshCounts() }
+        detectedPlaneCount = planeAnchorsByID.count
+    }
+
+    func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        let message = LiDARScanner.trackingMessage(for: camera.trackingState)
+        if message != trackingWarning { trackingWarning = message }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
-        DispatchQueue.main.async {
-            self.scanError = "AR Session Error: \(error.localizedDescription)"
-            self.isScanning = false
-        }
+        scanError = "AR Session Error: \(error.localizedDescription)"
+        if isScanning { pauseScanning() }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
-        DispatchQueue.main.async {
-            self.scanProgress = "Session interrupted"
-            self.isPaused = true
-        }
+        scanProgress = "Session interrupted"
+        isPaused = true
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
-        DispatchQueue.main.async {
-            self.scanProgress = "Resuming scan..."
-            self.isPaused = false
-        }
+        scanProgress = "Resuming scan..."
+        isPaused = false
     }
 }
 #endif
+
+// MARK: - Shared types (device + simulator)
 
 /// Combined mesh data from all scan anchors
 struct MeshData {
@@ -831,5 +710,56 @@ struct MeshData {
 
     var dimensions: SIMD3<Float> {
         return boundingBoxMax - boundingBoxMin
+    }
+
+    static func bounds(of points: [SIMD3<Float>]) -> (SIMD3<Float>, SIMD3<Float>) {
+        guard var minB = points.first else { return (.zero, .zero) }
+        var maxB = minB
+        for p in points {
+            minB = simd_min(minB, p)
+            maxB = simd_max(maxB, p)
+        }
+        return (minB, maxB)
+    }
+}
+
+/// Answers "is this point within `radius` of any path point?" in roughly constant
+/// time, using a hash grid with cell size = radius (only 27 cells are checked).
+struct PathRangeIndex {
+    private let radius: Float
+    private let radiusSq: Float
+    private var cells: [SIMD3<Int32>: [SIMD3<Float>]] = [:]
+
+    init(points: [SIMD3<Float>], radius: Float) {
+        self.radius = max(radius, 0.01)
+        self.radiusSq = self.radius * self.radius
+        for p in points { insert(p) }
+    }
+
+    mutating func insert(_ p: SIMD3<Float>) {
+        guard let k = cellKey(p) else { return }
+        cells[k, default: []].append(p)
+    }
+
+    func contains(_ p: SIMD3<Float>) -> Bool {
+        guard let k = cellKey(p) else { return false }
+        for dx: Int32 in -1...1 {
+            for dy: Int32 in -1...1 {
+                for dz: Int32 in -1...1 {
+                    guard let bucket = cells[SIMD3<Int32>(k.x + dx, k.y + dy, k.z + dz)] else { continue }
+                    for c in bucket where simd_distance_squared(c, p) <= radiusSq {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    private func cellKey(_ p: SIMD3<Float>) -> SIMD3<Int32>? {
+        let s = p / radius
+        guard s.x.isFinite, s.y.isFinite, s.z.isFinite,
+              abs(s.x) < 1e6, abs(s.y) < 1e6, abs(s.z) < 1e6 else { return nil }
+        return SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
     }
 }

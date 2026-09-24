@@ -38,6 +38,27 @@ class StorageManager: ObservableObject {
         try? fileManager.createDirectory(at: scansDirectory, withIntermediateDirectories: true)
     }
 
+    // MARK: - Threading
+
+    /// `projects` drives SwiftUI, so it may only change on the main thread.
+    /// Saving runs on background queues and hops here for the bookkeeping.
+    private func onMain<T>(_ work: () -> T) -> T {
+        if Thread.isMainThread { return work() }
+        return DispatchQueue.main.sync(execute: work)
+    }
+
+    private func addScan(_ scan: Scan, to project: Project) {
+        onMain {
+            if let index = projects.firstIndex(where: { $0.id == project.id }) {
+                projects[index].addScan(scan)
+                if scan.thumbnailData != nil {
+                    projects[index].thumbnailData = scan.thumbnailData
+                }
+                saveProjects()
+            }
+        }
+    }
+
     // MARK: - Project CRUD
 
     func loadProjects() {
@@ -188,18 +209,7 @@ class StorageManager: ObservableObject {
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
-        // Add scan to project
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].addScan(scan)
-
-            // Update project thumbnail with latest scan
-            if scan.thumbnailData != nil {
-                projects[index].thumbnailData = scan.thumbnailData
-            }
-
-            saveProjects()
-        }
-
+        addScan(scan, to: project)
         return scan
     }
 
@@ -249,13 +259,7 @@ class StorageManager: ObservableObject {
             }
         }
 
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].addScan(scan)
-            if scan.thumbnailData != nil {
-                projects[index].thumbnailData = scan.thumbnailData
-            }
-            saveProjects()
-        }
+        addScan(scan, to: project)
         return scan
     }
 
@@ -282,35 +286,48 @@ class StorageManager: ObservableObject {
         let dest = scanDir.appendingPathComponent("\(scanID.uuidString)_bundle.zip")
         try? fileManager.removeItem(at: dest)
         guard (try? fileManager.copyItem(at: zipURL, to: dest)) != nil else { return }
-        if let pi = projects.firstIndex(where: { $0.id == project.id }),
-           let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) {
-            projects[pi].scans[si].splatBundleName = dest.lastPathComponent
-            saveProjects()
+        onMain {
+            if let pi = projects.firstIndex(where: { $0.id == project.id }),
+               let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) {
+                projects[pi].scans[si].splatBundleName = dest.lastPathComponent
+                saveProjects()
+            }
         }
     }
 
     /// Replace a photogrammetry scan's model file in place (used by re-reconstruct).
     func replacePhotogrammetryModel(scanID: UUID, in project: Project,
                                     newModelURL: URL, modelScale: Float?) throws {
-        guard let pi = projects.firstIndex(where: { $0.id == project.id }),
-              let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
+        guard let fileName = onMain({
+            projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scanID })?.fileName
+        }) else { return }
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        let fileName = projects[pi].scans[si].fileName
         let destURL = scanDir.appendingPathComponent(fileName)
         try? fileManager.removeItem(at: destURL)
         try fileManager.copyItem(at: newModelURL, to: destURL)
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
-        projects[pi].scans[si].fileSize = fileSize
-        projects[pi].scans[si].modelScale = modelScale
-        projects[pi].scans[si].thumbnailData = generateThumbnail(fromModelURL: destURL)
+        let thumbnail = generateThumbnail(fromModelURL: destURL)
+        var bounds: (SIMD3<Float>, SIMD3<Float>)?
         if let scene = try? SCNScene(url: destURL, options: [.checkConsistency: false]) {
             let (mn, mx) = scene.rootNode.flattenedClone().boundingBox
             let s = modelScale ?? 1.0
-            projects[pi].scans[si].boundingBoxMin = SIMD3<Float>(Float(mn.x) * s, Float(mn.y) * s, Float(mn.z) * s)
-            projects[pi].scans[si].boundingBoxMax = SIMD3<Float>(Float(mx.x) * s, Float(mx.y) * s, Float(mx.z) * s)
+            bounds = (SIMD3<Float>(Float(mn.x), Float(mn.y), Float(mn.z)) * s,
+                      SIMD3<Float>(Float(mx.x), Float(mx.y), Float(mx.z)) * s)
         }
-        saveProjects()
+
+        onMain {
+            guard let pi = projects.firstIndex(where: { $0.id == project.id }),
+                  let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
+            projects[pi].scans[si].fileSize = fileSize
+            projects[pi].scans[si].modelScale = modelScale
+            projects[pi].scans[si].thumbnailData = thumbnail
+            if let b = bounds {
+                projects[pi].scans[si].boundingBoxMin = b.0
+                projects[pi].scans[si].boundingBoxMax = b.1
+            }
+            saveProjects()
+        }
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
@@ -341,13 +358,7 @@ class StorageManager: ObservableObject {
 
         scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
 
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].addScan(scan)
-            if scan.thumbnailData != nil {
-                projects[index].thumbnailData = scan.thumbnailData
-            }
-            saveProjects()
-        }
+        addScan(scan, to: project)
         return scan
     }
 
@@ -387,20 +398,23 @@ class StorageManager: ObservableObject {
         return image.jpegData(compressionQuality: 0.7)
     }
 
+    /// Every file that belongs to a scan, relative to its project folder:
+    /// the model, its .mtl / texture, the internal .scn viewer file, a splat
+    /// bundle zip, and the folder of kept High-Quality photos.
+    private func companionFiles(of scan: Scan) -> [String] {
+        let base = (scan.fileName as NSString).deletingPathExtension
+        var names = [scan.fileName, "\(base).mtl", "\(base).scn"]
+        if let t = scan.textureFileName { names.append(t) }
+        if let z = scan.splatBundleName { names.append(z) }
+        if let p = scan.captureFolderName { names.append(p) }
+        return Array(Set(names))
+    }
+
     func deleteScan(_ scan: Scan, from project: Project) {
-        let fileURL = getScanFileURL(scan: scan, project: project)
-        try? fileManager.removeItem(at: fileURL)
-
-        // Also delete MTL file if exists
-        let mtlURL = fileURL.deletingPathExtension().appendingPathExtension("mtl")
-        try? fileManager.removeItem(at: mtlURL)
-
-        // Delete texture file if exists
-        if let texName = scan.textureFileName {
-            let texURL = fileURL.deletingLastPathComponent().appendingPathComponent(texName)
-            try? fileManager.removeItem(at: texURL)
+        let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        for name in companionFiles(of: scan) {
+            try? fileManager.removeItem(at: dir.appendingPathComponent(name))
         }
-
         if let index = projects.firstIndex(where: { $0.id == project.id }) {
             projects[index].scans.removeAll { $0.id == scan.id }
             projects[index].modifiedAt = Date()
@@ -417,39 +431,24 @@ class StorageManager: ObservableObject {
         }
     }
 
-    /// Move a scan from one project to another
+    /// Move a scan (and all its files) from one project to another
     func moveScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) {
-        let sourceURL = getScanFileURL(scan: scan, project: sourceProject)
+        guard sourceProject.id != destProject.id else { return }
+        let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
         let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
         try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
-        let destURL = destDir.appendingPathComponent(scan.fileName)
 
-        // Move the file
-        do {
-            try fileManager.moveItem(at: sourceURL, to: destURL)
-
-            // Move MTL too if exists
-            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-            if fileManager.fileExists(atPath: mtlSource.path) {
-                let mtlDest = destURL.deletingPathExtension().appendingPathExtension("mtl")
-                try fileManager.moveItem(at: mtlSource, to: mtlDest)
+        for name in companionFiles(of: scan) {
+            let src = sourceDir.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: src.path) else { continue }
+            let dst = destDir.appendingPathComponent(name)
+            try? fileManager.removeItem(at: dst)
+            if (try? fileManager.moveItem(at: src, to: dst)) == nil {
+                try? fileManager.copyItem(at: src, to: dst)
+                try? fileManager.removeItem(at: src)
             }
-
-            // Move texture file if exists
-            if let texName = scan.textureFileName {
-                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
-                if fileManager.fileExists(atPath: texSource.path) {
-                    let texDest = destDir.appendingPathComponent(texName)
-                    try fileManager.moveItem(at: texSource, to: texDest)
-                }
-            }
-        } catch {
-            // If move fails, try copy
-            try? fileManager.copyItem(at: sourceURL, to: destURL)
-            try? fileManager.removeItem(at: sourceURL)
         }
 
-        // Update project metadata
         if let srcIndex = projects.firstIndex(where: { $0.id == sourceProject.id }) {
             projects[srcIndex].scans.removeAll { $0.id == scan.id }
             projects[srcIndex].modifiedAt = Date()
@@ -460,65 +459,136 @@ class StorageManager: ObservableObject {
         saveProjects()
     }
 
-    /// Duplicate a scan within the same or different project
+    /// Duplicate a scan (and all its files) within the same or a different project
     func duplicateScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) -> Scan? {
-        let sourceURL = getScanFileURL(scan: scan, project: sourceProject)
-        guard fileManager.fileExists(atPath: sourceURL.path) else { return nil }
-
-        let newScanId = UUID()
-        let fileExtension = (scan.fileName as NSString).pathExtension
-        let newFileName = "\(newScanId.uuidString).\(fileExtension)"
+        let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
         let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
+        guard fileManager.fileExists(atPath: sourceDir.appendingPathComponent(scan.fileName).path) else { return nil }
         try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
-        let destURL = destDir.appendingPathComponent(newFileName)
 
+        let oldBase = (scan.fileName as NSString).deletingPathExtension
+        let newBase = UUID().uuidString
+        let copied: ModelCopy
         do {
-            try fileManager.copyItem(at: sourceURL, to: destURL)
-
-            // Copy MTL too
-            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-            if fileManager.fileExists(atPath: mtlSource.path) {
-                let mtlDest = destURL.deletingPathExtension().appendingPathExtension("mtl")
-                try fileManager.copyItem(at: mtlSource, to: mtlDest)
-            }
-
-            // Copy texture file
-            if let texName = scan.textureFileName {
-                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
-                if fileManager.fileExists(atPath: texSource.path) {
-                    let newTexName = "\(newScanId.uuidString)_texture.jpg"
-                    let texDest = destDir.appendingPathComponent(newTexName)
-                    try fileManager.copyItem(at: texSource, to: texDest)
-                }
-            }
-
-            var newScan = Scan(
-                name: "\(scan.name) (Copy)",
-                fileName: newFileName,
-                vertexCount: scan.vertexCount,
-                faceCount: scan.faceCount,
-                fileSize: scan.fileSize
-            )
-            newScan.hasTexture = scan.hasTexture
-            newScan.hasColor = scan.hasColor
-            newScan.boundingBoxMin = scan.boundingBoxMin
-            newScan.boundingBoxMax = scan.boundingBoxMax
-            newScan.thumbnailData = scan.thumbnailData
-
-            if scan.textureFileName != nil {
-                newScan.textureFileName = "\(newScanId.uuidString)_texture.jpg"
-            }
-
-            if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
-                projects[dstIndex].addScan(newScan)
-                saveProjects()
-            }
-
-            return newScan
+            copied = try copyModel(of: scan, from: sourceDir, to: destDir, newBase: newBase)
         } catch {
             DebugLogger.shared.error("Error duplicating scan: \(error)", category: "Storage")
             return nil
         }
+        // Extra files: internal viewer scene, splat bundle, kept photos.
+        func copyExtra(_ name: String?, as newName: String) -> String? {
+            guard let name = name else { return nil }
+            let src = sourceDir.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: src.path) else { return nil }
+            let dst = destDir.appendingPathComponent(newName)
+            try? fileManager.removeItem(at: dst)
+            return (try? fileManager.copyItem(at: src, to: dst)) != nil ? newName : nil
+        }
+        _ = copyExtra("\(oldBase).scn", as: "\(newBase).scn")
+
+        var newScan = Scan(
+            name: "\(scan.name) (Copy)",
+            fileName: copied.model.lastPathComponent,
+            vertexCount: scan.vertexCount,
+            faceCount: scan.faceCount,
+            fileSize: scan.fileSize
+        )
+        newScan.hasTexture = scan.hasTexture
+        newScan.hasColor = scan.hasColor
+        newScan.boundingBoxMin = scan.boundingBoxMin
+        newScan.boundingBoxMax = scan.boundingBoxMax
+        newScan.thumbnailData = scan.thumbnailData
+        newScan.notes = scan.notes
+        newScan.modelScale = scan.modelScale
+        newScan.textureFileName = copied.textureName
+        newScan.splatBundleName = copyExtra(scan.splatBundleName, as: "\(newBase)_bundle.zip")
+        newScan.captureFolderName = copyExtra(scan.captureFolderName, as: "\(newBase)_photos")
+
+        if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
+            projects[dstIndex].addScan(newScan)
+            saveProjects()
+        }
+        return newScan
+    }
+
+    // MARK: - Model Copying
+
+    struct ModelCopy {
+        let model: URL
+        let textureName: String?
+        let allFiles: [URL]
+    }
+
+    /// Copy a scan's model under a new base name. For OBJ, the .mtl and texture
+    /// come along and the file references inside are rewritten, so the copy
+    /// still finds its material and texture.
+    private func copyModel(of scan: Scan, from srcDir: URL, to dstDir: URL, newBase: String) throws -> ModelCopy {
+        let oldBase = (scan.fileName as NSString).deletingPathExtension
+        let ext = (scan.fileName as NSString).pathExtension
+        let src = srcDir.appendingPathComponent(scan.fileName)
+        let dst = dstDir.appendingPathComponent("\(newBase).\(ext)")
+        try? fileManager.removeItem(at: dst)
+
+        guard ext.lowercased() == "obj" else {
+            try fileManager.copyItem(at: src, to: dst)
+            return ModelCopy(model: dst, textureName: nil, allFiles: [dst])
+        }
+
+        try copyPatchingHeader(from: src, to: dst, replacing: "\(oldBase).mtl", with: "\(newBase).mtl")
+        var files = [dst]
+
+        var newTexture: String?
+        if let tex = scan.textureFileName {
+            let texSrc = srcDir.appendingPathComponent(tex)
+            if fileManager.fileExists(atPath: texSrc.path) {
+                let name = "\(newBase)_texture.\((tex as NSString).pathExtension)"
+                let texDst = dstDir.appendingPathComponent(name)
+                try? fileManager.removeItem(at: texDst)
+                try fileManager.copyItem(at: texSrc, to: texDst)
+                newTexture = name
+                files.append(texDst)
+            }
+        }
+
+        let mtlSrc = srcDir.appendingPathComponent("\(oldBase).mtl")
+        if var mtl = try? String(contentsOf: mtlSrc, encoding: .utf8) {
+            if let tex = scan.textureFileName, let newTex = newTexture {
+                mtl = mtl.replacingOccurrences(of: tex, with: newTex)
+            }
+            let mtlDst = dstDir.appendingPathComponent("\(newBase).mtl")
+            try mtl.write(to: mtlDst, atomically: true, encoding: .utf8)
+            files.append(mtlDst)
+        }
+        return ModelCopy(model: dst, textureName: newTexture, allFiles: files)
+    }
+
+    /// Stream-copy a text file, replacing `old` with `new` in its first 64 KB
+    /// (where OBJ `mtllib` lines live). Works for very large OBJ files.
+    private func copyPatchingHeader(from src: URL, to dst: URL, replacing old: String, with new: String) throws {
+        let input = try FileHandle(forReadingFrom: src)
+        defer { try? input.close() }
+        guard fileManager.createFile(atPath: dst.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let output = try FileHandle(forWritingTo: dst)
+        defer { try? output.close() }
+
+        let head = try input.read(upToCount: 65_536) ?? Data()
+        if let text = String(data: head, encoding: .utf8) {
+            try output.write(contentsOf: Data(text.replacingOccurrences(of: old, with: new).utf8))
+        } else {
+            try output.write(contentsOf: head)
+        }
+        while let chunk = try input.read(upToCount: 4 << 20), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+        }
+    }
+
+    private func exportBaseName(_ name: String) -> String {
+        let invalid = CharacterSet(charactersIn: ":/\\?%*|\"<>")
+        let cleaned = name.components(separatedBy: invalid).joined(separator: "-")
+            .replacingOccurrences(of: " ", with: "_")
+        return cleaned.isEmpty ? "Scan" : cleaned
     }
 
     // MARK: - Import
@@ -538,125 +608,107 @@ class StorageManager: ObservableObject {
             if accessing { sourceURL.stopAccessingSecurityScopedResource() }
         }
 
-        try fileManager.copyItem(at: sourceURL, to: destURL)
-
-        // Also copy MTL file if it exists
-        let mtlSourceURL = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-        if fileManager.fileExists(atPath: mtlSourceURL.path) {
-            let mtlDestURL = scanDir.appendingPathComponent("\(scanId.uuidString).mtl")
-            try? fileManager.copyItem(at: mtlSourceURL, to: mtlDestURL)
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let newBase = scanId.uuidString
+        if fileExtension == "obj" {
+            // Point the copy at its renamed .mtl
+            try copyPatchingHeader(from: sourceURL, to: destURL,
+                                   replacing: "\(baseName).mtl", with: "\(newBase).mtl")
+        } else {
+            try fileManager.copyItem(at: sourceURL, to: destURL)
         }
 
-        // Copy texture files if they exist
+        // Texture next to the model (our own "_texture" naming)
         let sourceDir = sourceURL.deletingLastPathComponent()
-        let textureSuffixes = ["_texture.jpg", "_texture.png"]
-        let baseName = sourceURL.deletingPathExtension().lastPathComponent
-        for suffix in textureSuffixes {
+        var textureName: String?
+        for suffix in ["_texture.jpg", "_texture.png"] {
             let texSourceURL = sourceDir.appendingPathComponent("\(baseName)\(suffix)")
             if fileManager.fileExists(atPath: texSourceURL.path) {
-                let texDestURL = scanDir.appendingPathComponent("\(scanId.uuidString)\(suffix)")
-                try? fileManager.copyItem(at: texSourceURL, to: texDestURL)
+                let name = "\(newBase)\(suffix)"
+                if (try? fileManager.copyItem(at: texSourceURL, to: scanDir.appendingPathComponent(name))) != nil {
+                    textureName = name
+                }
+                break
             }
+        }
+
+        // Material file, with its texture reference renamed to match
+        let mtlSourceURL = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
+        if var mtl = try? String(contentsOf: mtlSourceURL, encoding: .utf8) {
+            mtl = mtl.replacingOccurrences(of: "\(baseName)_texture", with: "\(newBase)_texture")
+            try? mtl.write(to: scanDir.appendingPathComponent("\(newBase).mtl"), atomically: true, encoding: .utf8)
         }
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
 
-        let scan = Scan(
+        var scan = Scan(
             name: name,
             fileName: fileName,
             fileSize: fileSize
         )
+        scan.textureFileName = textureName
+        scan.hasTexture = textureName != nil
 
-        if let index = projects.firstIndex(where: { $0.id == project.id }) {
-            projects[index].addScan(scan)
-            saveProjects()
-        }
-
+        addScan(scan, to: project)
         return scan
     }
 
     // MARK: - Export / Share
 
+    /// Prepare a scan for sharing under its display name. Returns a single URL:
+    /// the model file itself, or — for a textured OBJ — a .zip containing the
+    /// .obj, .mtl and texture so it opens correctly in other apps.
     func exportScan(_ scan: Scan, from project: Project) -> URL? {
-        let sourceURL = getScanFileURL(scan: scan, project: project)
-        guard fileManager.fileExists(atPath: sourceURL.path) else { return nil }
+        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        guard fileManager.fileExists(atPath: srcDir.appendingPathComponent(scan.fileName).path) else { return nil }
 
-        // Copy to a shareable location with a nice filename
-        let exportDir = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory)
-        try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
-
-        let sanitizedName = scan.name
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "/", with: "-")
-        let fileExtension = (scan.fileName as NSString).pathExtension
-        let exportName = "\(sanitizedName).\(fileExtension)"
-        let exportURL = exportDir.appendingPathComponent(exportName)
-
-        // Remove existing export if any
-        try? fileManager.removeItem(at: exportURL)
-        try? fileManager.copyItem(at: sourceURL, to: exportURL)
-
-        // Also copy MTL if OBJ
-        if fileExtension == "obj" {
-            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-            if fileManager.fileExists(atPath: mtlSource.path) {
-                let mtlExport = exportDir.appendingPathComponent("\(sanitizedName).mtl")
-                try? fileManager.removeItem(at: mtlExport)
-                try? fileManager.copyItem(at: mtlSource, to: mtlExport)
-            }
+        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
+        try? fileManager.removeItem(at: shareRoot)   // previous shares are finished by now
+        let base = exportBaseName(scan.name)
+        let folder = shareRoot.appendingPathComponent(base)
+        do {
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+            let copy = try copyModel(of: scan, from: srcDir, to: folder, newBase: base)
+            if copy.allFiles.count == 1 { return copy.model }
+            return StorageManager.zipFolder(folder, to: shareRoot.appendingPathComponent("\(base).zip"))
+        } catch {
+            DebugLogger.shared.error("Export failed: \(error)", category: "Export")
+            return nil
         }
-
-        // Copy texture file if exists
-        if let texName = scan.textureFileName {
-            let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
-            if fileManager.fileExists(atPath: texSource.path) {
-                let texExportName = "\(sanitizedName)_texture.jpg"
-                let texExport = exportDir.appendingPathComponent(texExportName)
-                try? fileManager.removeItem(at: texExport)
-                try? fileManager.copyItem(at: texSource, to: texExport)
-            }
-        }
-
-        return exportURL
     }
 
-    /// Export all scans from a project into a folder
+    /// Export all scans from a project into one folder (textured OBJs complete).
     func exportProject(_ project: Project) -> URL? {
+        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
         let exportDir = documentsDirectory
             .appendingPathComponent(AppConstants.exportDirectory)
-            .appendingPathComponent(project.name.replacingOccurrences(of: " ", with: "_"))
+            .appendingPathComponent(exportBaseName(project.name))
         try? fileManager.removeItem(at: exportDir)
         try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
 
+        var used = Set<String>()
         for scan in project.scans {
-            let sourceURL = getScanFileURL(scan: scan, project: project)
-            guard fileManager.fileExists(atPath: sourceURL.path) else { continue }
+            var base = exportBaseName(scan.name)
+            var n = 2
+            while used.contains(base) { base = "\(exportBaseName(scan.name))_\(n)"; n += 1 }
+            used.insert(base)
+            _ = try? copyModel(of: scan, from: srcDir, to: exportDir, newBase: base)
+        }
+        return exportDir
+    }
 
-            let sanitizedName = scan.name
-                .replacingOccurrences(of: " ", with: "_")
-                .replacingOccurrences(of: "/", with: "-")
-            let ext = (scan.fileName as NSString).pathExtension
-            let destURL = exportDir.appendingPathComponent("\(sanitizedName).\(ext)")
-            try? fileManager.copyItem(at: sourceURL, to: destURL)
-
-            // Copy MTL if exists
-            let mtlSource = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-            if fileManager.fileExists(atPath: mtlSource.path) {
-                let mtlDest = exportDir.appendingPathComponent("\(sanitizedName).mtl")
-                try? fileManager.copyItem(at: mtlSource, to: mtlDest)
-            }
-
-            // Copy texture if exists
-            if let texName = scan.textureFileName {
-                let texSource = sourceURL.deletingLastPathComponent().appendingPathComponent(texName)
-                if fileManager.fileExists(atPath: texSource.path) {
-                    let texDest = exportDir.appendingPathComponent("\(sanitizedName)_texture.jpg")
-                    try? fileManager.copyItem(at: texSource, to: texDest)
-                }
+    /// Zip a folder (via NSFileCoordinator, no third-party library).
+    static func zipFolder(_ folder: URL, to dest: URL) -> URL? {
+        let coordinator = NSFileCoordinator()
+        var nsError: NSError?
+        var result: URL?
+        coordinator.coordinate(readingItemAt: folder, options: [.forUploading], error: &nsError) { zipURL in
+            try? FileManager.default.removeItem(at: dest)
+            if (try? FileManager.default.copyItem(at: zipURL, to: dest)) != nil {
+                result = dest
             }
         }
-
-        return exportDir
+        return result
     }
 
     // MARK: - Thumbnail Generation
@@ -708,36 +760,5 @@ class StorageManager: ObservableObject {
     enum ExportFormat {
         case obj
         case ply
-    }
-
-    /// Export a scan file to USDZ format for AR sharing
-    func exportAsUSDZ(scan: Scan, project: Project) -> URL? {
-        let sourceURL = getScanFileURL(scan: scan, project: project)
-        guard FileManager.default.fileExists(atPath: sourceURL.path) else { return nil }
-
-        let exportDir = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory)
-        try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
-
-        let sanitizedName = scan.name
-            .replacingOccurrences(of: " ", with: "_")
-            .replacingOccurrences(of: "/", with: "-")
-        let usdzURL = exportDir.appendingPathComponent("\(sanitizedName).usdz")
-
-        // Load as SceneKit scene and export to USDZ
-        do {
-            let scene = try SCNScene(url: sourceURL, options: [.checkConsistency: true])
-
-            // Ensure materials are double-sided
-            scene.rootNode.enumerateChildNodes { node, _ in
-                node.geometry?.materials.forEach { $0.isDoubleSided = true }
-            }
-
-            try? fileManager.removeItem(at: usdzURL)
-            let success = scene.write(to: usdzURL, delegate: nil)
-            return success ? usdzURL : nil
-        } catch {
-            DebugLogger.shared.error("USDZ export failed: \(error)", category: "Export")
-            return nil
-        }
     }
 }

@@ -2,10 +2,8 @@ import SwiftUI
 
 /// App-level settings view
 struct SettingsView: View {
-    @AppStorage("meshDetail") private var meshDetail = "Medium"
-    @AppStorage("captureTexture") private var captureTexture = true
-    @AppStorage("measurementUnit") private var measurementUnit = "Meters"
-    @AppStorage("autoSave") private var autoSave = true
+    // Scan options (mode, range, detail, colour) live on the scan screen itself.
+    @AppStorage(ScanSettings.MeasurementUnit.storageKey) private var measurementUnit = ScanSettings.MeasurementUnit.meters.rawValue
     @AppStorage("showGridByDefault") private var showGridByDefault = true
 
     @EnvironmentObject var storageManager: StorageManager
@@ -16,18 +14,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                // Scanning settings
-                Section("Scanning") {
-                    Picker("Mesh Detail", selection: $meshDetail) {
-                        ForEach(ScanSettings.MeshDetail.allCases, id: \.rawValue) { detail in
-                            Text(detail.rawValue).tag(detail.rawValue)
-                        }
-                    }
-
-                    Toggle("Capture Texture/Color", isOn: $captureTexture)
-                    Toggle("Auto-save Scans", isOn: $autoSave)
-                }
-
                 // Viewer settings
                 Section("Viewer") {
                     Picker("Measurement Unit", selection: $measurementUnit) {

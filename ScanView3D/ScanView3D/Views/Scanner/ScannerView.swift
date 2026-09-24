@@ -14,21 +14,26 @@ struct ScannerView: View {
     #endif
 
     @EnvironmentObject var storageManager: StorageManager
+    @State private var settings = ScanSettings.load()
+
+    // Save flow
     @State private var showingSaveDialog = false
+    @State private var showingCancelOptions = false
     @State private var scanName = ""
     @State private var selectedProject: Project?
     @State private var showingNewProjectDialog = false
     @State private var newProjectName = ""
-    @State private var showingSettings = false
-    @State private var showingExportOptions = false
-    @State private var settings = ScanSettings()
-    @State private var showingError = false
-    @State private var errorMessage = ""
-    @State private var isSaving = false
-    @State private var showMeshOverlay = true
     @State private var exportFormat: StorageManager.ExportFormat = .obj
     @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
+    @State private var isSaving = false
     @State private var savingProgress = ""
+    /// The combined scan, built once in the background when the user taps Stop.
+    @State private var pendingMesh: MeshData?
+    @State private var isPreparingMesh = false
+
+    @State private var showingError = false
+    @State private var errorMessage = ""
+    @State private var showMeshOverlay = true
     @State private var savedScan: Scan?
     @State private var savedProject: Project?
     @State private var showingSavedScan = false
@@ -39,25 +44,22 @@ struct ScannerView: View {
             SimulatorScanView(scanner: scanner)
                 .ignoresSafeArea()
             #else
-            // AR Camera View - always shown for preview
             ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay)
                 .ignoresSafeArea()
             #endif
 
-            // Scanning overlay UI
             VStack(spacing: 0) {
                 topStatusBar
-
+                if scanner.isScanning, let warning = scanner.trackingWarning {
+                    trackingBanner(warning)
+                }
                 Spacer()
-
-                // Memory/capacity gauge during scanning
                 if scanner.isScanning {
                     scanCapacityGauge
                     scanningInfoBar
                 } else {
                     prescanControls
                 }
-
                 bottomControls
             }
 
@@ -68,21 +70,20 @@ struct ScannerView: View {
             #endif
         }
         .onAppear {
-            // Start camera preview immediately so user sees the camera feed
-            #if !targetEnvironment(simulator)
+            if settings.captureMode == .highQuality && !highQualitySupported {
+                settings.captureMode = .fast
+            }
             scanner.startPreview()
-            #endif
         }
         .onDisappear {
-            #if !targetEnvironment(simulator)
             scanner.stopPreview()
-            #endif
+        }
+        .onChange(of: settings) { _, newValue in
+            newValue.save()
         }
         .sheet(isPresented: $showingSaveDialog) {
             saveDialogSheet
-        }
-        .sheet(isPresented: $showingSettings) {
-            settingsSheet
+                .interactiveDismissDisabled()
         }
         .fullScreenCover(isPresented: $showingSavedScan) {
             if let scan = savedScan, let project = savedProject {
@@ -91,9 +92,7 @@ struct ScannerView: View {
                         .environmentObject(storageManager)
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
-                                Button("Done") {
-                                    showingSavedScan = false
-                                }
+                                Button("Done") { showingSavedScan = false }
                             }
                         }
                 }
@@ -124,21 +123,14 @@ struct ScannerView: View {
                 if scanner.isScanning {
                     HStack(spacing: 12) {
                         Label("\(scanner.vertexCount.formatted())", systemImage: "circle.fill")
-                            .font(.caption2)
                         Label("\(scanner.faceCount.formatted())", systemImage: "triangle.fill")
-                            .font(.caption2)
-                        if settings.captureMode == .highQuality || settings.captureMode == .splatExport {
+                        if usesPhotos {
                             Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack")
-                                .font(.caption2)
                         } else if scanner.capturedFrameCount > 0 {
                             Label("\(scanner.capturedFrameCount)", systemImage: "camera.fill")
-                                .font(.caption2)
-                        }
-                        if scanner.detectedPlaneCount > 0 {
-                            Label("\(scanner.detectedPlaneCount)", systemImage: "square.stack.3d.up")
-                                .font(.caption2)
                         }
                     }
+                    .font(.caption2)
                 }
             }
             .foregroundColor(.white)
@@ -154,10 +146,8 @@ struct ScannerView: View {
                 .background(Color.orange)
                 .cornerRadius(4)
                 .foregroundColor(.white)
-            #endif
-
+            #else
             if scanner.isScanning {
-                #if !targetEnvironment(simulator)
                 Button {
                     showMeshOverlay.toggle()
                 } label: {
@@ -165,40 +155,43 @@ struct ScannerView: View {
                         .foregroundColor(.white)
                         .padding(8)
                 }
-                #endif
-
-                Button {
-                    showingSettings = true
-                } label: {
-                    Image(systemName: "gearshape.fill")
-                        .foregroundColor(.white)
-                        .padding(8)
-                }
+                .accessibilityLabel(showMeshOverlay ? "Hide mesh overlay" : "Show mesh overlay")
             }
+            #endif
         }
         .padding(.horizontal, AppConstants.Layout.padding)
         .padding(.top, 8)
         .background(
-            LinearGradient(
-                colors: [Color.black.opacity(0.6), Color.clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            LinearGradient(colors: [Color.black.opacity(0.6), Color.clear], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
         )
+    }
+
+    private func trackingBanner(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .fontWeight(.semibold)
+            .foregroundColor(.black)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.yellow))
+            .padding(.top, 6)
+            .transition(.opacity)
+    }
+
+    private var usesPhotos: Bool {
+        settings.captureMode == .highQuality || settings.captureMode == .splatExport
     }
 
     // MARK: - Scan Capacity Gauge
 
     private var scanCapacityGauge: some View {
         VStack(spacing: 4) {
-            // Progress bar
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color.white.opacity(0.2))
                         .frame(height: 6)
-
                     RoundedRectangle(cornerRadius: 3)
                         .fill(capacityColor)
                         .frame(width: geo.size.width * min(scanner.scanCapacityPercent / 100.0, 1.0), height: 6)
@@ -208,19 +201,14 @@ struct ScannerView: View {
 
             HStack {
                 Text(String(format: "%.0f MB est.", scanner.estimatedFileSizeMB))
-                    .font(.system(size: 9))
-                    .foregroundColor(.gray)
                 Spacer()
-                if scanner.scanCapacityPercent > 80 {
-                    Text("Memory pressure high")
-                        .font(.system(size: 9))
-                        .foregroundColor(.orange)
-                } else {
-                    Text(String(format: "%.0f%% capacity", scanner.scanCapacityPercent))
-                        .font(.system(size: 9))
-                        .foregroundColor(.gray)
-                }
+                Text(scanner.scanCapacityPercent > 80
+                     ? "Memory nearly full"
+                     : String(format: "%.0f%% memory used", scanner.scanCapacityPercent))
+                    .foregroundColor(scanner.scanCapacityPercent > 80 ? .orange : .gray)
             }
+            .font(.system(size: 9))
+            .foregroundColor(.gray)
         }
         .padding(.horizontal, AppConstants.Layout.padding)
         .padding(.bottom, 4)
@@ -243,331 +231,197 @@ struct ScannerView: View {
     }
 
     private var prescanControls: some View {
-        VStack(spacing: 10) {
-            // Capture mode (must be chosen BEFORE scanning)
-            VStack(spacing: 4) {
-                HStack {
-                    Text("CAPTURE MODE")
-                        .font(.caption2).fontWeight(.bold).foregroundColor(.pink)
-                    Spacer()
-                }
+        VStack(spacing: 12) {
+            // 1. Mode
+            VStack(spacing: 6) {
                 HStack(spacing: 8) {
                     ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
                         let disabled = (mode == .highQuality && !highQualitySupported)
+                        let selected = settings.captureMode == mode
                         Button {
                             withAnimation(.easeInOut(duration: 0.2)) { settings.captureMode = mode }
                         } label: {
-                            VStack(spacing: 2) {
-                                Image(systemName: mode.icon).font(.system(size: 15))
-                                Text(mode.rawValue).font(.system(size: 10, weight: .semibold))
+                            VStack(spacing: 3) {
+                                Image(systemName: mode.icon).font(.system(size: 16))
+                                Text(mode.shortName).font(.system(size: 11, weight: .semibold))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 8)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(settings.captureMode == mode ? Color.pink.opacity(0.3) : Color.white.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .stroke(settings.captureMode == mode ? Color.pink : Color.clear, lineWidth: 1.5)
-                            )
+                            .background(RoundedRectangle(cornerRadius: 10)
+                                .fill(selected ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.1)))
+                            .overlay(RoundedRectangle(cornerRadius: 10)
+                                .stroke(selected ? Color.accentColor : Color.clear, lineWidth: 1.5))
                             .opacity(disabled ? 0.4 : 1.0)
                         }
                         .disabled(disabled)
-                        .foregroundColor(settings.captureMode == mode ? .white : .gray)
+                        .foregroundColor(selected ? .white : .gray)
                     }
                 }
                 Text(settings.captureMode.description)
-                    .font(.system(size: 10)).foregroundColor(.gray)
+                    .font(.caption2).foregroundColor(.gray)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            // Range slider (continuous)
-            VStack(spacing: 4) {
-                HStack {
-                    Text("RANGE")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.cyan)
-                    Spacer()
-                    Text(String(format: "%.1f m", settings.rangeValue))
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundColor(.cyan)
-                }
+            // 2. Range
+            sliderRow(title: "Range", value: String(format: "%.1f m", settings.rangeValue),
+                      hint: "Only keeps surfaces within this distance of where you walk.") {
                 Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
-                    .tint(.cyan)
             }
 
-            // Detail / accuracy slider (grid spacing). Lower mm = denser points,
-            // sharper detail, heavier files; higher mm = coarser, faster, lighter.
-            VStack(spacing: 4) {
-                HStack {
-                    Text("DETAIL")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.yellow)
-                    Spacer()
-                    Text(String(format: "%.0f mm", settings.detailMM))
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .foregroundColor(.yellow)
-                }
-                Slider(value: $settings.detailMM, in: 5...20, step: 1)
-                    .tint(.yellow)
-                HStack {
-                    Text("Fine (dense)").font(.system(size: 9)).foregroundColor(.gray)
-                    Spacer()
-                    Text("Coarse (fast)").font(.system(size: 9)).foregroundColor(.gray)
+            // 3. Detail (Fast / Point Cloud)
+            if settings.captureMode.usesDetail {
+                sliderRow(title: "Detail", value: String(format: "%.0f mm", settings.detailMM),
+                          hint: "Smaller = finer and bigger files. 20 mm is good for large areas.") {
+                    Slider(value: $settings.detailMM, in: 5...20, step: 1)
                 }
             }
 
-            // Confidence selector
-            VStack(spacing: 4) {
-                HStack {
-                    Text("CONFIDENCE")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.orange)
-                    Spacer()
-                }
-                Picker("", selection: $settings.confidenceLevel) {
-                    Text("Low").tag(0)
-                    Text("Medium").tag(1)
-                    Text("High").tag(2)
-                }
-                .pickerStyle(.segmented)
-            }
-
-            // Mesh mode
-            VStack(spacing: 4) {
-                HStack {
-                    Text("MESH MODE")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.purple)
-                    Spacer()
-                }
-                HStack(spacing: 6) {
-                    ForEach(ScanSettings.MeshMode.allCases, id: \.self) { mode in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                settings.meshMode = mode
-                            }
-                        } label: {
-                            VStack(spacing: 2) {
-                                Image(systemName: mode.icon)
-                                    .font(.system(size: 14))
-                                Text(mode.rawValue)
-                                    .font(.system(size: 8, weight: .medium))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 5)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(settings.meshMode == mode ? Color.purple.opacity(0.3) : Color.white.opacity(0.1))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(settings.meshMode == mode ? Color.purple : Color.clear, lineWidth: 1.5)
-                            )
+            // 4. Mesh filter (Fast)
+            if settings.captureMode.usesMeshMode {
+                VStack(spacing: 4) {
+                    Picker("Keep", selection: $settings.meshMode) {
+                        ForEach(ScanSettings.MeshMode.allCases, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
                         }
-                        .foregroundColor(settings.meshMode == mode ? .white : .gray)
                     }
-                }
-            }
-
-            // Photo texture toggle
-            VStack(spacing: 2) {
-                HStack {
-                    Image(systemName: settings.captureTexture ? "camera.fill" : "cube")
-                        .foregroundColor(settings.captureTexture ? .green : .gray)
-                        .font(.caption)
-                    Text(settings.captureTexture ? "Photo Texture / Color" : "No Color (grey mesh)")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Toggle("", isOn: $settings.captureTexture)
-                        .labelsHidden()
-                        .tint(.green)
-                }
-                if !settings.captureTexture {
-                    Text("Clean grey mesh for measuring / CAD export. Faster, no muddy colors.")
-                        .font(.system(size: 9)).foregroundColor(.gray)
+                    .pickerStyle(.segmented)
+                    Text(settings.meshMode.description)
+                        .font(.caption2).foregroundColor(.gray)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+
+            // 5. Colour (Fast / Point Cloud)
+            if settings.captureMode.usesColorToggle {
+                Toggle(isOn: $settings.captureTexture) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(settings.captureTexture ? "Photo colour" : "No colour (grey)")
+                            .font(.caption).foregroundColor(.white)
+                        Text(settings.captureTexture
+                             ? "Colours the scan from the camera."
+                             : "Clean grey model for measuring and CAD. Faster.")
+                            .font(.caption2).foregroundColor(.gray)
+                    }
+                }
+                .tint(.green)
+            }
         }
         .padding(.horizontal, AppConstants.Layout.padding)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(Color.black.opacity(0.75))
-        )
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.75)))
         .padding(.horizontal, 12)
+    }
+
+    private func sliderRow<S: View>(title: String, value: String, hint: String,
+                                    @ViewBuilder slider: () -> S) -> some View {
+        VStack(spacing: 2) {
+            HStack {
+                Text(title).font(.caption).fontWeight(.semibold).foregroundColor(.white)
+                Spacer()
+                Text(value).font(.system(size: 14, weight: .bold, design: .rounded)).foregroundColor(.white)
+            }
+            slider()
+            Text(hint)
+                .font(.caption2).foregroundColor(.gray)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Scanning Info Bar
 
     private var scanningInfoBar: some View {
-        HStack(spacing: 16) {
-            HStack(spacing: 4) {
-                Image(systemName: "scope")
-                    .font(.caption2)
-                Text(String(format: "%.1fm", settings.rangeValue))
-                    .font(.caption2)
-                    .fontWeight(.medium)
+        HStack(spacing: 10) {
+            chip(settings.captureMode.shortName, icon: settings.captureMode.icon, color: .accentColor)
+            chip(String(format: "%.1f m", settings.rangeValue), icon: "scope", color: .cyan)
+            if settings.captureMode.usesMeshMode && settings.meshMode != .free {
+                chip(settings.meshMode.rawValue, icon: settings.meshMode.icon, color: .purple)
             }
-            .foregroundColor(.cyan)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Color.cyan.opacity(0.2)))
-
-            HStack(spacing: 4) {
-                Image(systemName: settings.scanQuality.icon)
-                    .font(.caption2)
-                Text(settings.scanQuality.rawValue)
-                    .font(.caption2)
-                    .fontWeight(.medium)
-            }
-            .foregroundColor(.orange)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Color.orange.opacity(0.2)))
-
-            // Mesh mode badge (only show if not Free)
-            if settings.meshMode != .free {
-                HStack(spacing: 4) {
-                    Image(systemName: settings.meshMode.icon)
-                        .font(.caption2)
-                    Text(settings.meshMode.rawValue)
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                }
-                .foregroundColor(.purple)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.purple.opacity(0.2)))
-            }
-
-            if settings.captureMode == .highQuality || settings.captureMode == .splatExport {
-                HStack(spacing: 4) {
-                    Image(systemName: "photo.stack")
-                        .font(.caption2)
-                    Text("\(scanner.highResFrameCount)")
-                        .font(.caption2)
-                        .fontWeight(.medium)
-                }
-                .foregroundColor(.green)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.green.opacity(0.2)))
+            if usesPhotos {
+                chip("\(scanner.highResFrameCount)", icon: "photo.stack",
+                     color: scanner.photoLimitReached ? .orange : .green)
             }
         }
         .padding(.bottom, 8)
     }
 
+    private func chip(_ text: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.caption2)
+            Text(text).font(.caption2).fontWeight(.medium)
+        }
+        .foregroundColor(color)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(color.opacity(0.2)))
+    }
+
     // MARK: - Bottom Controls
 
     private var bottomControls: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 40) {
-                if scanner.isScanning {
-                    Button {
-                        if scanner.isPaused {
-                            scanner.resumeScanning()
-                        } else {
-                            scanner.pauseScanning()
-                        }
-                    } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: scanner.isPaused ? "play.circle.fill" : "pause.circle.fill")
-                                .font(.system(size: 36))
-                            Text(scanner.isPaused ? "Resume" : "Pause")
-                                .font(.caption2)
-                        }
-                        .foregroundColor(.white)
-                    }
+        HStack(spacing: 40) {
+            if scanner.isScanning {
+                Button {
+                    if scanner.isPaused { scanner.resumeScanning() } else { scanner.pauseScanning() }
+                } label: {
+                    controlLabel(scanner.isPaused ? "Resume" : "Pause",
+                                 icon: scanner.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                }
 
-                    Button {
-                        scanner.stopScanning()
-                        scanName = Scan.autoName()
-                        if selectedProject == nil {
-                            selectedProject = storageManager.projects
-                                .sorted(by: { $0.modifiedAt > $1.modifiedAt })
-                                .first
+                Button {
+                    stopAndPrepareSave()
+                } label: {
+                    VStack(spacing: 4) {
+                        ZStack {
+                            Circle().fill(Color.red).frame(width: 64, height: 64)
+                            RoundedRectangle(cornerRadius: 6).fill(Color.white).frame(width: 24, height: 24)
                         }
-                        showingSaveDialog = true
-                    } label: {
-                        VStack(spacing: 4) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.red)
-                                    .frame(width: 64, height: 64)
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.white)
-                                    .frame(width: 24, height: 24)
-                            }
-                            Text("Stop")
-                                .font(.caption2)
-                        }
-                        .foregroundColor(.white)
+                        Text("Stop").font(.caption2)
                     }
+                    .foregroundColor(.white)
+                }
 
-                    Button {
-                        scanner.resetScanning()
-                        // Restart preview after reset
-                        #if !targetEnvironment(simulator)
-                        scanner.startPreview()
-                        #endif
-                    } label: {
-                        VStack(spacing: 4) {
-                            Image(systemName: "arrow.counterclockwise.circle.fill")
-                                .font(.system(size: 36))
-                            Text("Reset")
-                                .font(.caption2)
+                Button {
+                    scanner.resetScanning()
+                    scanner.startPreview()
+                } label: {
+                    controlLabel("Reset", icon: "arrow.counterclockwise.circle.fill")
+                }
+            } else {
+                Button {
+                    scanner.startScanning(
+                        captureTexture: settings.captureTexture,
+                        meshMode: settings.meshMode,
+                        rangeMeters: settings.rangeValue,
+                        captureMode: settings.captureMode
+                    )
+                } label: {
+                    VStack(spacing: 4) {
+                        ZStack {
+                            Circle().strokeBorder(Color.white, lineWidth: 4).frame(width: 64, height: 64)
+                            Circle().fill(Color.red).frame(width: 52, height: 52)
                         }
-                        .foregroundColor(.white)
+                        Text("Start Scan").font(.caption2)
                     }
-                } else {
-                    Button {
-                        scanner.startScanning(
-                            detail: settings.meshDetail,
-                            captureTexture: settings.captureTexture,
-                            range: settings.scanRange,
-                            quality: settings.scanQuality,
-                            meshMode: settings.meshMode,
-                            rangeMeters: settings.rangeValue,
-                            confidenceLevel: settings.confidenceLevel,
-                            captureMode: settings.captureMode,
-                            detailMM: settings.detailMM
-                        )
-                    } label: {
-                        VStack(spacing: 4) {
-                            ZStack {
-                                Circle()
-                                    .strokeBorder(Color.white, lineWidth: 4)
-                                    .frame(width: 64, height: 64)
-                                Circle()
-                                    .fill(Color.red)
-                                    .frame(width: 52, height: 52)
-                            }
-                            Text("Start Scan")
-                                .font(.caption2)
-                        }
-                        .foregroundColor(.white)
-                    }
+                    .foregroundColor(.white)
                 }
             }
         }
+        .padding(.top, 12)
         .padding(.bottom, 30)
         .padding(.horizontal, AppConstants.Layout.padding)
+        .frame(maxWidth: .infinity)
         .background(
-            LinearGradient(
-                colors: [Color.clear, Color.black.opacity(0.6)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea()
+            LinearGradient(colors: [Color.clear, Color.black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
         )
+    }
+
+    private func controlLabel(_ title: String, icon: String) -> some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 36))
+            Text(title).font(.caption2)
+        }
+        .foregroundColor(.white)
     }
 
     // MARK: - LiDAR Unavailable
@@ -578,11 +432,9 @@ struct ScannerView: View {
             Image(systemName: "sensor.fill")
                 .font(.system(size: 60))
                 .foregroundColor(.gray)
-
             Text("LiDAR Not Available")
                 .font(.title2)
                 .fontWeight(.bold)
-
             Text("This device does not have a LiDAR sensor.\nLiDAR is available on iPhone 12 Pro and newer Pro models.")
                 .font(.body)
                 .multilineTextAlignment(.center)
@@ -596,6 +448,26 @@ struct ScannerView: View {
 
     // MARK: - Save Dialog
 
+    private func stopAndPrepareSave() {
+        scanner.stopScanning()
+        scanName = Scan.autoName()
+        if selectedProject == nil {
+            selectedProject = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt }).first
+        }
+        pendingMesh = nil
+        isPreparingMesh = true
+        showingSaveDialog = true
+        scanner.buildCombinedMesh { mesh in
+            pendingMesh = mesh
+            isPreparingMesh = false
+        }
+    }
+
+    /// Photos are enough on their own for High Quality / Splat; the others need geometry.
+    private var hasSomethingToSave: Bool {
+        usesPhotos ? scanner.highResFrameCount > 0 : pendingMesh != nil
+    }
+
     private var saveDialogSheet: some View {
         NavigationView {
             Form {
@@ -605,32 +477,20 @@ struct ScannerView: View {
                 }
 
                 Section("Save to Project") {
-                    if storageManager.projects.isEmpty {
-                        Button("Create New Project") {
-                            showingNewProjectDialog = true
-                        }
-                    } else {
+                    if !storageManager.projects.isEmpty {
                         Picker("Project", selection: $selectedProject) {
                             Text("Select a project").tag(nil as Project?)
                             ForEach(storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })) { project in
-                                HStack {
-                                    Text(project.name)
-                                    Text("(\(project.scanCount) scans)")
-                                        .foregroundColor(.secondary)
-                                }
-                                .tag(project as Project?)
+                                Text("\(project.name) (\(project.scanCount))").tag(project as Project?)
                             }
                         }
-
-                        Button("Create New Project") {
-                            showingNewProjectDialog = true
-                        }
                     }
+                    Button("Create New Project") { showingNewProjectDialog = true }
                 }
 
-                if settings.captureMode == .highQuality {
-                    // Path B: photogrammetry (iOS supports reduced detail on-device)
-                    Section("Reconstruction") {
+                switch settings.captureMode {
+                case .highQuality:
+                    Section {
                         Picker("Effort", selection: $settings.reconstructQuality) {
                             ForEach(ScanSettings.ReconstructQuality.allCases, id: \.self) { q in
                                 Text(q.rawValue).tag(q)
@@ -638,75 +498,81 @@ struct ScannerView: View {
                         }
                         .pickerStyle(.segmented)
                         Text(settings.reconstructQuality.description)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                            .font(.caption).foregroundColor(.secondary)
+                    } header: {
+                        Text("Photoreal Model")
+                    } footer: {
+                        Text("Builds a textured 3D model from your photos on the phone. This can take a few minutes.")
                     }
-                    Section("Output") {
-                        Label("On-device photogrammetry → textured model (USDZ)", systemImage: "sparkles")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text("iOS caps on-device detail at reduced (Apple limit). Photos are kept so you can re-run as Best later. For higher detail, use Splat (Desktop) export.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                case .pointCloud:
+                    Section {
+                        Label("Coloured point cloud (PLY)", systemImage: "aqi.medium")
+                    } header: {
+                        Text("Output")
+                    } footer: {
+                        Text(String(format: "Points are thinned to one per %.0f mm.", settings.detailMM))
                     }
-                } else if settings.captureMode == .pointCloud {
-                    Section("Output") {
-                        Label("Colored point cloud (PLY)", systemImage: "aqi.medium")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                case .splatExport:
+                    Section {
+                        Label("Photos + camera positions + point cloud (.zip)", systemImage: "square.and.arrow.up.on.square")
+                    } header: {
+                        Text("Output")
+                    } footer: {
+                        Text("After saving you can send the .zip to your computer. You can also re-send it later from the scan's More menu.")
                     }
-                } else if settings.captureMode == .splatExport {
-                    Section("Output") {
-                        Label("Splat bundle (images + transforms.json + points3D.ply)", systemImage: "square.and.arrow.up.on.square")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Text("On Save, a .zip is shared to send to your computer for splat training.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    // Path A: mesh post-processing + export format
-                    Section("Post-Processing") {
-                        Picker("Quality", selection: $processingLevel) {
-                            Text("Quick").tag(MeshProcessor.ProcessingLevel.quick)
-                            Text("Standard").tag(MeshProcessor.ProcessingLevel.standard)
-                            Text("High Quality").tag(MeshProcessor.ProcessingLevel.high)
-                        }
-                        Text(processingLevel.description)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Section("Export Format") {
-                        Picker("Format", selection: $exportFormat) {
-                            Text("OBJ (Standard)").tag(StorageManager.ExportFormat.obj)
-                            Text("PLY (Vertex Colors)").tag(StorageManager.ExportFormat.ply)
+                case .fast:
+                    Section {
+                        Picker("Clean-up", selection: $processingLevel) {
+                            ForEach(MeshProcessor.ProcessingLevel.allCases, id: \.self) { level in
+                                Text(level.rawValue).tag(level)
+                            }
                         }
                         .pickerStyle(.segmented)
+                        Text(processingLevel.description)
+                            .font(.caption).foregroundColor(.secondary)
+                        Picker("File type", selection: $exportFormat) {
+                            Text("OBJ").tag(StorageManager.ExportFormat.obj)
+                            Text("PLY").tag(StorageManager.ExportFormat.ply)
+                        }
+                        .pickerStyle(.segmented)
+                    } header: {
+                        Text("Mesh")
+                    } footer: {
+                        Text(exportFormat == .obj
+                             ? "OBJ keeps the photo texture. Works in most 3D and CAD apps."
+                             : "PLY stores colour per point. Good for MeshLab and CloudCompare.")
                     }
                 }
 
-                if let meshData = scanner.getCombinedMeshData() {
-                    Section("Scan Info") {
-                        LabeledContent("Vertices", value: meshData.vertexCount.formatted())
-                        LabeledContent("Faces", value: meshData.faceCount.formatted())
-                        let dims = meshData.dimensions
-                        LabeledContent("Size", value: String(format: "%.2f x %.2f x %.2f m", dims.x, dims.y, dims.z))
-                        if !meshData.colors.isEmpty {
-                            LabeledContent("Color Data", value: "Yes")
+                Section("Scan Info") {
+                    if isPreparingMesh {
+                        HStack {
+                            ProgressView().padding(.trailing, 8)
+                            Text("Preparing scan…").foregroundColor(.secondary)
                         }
-                        LabeledContent("Photo Frames", value: settings.captureMode == .highQuality || settings.captureMode == .splatExport ? "\(scanner.highResFrameCount)" : "\(scanner.capturedFrameCount)")
-                        LabeledContent("Range", value: settings.scanRange.rawValue)
-                        LabeledContent("Quality", value: settings.scanQuality.rawValue)
-                        LabeledContent("Est. File Size", value: String(format: "%.1f MB", scanner.estimatedFileSizeMB))
+                    } else if let mesh = pendingMesh {
+                        let unit = ScanSettings.MeasurementUnit.preferred
+                        let dims = mesh.dimensions
+                        LabeledContent("Size", value: "\(unit.format(meters: dims.x)) × \(unit.format(meters: dims.y)) × \(unit.format(meters: dims.z))")
+                        LabeledContent("Points", value: mesh.vertexCount.formatted())
+                        if mesh.faceCount > 0 {
+                            LabeledContent("Triangles", value: mesh.faceCount.formatted())
+                        }
+                    } else if !usesPhotos {
+                        Text("No scan data was captured. Move the phone slowly over surfaces, then try again.")
+                            .foregroundColor(.secondary)
+                    }
+                    if usesPhotos {
+                        LabeledContent("Photos", value: "\(scanner.highResFrameCount)")
+                    } else if settings.captureTexture {
+                        LabeledContent("Colour frames", value: "\(scanner.capturedFrameCount)")
                     }
                 }
 
                 if isSaving {
                     Section {
                         HStack {
-                            ProgressView()
-                                .padding(.trailing, 8)
+                            ProgressView().padding(.trailing, 8)
                             Text(savingProgress.isEmpty ? "Saving..." : savingProgress)
                                 .foregroundColor(.secondary)
                         }
@@ -717,70 +583,38 @@ struct ScannerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        showingSaveDialog = false
-                    }
+                    Button("Cancel") { showingCancelOptions = true }
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        saveScan()
-                    }
-                    .disabled(scanName.isEmpty || selectedProject == nil || isSaving)
+                    Button("Save") { saveScan() }
+                        .disabled(scanName.isEmpty || selectedProject == nil || isSaving
+                                  || isPreparingMesh || !hasSomethingToSave)
                 }
+            }
+            .confirmationDialog("Not saving yet?", isPresented: $showingCancelOptions, titleVisibility: .visible) {
+                Button("Continue Scanning") {
+                    showingSaveDialog = false
+                    pendingMesh = nil
+                    scanner.continueScanning()
+                }
+                Button("Discard Scan", role: .destructive) {
+                    showingSaveDialog = false
+                    pendingMesh = nil
+                    scanner.resetScanning()
+                    scanner.startPreview()
+                }
+                Button("Keep Editing", role: .cancel) {}
             }
             .alert("New Project", isPresented: $showingNewProjectDialog) {
                 TextField("Project name", text: $newProjectName)
                 Button("Create") {
                     if !newProjectName.isEmpty {
-                        let project = storageManager.createProject(name: newProjectName)
-                        selectedProject = project
+                        selectedProject = storageManager.createProject(name: newProjectName)
                         newProjectName = ""
                     }
                 }
                 Button("Cancel", role: .cancel) {}
-            }
-        }
-    }
-
-    // MARK: - Settings Sheet
-
-    private var settingsSheet: some View {
-        NavigationView {
-            Form {
-                Section("Scan Quality") {
-                    Picker("Mesh Detail", selection: $settings.meshDetail) {
-                        ForEach(ScanSettings.MeshDetail.allCases, id: \.self) { detail in
-                            VStack(alignment: .leading) {
-                                Text(detail.rawValue)
-                                Text(detail.description)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .tag(detail)
-                        }
-                    }
-                }
-
-                Section("Capture") {
-                    Toggle("Capture Texture/Color", isOn: $settings.captureTexture)
-                }
-
-                Section("Units") {
-                    Picker("Measurement Unit", selection: $settings.unit) {
-                        ForEach(ScanSettings.MeasurementUnit.allCases, id: \.self) { unit in
-                            Text("\(unit.rawValue) (\(unit.abbreviation))").tag(unit)
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Scan Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        showingSettings = false
-                    }
-                }
             }
         }
     }
@@ -794,104 +628,84 @@ struct ScannerView: View {
             return
         }
 
-        // High-Quality (Path B): reconstruct with on-device photogrammetry
-        #if !targetEnvironment(simulator)
-        if settings.captureMode == .highQuality,
-           let inputFolder = scanner.getPhotogrammetryInputURL(),
-           PhotogrammetryProcessor.isSupported {
-            runPhotogrammetrySave(project: project, inputFolder: inputFolder)
-            return
+        switch settings.captureMode {
+        case .highQuality:
+            #if !targetEnvironment(simulator)
+            if let inputFolder = scanner.getPhotogrammetryInputURL(), PhotogrammetryProcessor.isSupported {
+                runPhotogrammetrySave(project: project, inputFolder: inputFolder)
+            }
+            #endif
+            break
+        case .pointCloud:
+            if let cloud = pendingMesh { savePointCloudFlow(project: project, cloud: cloud) }
+        case .splatExport:
+            if let folder = scanner.getCaptureFolderURL() { runSplatExport(project: project, folder: folder) }
+        case .fast:
+            saveMeshFlow(project: project)
         }
-        #endif
+    }
 
-        // Point Cloud (Path C foundation): save the colored world-space points
-        if settings.captureMode == .pointCloud, let cloud = scanner.getCombinedMeshData() {
-            savePointCloudFlow(project: project, cloud: cloud)
-            return
-        }
+    /// Hide the save sheet, open the saved scan, and get the camera ready again.
+    private func finishSave(scan: Scan, project: Project) {
+        isSaving = false
+        savingProgress = ""
+        showingSaveDialog = false
+        pendingMesh = nil
+        scanner.resetScanning()
+        scanner.startPreview()
+        savedScan = scan
+        savedProject = project
+        showingSavedScan = true
+    }
 
-        // Splat (Desktop): package posed photos + point cloud and share for desktop training
-        if settings.captureMode == .splatExport, let folder = scanner.getCaptureFolderURL() {
-            runSplatExport(project: project, folder: folder)
-            return
-        }
+    private func failSave(_ message: String) {
+        isSaving = false
+        savingProgress = ""
+        errorMessage = message
+        showingError = true
+    }
 
-        // For Area mode, try plane-based reconstruction first
-        let rawMeshData: MeshData?
-        #if !targetEnvironment(simulator)
-        if settings.meshMode == .area, let planeData = scanner.getPlaneBasedMeshData() {
-            rawMeshData = planeData
-        } else {
-            rawMeshData = scanner.getCombinedMeshData()
-        }
-        #else
-        rawMeshData = scanner.getCombinedMeshData()
-        #endif
-
-        guard let rawMesh = rawMeshData else {
-            errorMessage = "No scan data available"
-            showingError = true
+    private func saveMeshFlow(project: Project) {
+        // Room Shell mode prefers clean detected planes; otherwise use the mesh.
+        guard let rawMesh = (settings.meshMode == .area ? scanner.getPlaneBasedMeshData() : nil) ?? pendingMesh else {
+            failSave("No scan data available")
             return
         }
 
         isSaving = true
         savingProgress = "Processing mesh..."
-
         let detailMeters = max(0.001, settings.detailMM / 1000.0)
         let wantColor = settings.captureTexture
+        let level = processingLevel
+        let format = exportFormat
+        let name = scanName
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                var meshData = MeshProcessor.postProcess(rawMesh, level: processingLevel)
+                var meshData = MeshProcessor.postProcess(rawMesh, level: level)
 
-                // Honor the DETAIL slider: weld vertices to the chosen grid spacing
-                // so a coarse setting (e.g. 20mm) yields a far lighter mesh — useful
-                // for scanning large land plots in one pass.
+                // DETAIL slider: merge vertices closer than the chosen spacing, so a
+                // coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if detailMeters > 0.005 {
                     meshData = MeshProcessor.weldNearbyVertices(meshData, threshold: detailMeters)
                     meshData = MeshProcessor.recalculateNormals(meshData)
                 }
-
-                // No-color option: clean uniform grey mesh for measuring / CAD,
-                // instead of the muddy per-vertex coloring.
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)
                 }
 
-                DispatchQueue.main.async { self.savingProgress = "Baking texture..." }
-
-                // Bake a high-resolution UV texture atlas for OBJ if we have camera data
                 var baked: BakedTexture?
-                if exportFormat == .obj && wantColor {
+                if format == .obj && wantColor {
+                    DispatchQueue.main.async { self.savingProgress = "Baking texture..." }
                     baked = scanner.bakeTexture(meshData: meshData)
                 }
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
-
-                let scan = try storageManager.saveScan(
-                    meshData: meshData,
-                    name: scanName,
-                    toProject: project,
-                    format: exportFormat,
-                    baked: baked
-                )
-
-                DispatchQueue.main.async {
-                    isSaving = false
-                    savingProgress = ""
-                    showingSaveDialog = false
-                    scanner.resetScanning()
-                    // Navigate to the saved scan's viewer
-                    savedScan = scan
-                    savedProject = project
-                    showingSavedScan = true
-                }
+                let scan = try storageManager.saveScan(meshData: meshData, name: name, toProject: project,
+                                                       format: format, baked: baked)
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
-                DispatchQueue.main.async {
-                    isSaving = false
-                    errorMessage = "Failed to save: \(error.localizedDescription)"
-                    showingError = true
-                }
+                DispatchQueue.main.async { failSave("Failed to save: \(error.localizedDescription)") }
             }
         }
     }
@@ -901,23 +715,21 @@ struct ScannerView: View {
     private func runSplatExport(project: Project, folder: URL) {
         let poses = scanner.capturedPoses
         guard !poses.isEmpty else {
-            errorMessage = "No photos captured. Move slowly around the subject, then save."
-            showingError = true
+            failSave("No photos captured. Move slowly around the subject, then save.")
             return
         }
         isSaving = true
         savingProgress = "Packaging for desktop…"
-        let cloud = scanner.getCombinedMeshData()
+        let cloud = pendingMesh
+        let name = scanName
 
         DispatchQueue.global(qos: .userInitiated).async {
             SplatExporter.writeBundle(imageFolder: folder, poses: poses, pointCloud: cloud)
             let zipURL = SplatExporter.zip(folder: folder)
 
-            // Keep an in-app point-cloud record so the scan shows up in Projects
-            let record = cloud.flatMap { try? storageManager.savePointCloud(meshData: $0, name: scanName, toProject: project) }
-
-            // Persist the zip WITH the scan so it's never lost if the share sheet
-            // glitches — it can be re-sent later from the scan's viewer.
+            // Keep an in-app record so the scan shows up in Projects, with the zip
+            // stored next to it so it can be re-sent later.
+            let record = cloud.flatMap { try? storageManager.savePointCloud(meshData: $0, name: name, toProject: project) }
             if let zipURL = zipURL, let record = record {
                 storageManager.attachSplatBundle(zipURL: zipURL, toScan: record.id, in: project)
             }
@@ -926,14 +738,18 @@ struct ScannerView: View {
                 isSaving = false
                 savingProgress = ""
                 showingSaveDialog = false
-                _ = record
+                pendingMesh = nil
+                scanner.resetScanning()
+                scanner.startPreview()
                 if let zipURL = zipURL {
-                    presentShareSheet(url: zipURL)
+                    // Let the sheet finish closing before presenting the share sheet.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                        presentShareSheet(url: zipURL)
+                    }
                 } else {
                     errorMessage = "Could not package the splat bundle."
                     showingError = true
                 }
-                scanner.resetScanning()
             }
         }
     }
@@ -951,49 +767,36 @@ struct ScannerView: View {
         top.present(activity, animated: true)
     }
 
-    /// Path C foundation: save the scan's colored world-space points as a point cloud.
+    /// Save the scan's coloured world-space points as a point cloud.
     private func savePointCloudFlow(project: Project, cloud: MeshData) {
         isSaving = true
         savingProgress = "Saving point cloud…"
         let detailMeters = max(0.001, settings.detailMM / 1000.0)
+        let grey = !settings.captureTexture
+        let name = scanName
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Honor the DETAIL slider: voxel-downsample to the chosen grid so a
-                // coarse setting yields a lighter cloud (lay-of-the-land), a fine
-                // setting keeps it dense.
-                let downsampled = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
-                let scan = try storageManager.savePointCloud(meshData: downsampled, name: scanName, toProject: project)
-                DispatchQueue.main.async {
-                    isSaving = false
-                    savingProgress = ""
-                    showingSaveDialog = false
-                    scanner.resetScanning()
-                    savedScan = scan
-                    savedProject = project
-                    showingSavedScan = true
-                }
+                var points = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
+                if grey { points = MeshProcessor.makeUniformGrey(points) }
+                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project)
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
-                DispatchQueue.main.async {
-                    isSaving = false
-                    savingProgress = ""
-                    errorMessage = "Failed to save point cloud: \(error.localizedDescription)"
-                    showingError = true
-                }
+                DispatchQueue.main.async { failSave("Failed to save point cloud: \(error.localizedDescription)") }
             }
         }
     }
 
     #if !targetEnvironment(simulator)
-    /// Path B: run on-device photogrammetry on the captured photos, then save the USDZ.
+    /// Run on-device photogrammetry on the captured photos, then save the USDZ.
     private func runPhotogrammetrySave(project: Project, inputFolder: URL) {
         isSaving = true
         savingProgress = "Reconstructing… 0%"
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).usdz")
         // Metric reference from the LiDAR mesh captured in the same session.
-        let lidarExtent = ScannerView.metricExtent(of: scanner.getCombinedMeshData())
-        let quality: PhotogrammetryProcessor.Quality =
-            settings.reconstructQuality == .draft ? .draft : .best
+        let lidarExtent = ScannerView.metricExtent(of: pendingMesh)
+        let quality: PhotogrammetryProcessor.Quality = settings.reconstructQuality == .draft ? .draft : .best
+        let name = scanName
 
         Task {
             do {
@@ -1010,29 +813,15 @@ struct ScannerView: View {
                 let modelScale = ScannerView.metricScale(forModel: outputURL, lidarExtent: lidarExtent)
                 let scan = try storageManager.importProcessedModel(
                     modelURL: outputURL,
-                    name: scanName,
+                    name: name,
                     toProject: project,
                     modelScale: modelScale,
                     photosFolder: inputFolder
                 )
                 try? FileManager.default.removeItem(at: outputURL)
-
-                DispatchQueue.main.async {
-                    isSaving = false
-                    savingProgress = ""
-                    showingSaveDialog = false
-                    scanner.resetScanning()
-                    savedScan = scan
-                    savedProject = project
-                    showingSavedScan = true
-                }
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
-                DispatchQueue.main.async {
-                    isSaving = false
-                    savingProgress = ""
-                    errorMessage = PhotogrammetryProcessor.friendlyMessage(for: error)
-                    showingError = true
-                }
+                DispatchQueue.main.async { failSave(PhotogrammetryProcessor.friendlyMessage(for: error)) }
             }
         }
     }
