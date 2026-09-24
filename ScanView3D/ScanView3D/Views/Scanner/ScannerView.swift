@@ -51,7 +51,7 @@ struct ScannerView: View {
 
             VStack(spacing: 0) {
                 topStatusBar
-                if scanner.isScanning, let warning = scanner.trackingWarning {
+                if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
                     trackingBanner(warning)
                 }
                 Spacer()

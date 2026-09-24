@@ -305,104 +305,226 @@ class TextureMapper {
         return colors
     }
 
-    // MARK: - High-Resolution Texture Baking
+    // MARK: - High-Resolution Texture Baking (photo patches)
 
-    /// Bake the frames into a UV texture atlas with per-face-corner UVs. Each
-    /// triangle gets its own atlas cell, filled with real camera pixels.
-    func bakeTexture(meshData: MeshData, atlasSize requestedSize: Int = 4096) -> BakedTexture? {
+    /// Bake the photos into a texture atlas. Neighbouring triangles that are
+    /// best seen by the same photo form one patch, and that part of the photo is
+    /// copied into the atlas at full resolution — so text and fine detail stay
+    /// readable and there are no seams inside a patch. Patches are shrunk evenly
+    /// only if everything wouldn't fit.
+    func bakeTexture(meshData: MeshData, atlasSize requestedSize: Int = 8192) -> BakedTexture? {
         let faceCount = meshData.faces.count
         let poses = makePoses()
         let frameList = capturedFrames
+        let vertexCount = meshData.vertices.count
         guard faceCount > 0, !poses.isEmpty else { return nil }
 
-        // Grid packing: one triangle per square cell; cols = ceil(sqrt(N)).
-        let cols = max(1, Int(Double(faceCount).squareRoot().rounded(.up)))
-        var atlas = max(1024, min(requestedSize, 8192))
-        if cols * 10 > atlas && cols * 10 <= 8192 { atlas = cols * 10 }
-        atlas = TextureMapper.affordableAtlasSize(atlas)
-        let cell = max(4, atlas / cols)
-        let af = Float(atlas)
-
-        let count = atlas * atlas * 4
-        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
-        buf.initialize(repeating: 160, count: count)
-        var ai = 3
-        while ai < count { buf[ai] = 255; ai += 4 }
-
-        var cornerUVs = [SIMD2<Float>](repeating: SIMD2<Float>(0, 0), count: faceCount * 3)
-        var faceFrame = [Int32](repeating: -1, count: faceCount)
-        let colorCount = meshData.colors.count
-
-        // 1. Choose the best visible frame per triangle and lay out its cell.
-        for f in 0..<faceCount {
+        func corners(_ f: Int) -> (Int, Int, Int)? {
             let face = meshData.faces[f]
-            guard face.count == 3 else { continue }
-            let i0 = Int(face[0]), i1 = Int(face[1]), i2 = Int(face[2])
-            guard i0 < meshData.vertices.count, i1 < meshData.vertices.count, i2 < meshData.vertices.count else { continue }
-            let v0 = meshData.vertices[i0], v1 = meshData.vertices[i1], v2 = meshData.vertices[i2]
+            guard face.count == 3 else { return nil }
+            let a = Int(face[0]), b = Int(face[1]), c = Int(face[2])
+            guard a < vertexCount, b < vertexCount, c < vertexCount else { return nil }
+            return (a, b, c)
+        }
 
-            let ox = (f % cols) * cell, oy = (f / cols) * cell
-            let inner = max(1, cell - 2)
-            cornerUVs[f * 3 + 0] = SIMD2<Float>((Float(ox + 1) + 0.5) / af, 1 - (Float(oy + 1) + 0.5) / af)
-            cornerUVs[f * 3 + 1] = SIMD2<Float>((Float(ox + 1 + inner) + 0.5) / af, 1 - (Float(oy + 1) + 0.5) / af)
-            cornerUVs[f * 3 + 2] = SIMD2<Float>((Float(ox + 1) + 0.5) / af, 1 - (Float(oy + 1 + inner) + 0.5) / af)
-
-            var fn = simd_cross(v1 - v0, v2 - v0)
-            let fnl = simd_length(fn)
-            if fnl > 1e-8 { fn /= fnl }
+        // How well frame `fi` sees face `f` (0 = not usable).
+        func score(_ f: Int, _ fi: Int) -> Float {
+            guard case let (a, b, c)? = corners(f) else { return 0 }
+            let v0 = meshData.vertices[a], v1 = meshData.vertices[b], v2 = meshData.vertices[c]
+            var n = simd_cross(v1 - v0, v2 - v0)
+            let len = simd_length(n)
+            guard len > 1e-10 else { return 0 }
+            n /= len
+            let pose = poses[fi]
             let centroid = (v0 + v1 + v2) / 3
-            var bestScore: Float = 0
-            for (fi, pose) in poses.enumerated() {
-                let toC = centroid - pose.position
-                let dist = simd_length(toC)
-                if dist < 1e-3 { continue }
-                let dir = toC / dist
-                let viewAlign = simd_dot(dir, pose.forward)
-                if viewAlign < 0.15 { continue }
-                let facing = abs(simd_dot(fn, dir))
-                if facing < 0.05 { continue }
-                guard let pc = pose.project(centroid), pose.isVisible(pc),
-                      pose.project(v0) != nil, pose.project(v1) != nil, pose.project(v2) != nil else { continue }
-                let score = facing * viewAlign / (dist * dist)
-                if score > bestScore { bestScore = score; faceFrame[f] = Int32(fi) }
-            }
+            let toC = centroid - pose.position
+            let dist = simd_length(toC)
+            guard dist > 1e-3 else { return 0 }
+            let dir = toC / dist
+            let viewAlign = simd_dot(dir, pose.forward)
+            let facing = abs(simd_dot(n, dir))
+            guard viewAlign > 0.15, facing > 0.1,
+                  let pc = pose.project(centroid), pose.isVisible(pc),
+                  pose.project(v0) != nil, pose.project(v1) != nil, pose.project(v2) != nil else { return 0 }
+            // Prefer close, head-on views near the image centre.
+            let centre = max(0.2, 1 - simd_length(pc.uv - SIMD2<Float>(0.5, 0.5)))
+            return facing * viewAlign * centre / (dist * dist)
+        }
 
-            // Fallback colour for triangles no frame sees.
-            var fcol = SIMD4<Float>(0.6, 0.6, 0.6, 1)
-            if colorCount > 0 {
-                fcol = (meshData.colors[min(i0, colorCount - 1)] + meshData.colors[min(i1, colorCount - 1)]
-                        + meshData.colors[min(i2, colorCount - 1)]) / 3
-            }
-            if faceFrame[f] < 0 {
-                rasterize(f: f, cols: cols, cell: cell, atlas: atlas, buf: buf) { _ in fcol }
+        // 1. Best frame per triangle.
+        var faceFrame = [Int32](repeating: -1, count: faceCount)
+        for f in 0..<faceCount {
+            var best: Float = 0
+            for fi in 0..<poses.count {
+                let s = score(f, fi)
+                if s > best { best = s; faceFrame[f] = Int32(fi) }
             }
         }
 
-        // 2. Fill cells frame by frame (one decoded image in memory at a time).
+        // 2. Edge neighbours, then smooth the choice so patches are large:
+        //    adopt the neighbours' frame when most of them use it and it sees us.
+        var edgeFirstFace: [UInt64: Int32] = [:]
+        var neighbours = [[Int32]](repeating: [], count: faceCount)
+        for f in 0..<faceCount {
+            guard case let (a, b, c)? = corners(f) else { continue }
+            for (p, q) in [(a, b), (b, c), (c, a)] {
+                let key = UInt64(min(p, q)) << 32 | UInt64(max(p, q))
+                if let other = edgeFirstFace[key] {
+                    neighbours[f].append(other)
+                    neighbours[Int(other)].append(Int32(f))
+                } else {
+                    edgeFirstFace[key] = Int32(f)
+                }
+            }
+        }
+        edgeFirstFace.removeAll()
+        for _ in 0..<2 {
+            for f in 0..<faceCount where !neighbours[f].isEmpty {
+                var counts: [Int32: Int] = [:]
+                for nb in neighbours[f] where faceFrame[Int(nb)] >= 0 { counts[faceFrame[Int(nb)], default: 0] += 1 }
+                guard let best = counts.max(by: { $0.value < $1.value }),
+                      best.key != faceFrame[f], best.value >= 2, score(f, Int(best.key)) > 0 else { continue }
+                faceFrame[f] = best.key
+            }
+        }
+
+        // 3. Patches = connected triangles sharing a frame (union-find).
+        var parent = Array(0..<faceCount)
+        func find(_ x: Int) -> Int {
+            var r = x
+            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
+            return r
+        }
+        for f in 0..<faceCount where faceFrame[f] >= 0 {
+            for nb in neighbours[f] where faceFrame[Int(nb)] == faceFrame[f] {
+                let ra = find(f), rb = find(Int(nb))
+                if ra != rb { parent[ra] = rb }
+            }
+        }
+        neighbours.removeAll()
+
+        struct Patch {
+            var frame: Int
+            var faces: [Int] = []
+            var uvMin = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+            var uvMax = SIMD2<Float>(repeating: -.greatestFiniteMagnitude)
+            var pixelSize = SIMD2<Float>(0, 0)      // in the stored photo
+            var origin = SIMD2<Int>(0, 0)           // in the atlas
+        }
+        var patchIndex: [Int: Int] = [:]
+        var patches: [Patch] = []
+        var cornerImageUV = [SIMD2<Float>](repeating: .zero, count: faceCount * 3)
+        var untextured: [Int] = []
+        for f in 0..<faceCount {
+            guard faceFrame[f] >= 0, case let (a, b, c)? = corners(f) else { untextured.append(f); continue }
+            let fi = Int(faceFrame[f])
+            let pose = poses[fi]
+            guard let p0 = pose.project(meshData.vertices[a]), let p1 = pose.project(meshData.vertices[b]),
+                  let p2 = pose.project(meshData.vertices[c]) else { untextured.append(f); continue }
+            let root = find(f)
+            let pi: Int
+            if let existing = patchIndex[root] { pi = existing } else {
+                pi = patches.count
+                patchIndex[root] = pi
+                patches.append(Patch(frame: fi))
+            }
+            patches[pi].faces.append(f)
+            for (k, p) in [p0, p1, p2].enumerated() {
+                cornerImageUV[f * 3 + k] = p.uv
+                patches[pi].uvMin = simd_min(patches[pi].uvMin, p.uv)
+                patches[pi].uvMax = simd_max(patches[pi].uvMax, p.uv)
+            }
+        }
+        for i in patches.indices {
+            let f = frameList[patches[i].frame]
+            let storedW = Float(min(f.imageWidth, maxImageWidth))
+            let storedH = Float(f.imageHeight) * storedW / Float(max(f.imageWidth, 1))
+            patches[i].pixelSize = (patches[i].uvMax - patches[i].uvMin) * SIMD2<Float>(storedW, storedH)
+        }
+
+        // 4. Pack patches into the atlas (shelves), shrinking evenly if needed.
+        let atlas = TextureMapper.affordableAtlasSize(max(2048, min(requestedSize, 8192)))
+        let pad = 3
+        let reserved = 8      // grey tile for triangles no photo sees
+        let totalArea = patches.reduce(Float(0)) { $0 + ($1.pixelSize.x + Float(2 * pad)) * ($1.pixelSize.y + Float(2 * pad)) }
+        var scale = min(1, (Float(atlas * atlas) * 0.8 / max(totalArea, 1)).squareRoot())
+        let order = patches.indices.sorted { patches[$0].pixelSize.y > patches[$1].pixelSize.y }
+        var packed = false
+        for _ in 0..<30 {
+            var x = reserved + pad, y = 0, shelf = 0
+            var ok = true
+            for i in order {
+                let w = Int((patches[i].pixelSize.x * scale).rounded(.up)) + 2 * pad
+                let h = Int((patches[i].pixelSize.y * scale).rounded(.up)) + 2 * pad
+                if x + w > atlas { x = 0; y += shelf; shelf = 0 }
+                if w > atlas || y + h > atlas { ok = false; break }
+                patches[i].origin = SIMD2<Int>(x, y)
+                x += w
+                shelf = max(shelf, h)
+            }
+            if ok { packed = true; break }
+            scale *= 0.9
+        }
+        guard packed else { return nil }
+
+        let count = atlas * atlas * 4
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
+        buf.initialize(repeating: 150, count: count)
+        var ai = 3
+        while ai < count { buf[ai] = 255; ai += 4 }
+
+        // 5. Copy each patch's region of its photo (plus padding, so edges blend).
         var byFrame = [[Int]](repeating: [], count: poses.count)
-        for f in 0..<faceCount where faceFrame[f] >= 0 { byFrame[Int(faceFrame[f])].append(f) }
+        for i in patches.indices { byFrame[patches[i].frame].append(i) }
         for (fi, members) in byFrame.enumerated() where !members.isEmpty {
             autoreleasepool {
-                let pose = poses[fi]
-                let image = DecodedImage(url: frameList[fi].imageURL)
+                guard let image = DecodedImage(url: frameList[fi].imageURL) else { return }
                 let gain = frameList[fi].gain
-                for f in members {
-                    let face = meshData.faces[f]
-                    let v0 = meshData.vertices[Int(face[0])], v1 = meshData.vertices[Int(face[1])], v2 = meshData.vertices[Int(face[2])]
-                    var fcol = SIMD4<Float>(0.6, 0.6, 0.6, 1)
-                    if colorCount > 0 {
-                        fcol = (meshData.colors[min(Int(face[0]), colorCount - 1)] + meshData.colors[min(Int(face[1]), colorCount - 1)]
-                                + meshData.colors[min(Int(face[2]), colorCount - 1)]) / 3
-                    }
-                    rasterize(f: f, cols: cols, cell: cell, atlas: atlas, buf: buf) { bary in
-                        guard let image = image else { return fcol }
-                        let world = bary.x * v0 + bary.y * v1 + bary.z * v2
-                        guard let p = pose.project(world) else { return fcol }
-                        return image.sample(p.uv, gain: gain)
+                let f = frameList[fi]
+                let storedW = Float(min(f.imageWidth, maxImageWidth))
+                let storedH = Float(f.imageHeight) * storedW / Float(max(f.imageWidth, 1))
+                for i in members {
+                    let p = patches[i]
+                    let w = Int((p.pixelSize.x * scale).rounded(.up)) + 2 * pad
+                    let h = Int((p.pixelSize.y * scale).rounded(.up)) + 2 * pad
+                    for ty in 0..<h {
+                        let ay = p.origin.y + ty
+                        guard ay < atlas else { continue }
+                        let py = p.uvMin.y * storedH + (Float(ty - pad) + 0.5) / scale
+                        for tx in 0..<w {
+                            let ax = p.origin.x + tx
+                            guard ax < atlas else { continue }
+                            let px = p.uvMin.x * storedW + (Float(tx - pad) + 0.5) / scale
+                            let c = image.sample(SIMD2<Float>(px / storedW, py / storedH), gain: gain)
+                            let idx = (ay * atlas + ax) * 4
+                            buf[idx] = UInt8(max(0, min(255, c.x * 255)))
+                            buf[idx + 1] = UInt8(max(0, min(255, c.y * 255)))
+                            buf[idx + 2] = UInt8(max(0, min(255, c.z * 255)))
+                        }
                     }
                 }
             }
         }
+
+        // 6. UVs per face corner (OBJ convention: origin bottom-left).
+        let af = Float(atlas)
+        var cornerUVs = [SIMD2<Float>](repeating: SIMD2<Float>(Float(reserved) / 2 / af, 1 - Float(reserved) / 2 / af),
+                                        count: faceCount * 3)
+        for p in patches {
+            let f = frameList[p.frame]
+            let storedW = Float(min(f.imageWidth, maxImageWidth))
+            let storedH = Float(f.imageHeight) * storedW / Float(max(f.imageWidth, 1))
+            let size = SIMD2<Float>(storedW, storedH)
+            for face in p.faces {
+                for k in 0..<3 {
+                    let pixel = (cornerImageUV[face * 3 + k] - p.uvMin) * size * scale
+                    let ax = Float(p.origin.x + pad) + pixel.x
+                    let ay = Float(p.origin.y + pad) + pixel.y
+                    cornerUVs[face * 3 + k] = SIMD2<Float>(ax / af, 1 - ay / af)
+                }
+            }
+        }
+        _ = untextured   // these keep the grey tile UVs set above
 
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: buf, width: atlas, height: atlas, bitsPerComponent: 8,
@@ -413,41 +535,8 @@ class TextureMapper {
             return nil
         }
         buf.deallocate()
+        DebugLogger.shared.info("Baked \(patches.count) photo patches into \(atlas)px atlas at \(Int(scale * 100))% resolution", category: "Texture")
         return BakedTexture(atlasImage: UIImage(cgImage: cg), cornerUVs: cornerUVs, atlasSize: atlas)
-    }
-
-    /// Fill triangle `f`'s atlas cell; `color` receives barycentric weights (a, b, c).
-    private func rasterize(f: Int, cols: Int, cell: Int, atlas: Int, buf: UnsafeMutablePointer<UInt8>,
-                           color: (SIMD3<Float>) -> SIMD4<Float>) {
-        let ox = (f % cols) * cell, oy = (f / cols) * cell
-        let inner = max(1, cell - 2)
-        let ax0 = Float(ox + 1), ay0 = Float(oy + 1)
-        let ax1 = Float(ox + 1 + inner), ay1 = Float(oy + 1)
-        let ax2 = Float(ox + 1), ay2 = Float(oy + 1 + inner)
-        let den = (ay1 - ay2) * (ax0 - ax2) + (ax2 - ax1) * (ay0 - ay2)
-        guard abs(den) > 1e-6 else { return }
-        let invDen = 1 / den
-        let bleed: Float = 1.5 / Float(inner)   // spill into the gutter to hide seams
-
-        for py in oy..<min(oy + cell, atlas) {
-            let fy = Float(py) + 0.5
-            for px in ox..<min(ox + cell, atlas) {
-                let fx = Float(px) + 0.5
-                var a = ((ay1 - ay2) * (fx - ax2) + (ax2 - ax1) * (fy - ay2)) * invDen
-                var b = ((ay2 - ay0) * (fx - ax2) + (ax0 - ax2) * (fy - ay2)) * invDen
-                var c = 1 - a - b
-                if a < -bleed || b < -bleed || c < -bleed { continue }
-                a = max(a, 0); b = max(b, 0); c = max(c, 0)
-                let sum = a + b + c
-                guard sum > 0 else { continue }
-                let col = color(SIMD3<Float>(a, b, c) / sum)
-                let idx = (py * atlas + px) * 4
-                buf[idx] = UInt8(max(0, min(255, col.x * 255)))
-                buf[idx + 1] = UInt8(max(0, min(255, col.y * 255)))
-                buf[idx + 2] = UInt8(max(0, min(255, col.z * 255)))
-                buf[idx + 3] = 255
-            }
-        }
     }
 
     /// Largest atlas that comfortably fits in the memory the app has left.

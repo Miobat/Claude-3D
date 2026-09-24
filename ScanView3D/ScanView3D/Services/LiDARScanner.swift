@@ -29,6 +29,8 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Points in the LiDAR depth cloud (Point Cloud / Splat modes).
     @Published var depthPointCount: Int = 0
     @Published var pointBudgetReached = false
+    /// Advice about how the user is moving (e.g. "walk around, don't pivot").
+    @Published var captureHint: String?
 
     // MARK: - Properties
 
@@ -278,6 +280,7 @@ class LiDARScanner: NSObject, ObservableObject {
         depthCloud.reset()
         depthPointCount = 0
         pointBudgetReached = false
+        captureHint = nil
         captureMode = .fast
         cameraPath = []
         needsOrigin = true
@@ -473,6 +476,7 @@ class LiDARScanner: NSObject, ObservableObject {
         }
         capturedPoses.append(CapturedPose(index: index, transform: frame.camera.transform,
                                           intrinsics: intrinsics, width: w, height: h))
+        updateParallaxHint()
 
         // JPEG with EXIF focal length — PhotogrammetrySession needs it.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -506,6 +510,17 @@ class LiDARScanner: NSObject, ObservableObject {
             CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
             CGImageDestinationFinalize(dest)
         }
+    }
+
+    /// Photogrammetry and splats need the camera to MOVE between photos, not
+    /// just turn. Warn if the photos all come from roughly one spot.
+    private func updateParallaxHint() {
+        guard capturedPoses.count >= 15, capturedPoses.count % 5 == 0 else { return }
+        let positions = capturedPoses.map { $0.transform.position }
+        let centre = positions.reduce(SIMD3<Float>(0, 0, 0)) { $0 + $1 } / Float(positions.count)
+        let spread = (positions.map { simd_distance_squared($0, centre) }.reduce(0, +) / Float(positions.count)).squareRoot()
+        let hint: String? = spread < 0.25 ? "Walk around the subject — turning on the spot gives a poor 3D result" : nil
+        if hint != captureHint { captureHint = hint }
     }
 
     /// ARKit's camera pose for every photo, stored next to the photos so the

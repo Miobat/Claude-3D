@@ -21,6 +21,21 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         context.coordinator.scanner = scanner
         context.coordinator.startUpdateLoop()
 
+        // Apple's standard "move your iPhone" guidance while tracking starts up
+        // or is lost; hides itself once tracking is good.
+        let coaching = ARCoachingOverlayView()
+        coaching.session = scanner.arSession
+        coaching.goal = .tracking
+        coaching.activatesAutomatically = true
+        coaching.translatesAutoresizingMaskIntoConstraints = false
+        arView.addSubview(coaching)
+        NSLayoutConstraint.activate([
+            coaching.topAnchor.constraint(equalTo: arView.topAnchor),
+            coaching.bottomAnchor.constraint(equalTo: arView.bottomAnchor),
+            coaching.leadingAnchor.constraint(equalTo: arView.leadingAnchor),
+            coaching.trailingAnchor.constraint(equalTo: arView.trailingAnchor)
+        ])
+
         return arView
     }
 
@@ -66,6 +81,9 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
 
             let anchors = scanner.meshAnchors
             var activeIDs = Set<UUID>()
+            // Building meshes is main-thread work; spread it over frames so the
+            // camera feed stays smooth when many anchors change at once.
+            var rebuildBudget = 3
 
             for anchor in anchors {
                 let id = anchor.identifier
@@ -85,7 +103,8 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
                     needsRebuild = false
                 }
 
-                if needsRebuild {
+                if needsRebuild && rebuildBudget > 0 {
+                    rebuildBudget -= 1
                     // Remove old entity if exists
                     if let old = meshEntities[id] {
                         old.removeFromParent()

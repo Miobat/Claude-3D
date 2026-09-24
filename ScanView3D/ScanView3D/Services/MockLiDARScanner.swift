@@ -22,6 +22,7 @@ class MockLiDARScanner: ObservableObject {
     @Published var photoLimitReached = false
     @Published var depthPointCount: Int = 0
     @Published var pointBudgetReached = false
+    @Published var captureHint: String?
 
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0

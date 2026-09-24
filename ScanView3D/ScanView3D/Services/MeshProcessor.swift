@@ -540,7 +540,9 @@ class MeshProcessor {
                 normals.append(SCNVector3(n.x, n.y, n.z))
                 let uvIdx = fi * 3 + k
                 let uv = uvIdx < baked.cornerUVs.count ? baked.cornerUVs[uvIdx] : SIMD2<Float>(0, 0)
-                uvs.append(CGPoint(x: CGFloat(uv.x), y: CGFloat(uv.y)))
+                // Baked UVs use the OBJ convention (origin bottom-left); SceneKit's
+                // texture origin is top-left, so flip V here.
+                uvs.append(CGPoint(x: CGFloat(uv.x), y: CGFloat(1 - uv.y)))
             }
         }
 
@@ -561,8 +563,8 @@ class MeshProcessor {
         material.diffuse.contents = baked.atlasImage
         material.diffuse.magnificationFilter = .linear
         material.diffuse.minificationFilter = .linear
-        // Nearest mip avoids cross-cell color bleed in the packed atlas.
-        material.diffuse.mipFilter = .nearest
+        // Photo patches are padded, so smooth mipmaps don't bleed between them.
+        material.diffuse.mipFilter = .linear
         material.diffuse.wrapS = .clamp
         material.diffuse.wrapT = .clamp
         geometry.materials = [material]
