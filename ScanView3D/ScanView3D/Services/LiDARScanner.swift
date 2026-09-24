@@ -695,10 +695,10 @@ class LiDARScanner: NSObject, ObservableObject {
     // MARK: - Mesh Data Access
 
     /// Combine the scan into one mesh on a background queue.
-    /// Anchor data is snapshotted on the main thread first, so it is safe to call
-    /// while ARKit is still delivering updates.
+    /// Copy the Metal buffer bytes on the delegate/main queue before dispatching.
+    /// Retaining an ARMeshAnchor alone does not give a worker owned geometry.
     func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
-        let anchors = meshAnchors
+        let anchors = meshAnchors.map(MeshAnchorSnapshot.init)
         let path = cameraPath.isEmpty ? [scanOrigin] : cameraPath
         let range = rangeMeters
         let mode = meshMode
@@ -724,7 +724,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
     /// Merge anchors into world space, keeping triangles within `range` of the
     /// walked path whose ARKit classification passes the mesh mode.
-    private static func combine(anchors: [ARMeshAnchor], path: [SIMD3<Float>], range: Float,
+    private static func combine(anchors: [MeshAnchorSnapshot], path: [SIMD3<Float>], range: Float,
                                 meshMode: ScanSettings.MeshMode) -> MeshData? {
         guard !anchors.isEmpty else { return nil }
         let vertexIndex = PathRangeIndex(points: path, radius: range)
@@ -758,20 +758,14 @@ class LiDARScanner: NSObject, ObservableObject {
             }
 
             // ARKit classifies FACES (one UInt8 per triangle), not vertices.
-            let classification = geometry.classification
             var localIndex = [Int32](repeating: -1, count: vertexCount)
 
-            for f in 0..<geometry.faces.count {
+            for f in 0..<geometry.faceCount {
                 let indices = geometry.vertexIndicesOf(face: f)
                 guard indices.count == 3,
                       indices.allSatisfy({ Int($0) < vertexCount && inRange[Int($0)] }) else { continue }
 
-                var faceClass: UInt8 = 0
-                if let c = classification {
-                    faceClass = c.buffer.contents()
-                        .advanced(by: c.offset + c.stride * f)
-                        .assumingMemoryBound(to: UInt8.self).pointee
-                }
+                let faceClass = geometry.classificationOf(face: f)
                 guard meshMode.includes(classification: faceClass) else { continue }
 
                 var mapped: [UInt32] = []
@@ -983,6 +977,82 @@ extension LiDARScanner: ARSessionDelegate {
         guard session === arSession else { return }
         scanProgress = "Capture interrupted — save the checkpoint or start a new scan"
         // Never silently assume the interrupted AR coordinate frame is unchanged.
+    }
+}
+
+/// A background checkpoint must not keep reading buffers owned by an updating
+/// ARKit session. Data(bytes:count:) makes an owned copy, preserving packed float3
+/// layout (12 bytes, not SIMD3's 16-byte stride) and per-source offsets/strides.
+private struct MeshAnchorSnapshot {
+    let transform: simd_float4x4
+    let geometry: Geometry
+
+    init(_ anchor: ARMeshAnchor) {
+        transform = anchor.transform
+        geometry = Geometry(anchor.geometry)
+    }
+
+    struct Source {
+        let bytes: Data
+        let count: Int
+        let offset: Int
+        let stride: Int
+
+        init(_ source: ARGeometrySource) {
+            bytes = Data(bytes: source.buffer.contents(), count: source.buffer.length)
+            count = source.count
+            offset = source.offset
+            stride = source.stride
+        }
+
+        func vector(at index: UInt32) -> SIMD3<Float> {
+            let start = offset + stride * Int(index)
+            return bytes.withUnsafeBytes { data in
+                SIMD3<Float>(data.loadUnaligned(fromByteOffset: start, as: Float.self),
+                             data.loadUnaligned(fromByteOffset: start + 4, as: Float.self),
+                             data.loadUnaligned(fromByteOffset: start + 8, as: Float.self))
+            }
+        }
+    }
+
+    struct Geometry {
+        let vertices: Source
+        let normals: Source
+        let classifications: Source?
+        let faces: Data
+        let faceCount: Int
+        let indicesPerFace: Int
+        let bytesPerIndex: Int
+
+        init(_ geometry: ARMeshGeometry) {
+            vertices = Source(geometry.vertices)
+            normals = Source(geometry.normals)
+            classifications = geometry.classification.map(Source.init)
+            faces = Data(bytes: geometry.faces.buffer.contents(), count: geometry.faces.buffer.length)
+            faceCount = geometry.faces.count
+            indicesPerFace = geometry.faces.indexCountPerPrimitive
+            bytesPerIndex = geometry.faces.bytesPerIndex
+        }
+
+        func vertex(at index: UInt32) -> SIMD3<Float> { vertices.vector(at: index) }
+        func normal(at index: UInt32) -> SIMD3<Float> { normals.vector(at: index) }
+
+        func vertexIndicesOf(face: Int) -> [UInt32] {
+            guard indicesPerFace == 3, bytesPerIndex == 2 || bytesPerIndex == 4 else { return [] }
+            return faces.withUnsafeBytes { data in
+                (0..<3).map { corner in
+                    let start = (face * 3 + corner) * bytesPerIndex
+                    return bytesPerIndex == 4
+                        ? data.loadUnaligned(fromByteOffset: start, as: UInt32.self)
+                        : UInt32(data.loadUnaligned(fromByteOffset: start, as: UInt16.self))
+                }
+            }
+        }
+
+        func classificationOf(face: Int) -> UInt8 {
+            guard let source = classifications, face < source.count else { return 0 }
+            return source.bytes[source.offset + source.stride * face]
+        }
     }
 }
 

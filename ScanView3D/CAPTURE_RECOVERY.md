@@ -36,6 +36,8 @@ run after Stop and on background/interruption. Encoding happens on a serial
 background queue. A payload uses a new binary property-list filename; the small
 JSON manifest switches to it only after writing succeeds. Failed updates preserve
 the previous checkpoint. Metadata-only updates do not erase existing geometry.
+Mesh geometry buffer bytes are copied before background processing; checkpoints
+do not keep reading a live ARKit-owned Metal buffer while capture continues.
 
 `Documents/CaptureRecovery/<capture-id>/checkpoint.json` references a
 `mesh-<uuid>.plist` payload and the source-photo folder under `Documents/Captures`.
