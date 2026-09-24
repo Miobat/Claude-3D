@@ -162,7 +162,6 @@ class StorageManager: ObservableObject {
                 fileURL = try OBJExporter.export(
                     meshData: meshData,
                     fileName: scanId.uuidString,
-                    textureAtlas: nil,
                     directory: scanDir
                 )
             }
