@@ -12,7 +12,10 @@ web prototype and are not part of the app.)
 - **You cannot build locally here.** The owner's Mac can't run a current Xcode, and
   cloud agents don't have Xcode. Every build happens on **GitHub Actions**
   (`.github/workflows/testflight.yml`, macOS runner, Xcode 26+).
-- **Pushing publishes.** A push that changes `ScanView3D/**` or
+- **Publishing policy:** on `codex/capture-recovery` and branches containing its
+  workflow change, `codex/**` pushes validate only. TestFlight needs an explicit
+  manual workflow run. Other integration branches still publish on push.
+  Older branches without this change still use the original policy: a push changing `ScanView3D/**` or
   `.github/workflows/**` on `main`, `master`, `claude/**` or `codex/**` builds,
   signs and uploads the app to **TestFlight** automatically (fastlane lane
   `beta_manual`). Build numbers are timestamps, so every build uploads.
@@ -33,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10031`/`B10031`). Deleting a file = remove those 4 lines too.
+(currently `A10033`/`B10033`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -129,3 +132,13 @@ index before publishing. `createProject` returns an optional; `updateScan` and
 measurement saves throw. Failed saves must not reset the capture.
 The shared `StorageCore` source is compiled directly by Xcode (A10030/B10030),
 and independently tested by Swift Package Manager. Validation gates TestFlight.
+
+## 8. Capture recovery and location
+
+See `ScanView3D/CAPTURE_RECOVERY.md`. Stop is asynchronous: wait for its completion
+before combining geometry, processing, or deleting capture files. Each new capture
+gets its own ARSession; worker epoch checks reject stale results. Keep-for-later
+must reset with `keepPhotos: true`, not delete photos still owned by a checkpoint.
+`CaptureSafety.swift` is shared with the Foundation tests (A10031/B10031).
+`CaptureRecovery.swift` owns durable manifests/payloads and the recovery list
+(A10032/B10032). GPS metadata is approximate and does not georeference the mesh.

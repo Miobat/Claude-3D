@@ -7,6 +7,8 @@ import Combine
 class MockLiDARScanner: ObservableObject {
     @Published var isScanning = false
     @Published var isPaused = false
+    @Published private(set) var isFinalizing = false
+    @Published var needsRecoveryCheckpoint = false
     @Published var scanProgress: String = "Ready to scan (Simulator Mode)"
     @Published var vertexCount: Int = 0
     @Published var faceCount: Int = 0
@@ -37,6 +39,7 @@ class MockLiDARScanner: ObservableObject {
     let textureMapper = TextureMapper()
 
     func startPreview() {
+        guard !isScanning, !isFinalizing else { return }
         isPreviewing = true
         scanProgress = "Point camera at area to scan"
     }
@@ -94,7 +97,7 @@ class MockLiDARScanner: ObservableObject {
         scanProgress = "Scanning resumed..."
     }
 
-    func stopScanning() {
+    func stopScanning(completion: @escaping () -> Void = {}) {
         scanTimer?.invalidate()
         scanTimer = nil
         isScanning = false
@@ -107,16 +110,19 @@ class MockLiDARScanner: ObservableObject {
             faceCount = mesh.faceCount
         }
         scanProgress = "Scan complete"
+        completion()
     }
 
     func continueScanning() {
+        guard !needsRecoveryCheckpoint else { return }
         isScanning = true
         isPaused = false
         scanProgress = "Scanning... (Simulated)"
     }
 
-    func resetScanning() {
+    func resetScanning(keepPhotos: Bool = false) {
         stopScanning()
+        needsRecoveryCheckpoint = false
         meshData = nil
         vertexCount = 0
         faceCount = 0

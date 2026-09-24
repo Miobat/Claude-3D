@@ -16,6 +16,8 @@ class LiDARScanner: NSObject, ObservableObject {
 
     @Published var isScanning = false
     @Published var isPaused = false
+    @Published private(set) var isFinalizing = false
+    @Published var needsRecoveryCheckpoint = false
     @Published var scanProgress: String = "Ready to scan"
     @Published var vertexCount: Int = 0
     @Published var faceCount: Int = 0
@@ -38,7 +40,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
     // MARK: - Properties
 
-    private(set) var arSession: ARSession
+    @Published private(set) var arSession: ARSession
     private var captureTexture: Bool = true
     private(set) var rangeMeters: Float = 3.0
     private let scanQuality: ScanSettings.ScanQuality = .standard
@@ -78,6 +80,10 @@ class LiDARScanner: NSObject, ObservableObject {
     private var lastPhotoTransform: simd_float4x4?
     private var useHighResPhotos = false
     private var highResCaptureInFlight = false
+    private let epoch = CaptureEpoch()
+    private let photoWork = DispatchGroup()
+    private var nextPhotoIndex = 0
+    private var finalizationCallbacks: [() -> Void] = []
 
     // Motion (for blur rejection)
     private var lastTickTransform: simd_float4x4?
@@ -118,7 +124,7 @@ class LiDARScanner: NSObject, ObservableObject {
     // MARK: - Camera Preview
 
     func startPreview() {
-        guard !isPreviewing && !isScanning else { return }
+        guard !isPreviewing && !isScanning && !isFinalizing else { return }
         guard LiDARScanner.isLiDARAvailable else { return }
 
         let configuration = ARWorldTrackingConfiguration()
@@ -145,11 +151,17 @@ class LiDARScanner: NSObject, ObservableObject {
         highResPhotos: Bool = false,
         alignToNorth: Bool = false
     ) {
+        guard !isScanning, !isFinalizing else { return }
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
             return
         }
 
+        arSession.pause()
+        arSession.delegate = nil
+        isPreviewing = false
+        arSession = ARSession()
+        arSession.delegate = self
         clearScanData()
 
         self.captureTexture = captureTexture
@@ -160,7 +172,12 @@ class LiDARScanner: NSObject, ObservableObject {
 
         let usesPhotos = captureMode == .highQuality || captureMode == .splatExport
         if usesPhotos {
-            captureFolderURL = makeCaptureFolder()
+            guard let folder = makeCaptureFolder() else {
+                scanError = "Cannot create the photo folder. Free storage and try again."
+                startPreview()
+                return
+            }
+            captureFolderURL = folder
         }
 
         textureMapper.configure(quality: scanQuality)
@@ -218,6 +235,7 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     func resumeScanning() {
+        guard isScanning, !isFinalizing, !needsRecoveryCheckpoint else { return }
         guard let config = arSession.configuration else { return }
         arSession.run(config)
         isPaused = false
@@ -225,20 +243,39 @@ class LiDARScanner: NSObject, ObservableObject {
         startFrameCapture()
     }
 
-    func stopScanning() {
-        writePoseFile()
+    func stopScanning(completion: @escaping () -> Void = {}) {
+        if isFinalizing { finalizationCallbacks.append(completion); return }
+        guard isScanning else { completion(); return }
+        isFinalizing = true
+        finalizationCallbacks.append(completion)
         unlockWhiteBalance()
         arSession.pause()
         isScanning = false
         isPaused = false
-        scanProgress = "Scan complete"
+        scanProgress = "Finishing accepted capture work…"
         stopFrameCapture()
         stopMemoryMonitor()
+        let token = epoch.current
+        let draining = DispatchGroup()
+        draining.enter()
+        textureMapper.drain { draining.leave() }
+        draining.enter()
+        depthCloud.drain { draining.leave() }
+        draining.enter()
+        photoWork.notify(queue: .main) { draining.leave() }
+        draining.notify(queue: .main) { [weak self] in
+            guard let self, self.epoch.isCurrent(token) else { return }
+            self.isFinalizing = false
+            self.scanProgress = "Scan complete"
+            let callbacks = self.finalizationCallbacks
+            self.finalizationCallbacks.removeAll()
+            callbacks.forEach { $0() }
+        }
     }
 
     /// Continue a stopped (not reset) scan, keeping everything captured so far.
     func continueScanning() {
-        guard let config = arSession.configuration, !isScanning else { return }
+        guard let config = arSession.configuration, !isScanning, !isFinalizing, !needsRecoveryCheckpoint else { return }
         arSession.run(config)
         isScanning = true
         isPaused = false
@@ -247,14 +284,22 @@ class LiDARScanner: NSObject, ObservableObject {
         startMemoryMonitor()
     }
 
-    func resetScanning() {
-        stopScanning()
-        clearScanData()
-        scanProgress = "Ready to scan"
+    func resetScanning(keepPhotos: Bool = false) {
+        stopScanning { [weak self] in
+            guard let self else { return }
+            if keepPhotos { self.captureFolderURL = nil }
+            self.clearScanData()
+            self.scanProgress = "Ready to scan"
+            self.startPreview()
+        }
     }
 
     /// Drop everything from the previous scan, including its temporary photo folder.
     private func clearScanData() {
+        epoch.invalidate()
+        nextPhotoIndex = 0
+        pendingHighResSaves = 0
+        needsRecoveryCheckpoint = false
         meshAnchorsByID.removeAll()
         planeAnchorsByID.removeAll()
         vertexCount = 0
@@ -309,6 +354,7 @@ class LiDARScanner: NSObject, ObservableObject {
     private func captureCurrentFrame() {
         guard isScanning && !isPaused,
               let frame = arSession.currentFrame else { return }
+        let token = epoch.current
 
         // Poses are unreliable while tracking is limited (starting up, moving too
         // fast, too dark). Capturing then produces smeared textures and bad photos.
@@ -350,14 +396,15 @@ class LiDARScanner: NSObject, ObservableObject {
                 }
             }
             textureMapper.captureFrame(from: frame, exposure: currentExposure()) { [weak self] count in
-                self?.capturedFrameCount = count
+                guard let self, self.epoch.isCurrent(token) else { return }
+                self.capturedFrameCount = count
             }
         }
 
         // Point Cloud / Splat: dense coloured points from the depth sensor.
         if captureMode == .pointCloud || captureMode == .splatExport {
             depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5)) { [weak self] count, full in
-                guard let self = self else { return }
+                guard let self = self, self.epoch.isCurrent(token) else { return }
                 self.depthPointCount = count
                 if full && !self.pointBudgetReached {
                     self.pointBudgetReached = true
@@ -449,38 +496,72 @@ class LiDARScanner: NSObject, ObservableObject {
             return
         }
         highResCaptureInFlight = true
+        let token = epoch.current
+        let request = PhotoRequest(PhotoSample(frame))
+        photoWork.enter()
+        let finishRequest: (PhotoSample?) -> Void = { [weak self] supplied in
+            guard let self, !request.completed else { return }
+            request.completed = true
+            let sample = supplied ?? request.fallback
+            request.fallback = nil // release the camera buffer immediately on success
+            defer { self.photoWork.leave() }
+            guard self.epoch.isCurrent(token), let sample else { return }
+            self.highResCaptureInFlight = false
+            self.savePhoto(sample)
+        }
+        // ARKit may cancel a still request when the session is interrupted. A
+        // bounded fallback keeps Stop from waiting indefinitely for that callback.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { finishRequest(nil) }
         arSession.captureHighResolutionFrame { [weak self] hiRes, _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.highResCaptureInFlight = false
-                guard self.isScanning else { return }
-                // Fall back to the regular frame if the 12 MP capture failed.
-                self.savePhoto(hiRes ?? frame)
-            }
+            guard self != nil else { return }
+            let sample = hiRes.map(PhotoSample.init)
+            DispatchQueue.main.async { finishRequest(sample) }
         }
     }
 
     private func savePhoto(_ frame: ARFrame) {
-        guard let folder = captureFolderURL, highResFrameCount < maxHighResFrames else { return }
-        let index = highResFrameCount
-        highResFrameCount = index + 1
+        savePhoto(PhotoSample(frame))
+    }
 
-        let pixelBuffer = frame.capturedImage
+    private struct PhotoSample {
+        let image: CVPixelBuffer
+        let transform: simd_float4x4
+        let intrinsics: simd_float3x3
+        let resolution: CGSize
+        init(_ frame: ARFrame) {
+            image = frame.capturedImage
+            transform = frame.camera.transform
+            intrinsics = frame.camera.intrinsics
+            resolution = frame.camera.imageResolution
+        }
+    }
+
+    private final class PhotoRequest {
+        var fallback: PhotoSample?
+        var completed = false // main queue only
+        init(_ fallback: PhotoSample) { self.fallback = fallback }
+    }
+
+    private func savePhoto(_ sample: PhotoSample) {
+        guard let folder = captureFolderURL, highResFrameCount + pendingHighResSaves < maxHighResFrames else { return }
+        let index = nextPhotoIndex
+        nextPhotoIndex += 1
+        let token = epoch.current
+
+        let pixelBuffer = sample.image
         let w = CVPixelBufferGetWidth(pixelBuffer)
         let h = CVPixelBufferGetHeight(pixelBuffer)
 
         // Intrinsics must describe THIS image. If ARKit reports them for a
         // different resolution (e.g. the video stream), rescale them.
-        var intrinsics = frame.camera.intrinsics
-        let res = frame.camera.imageResolution
+        var intrinsics = sample.intrinsics
+        let res = sample.resolution
         if res.width > 0, res.height > 0, abs(Double(w) - Double(res.width)) > 1 {
             let sx = Float(Double(w) / Double(res.width)), sy = Float(Double(h) / Double(res.height))
             intrinsics[0][0] *= sx; intrinsics[2][0] *= sx
             intrinsics[1][1] *= sy; intrinsics[2][1] *= sy
         }
-        capturedPoses.append(CapturedPose(index: index, transform: frame.camera.transform,
-                                          intrinsics: intrinsics, width: w, height: h))
-        updateParallaxHint()
+        let pose = CapturedPose(index: index, transform: sample.transform, intrinsics: intrinsics, width: w, height: h)
 
         // JPEG with EXIF focal length — PhotogrammetrySession needs it.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -491,10 +572,28 @@ class LiDARScanner: NSObject, ObservableObject {
         let focalLength35mm = physicalFocalMM * 36.0 / sensorWidthMM
 
         pendingHighResSaves += 1
+        photoWork.enter()
         hqSaveQueue.async { [ciContext] in
-            defer { DispatchQueue.main.async { self.pendingHighResSaves -= 1 } }
+            var failure: Error?
+            var saved = false
+            defer {
+                DispatchQueue.main.async {
+                    defer { self.photoWork.leave() }
+                    guard self.epoch.isCurrent(token) else { return }
+                    self.pendingHighResSaves -= 1
+                    if saved {
+                        self.capturedPoses.append(pose)
+                        self.highResFrameCount = self.capturedPoses.count
+                        self.updateParallaxHint()
+                    } else {
+                        self.scanError = "A photo could not be saved. Existing photos are kept. \(failure?.localizedDescription ?? "JPEG encoding failed")"
+                    }
+                }
+            }
+            let temporary = folder.appendingPathComponent(".pending-\(UUID().uuidString).jpg")
+            defer { try? FileManager.default.removeItem(at: temporary) }
             guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent),
-                  let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
+                  let dest = CGImageDestinationCreateWithURL(temporary as CFURL, "public.jpeg" as CFString, 1, nil) else { return }
             let exif: [CFString: Any] = [
                 kCGImagePropertyExifFocalLength: physicalFocalMM,
                 kCGImagePropertyExifFocalLenIn35mmFilm: Int(focalLength35mm),
@@ -512,7 +611,14 @@ class LiDARScanner: NSObject, ObservableObject {
                 kCGImageDestinationLossyCompressionQuality: 0.9
             ]
             CGImageDestinationAddImage(dest, cgImage, properties as CFDictionary)
-            CGImageDestinationFinalize(dest)
+            guard CGImageDestinationFinalize(dest) else { return }
+            do {
+                try FileManager.default.moveItem(at: temporary, to: url)
+                var poses = try PoseFile.read(forPhotoFolder: folder)
+                poses.append(pose)
+                try PoseFile.write(poses, forPhotoFolder: folder)
+                saved = true
+            } catch { failure = error }
         }
     }
 
@@ -525,22 +631,6 @@ class LiDARScanner: NSObject, ObservableObject {
         let spread = (positions.map { simd_distance_squared($0, centre) }.reduce(0, +) / Float(positions.count)).squareRoot()
         let hint: String? = spread < 0.25 ? "Walk around the subject — turning on the spot gives a poor 3D result" : nil
         if hint != captureHint { captureHint = hint }
-    }
-
-    /// ARKit's camera pose for every photo, stored next to the photos so the
-    /// High-Quality model can later be aligned to real-world scale and gravity.
-    private func writePoseFile() {
-        guard let folder = captureFolderURL, !capturedPoses.isEmpty else { return }
-        let entries: [[String: Any]] = capturedPoses.map { p in
-            let m = p.transform
-            let cols = [m.columns.0, m.columns.1, m.columns.2, m.columns.3]
-            return ["index": p.index, "width": p.width, "height": p.height,
-                    "transform": cols.flatMap { [$0.x, $0.y, $0.z, $0.w] }.map { Double($0) }]
-        }
-        // Small file: write it right away so a following Reset can't race it.
-        if let data = try? JSONSerialization.data(withJSONObject: entries) {
-            try? data.write(to: PoseFile.url(forPhotoFolder: folder))
-        }
     }
 
     /// Folder of full-res photos for photogrammetry, or nil if not a High-Quality scan.
@@ -830,10 +920,12 @@ class LiDARScanner: NSObject, ObservableObject {
 
 extension LiDARScanner: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        guard session === arSession else { return }
         handle(anchors: anchors)
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        guard session === arSession else { return }
         handle(anchors: anchors)
     }
 
@@ -857,6 +949,7 @@ extension LiDARScanner: ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
+        guard session === arSession, isScanning else { return }
         var meshChanged = false
         for anchor in anchors {
             if meshAnchorsByID.removeValue(forKey: anchor.identifier) != nil { meshChanged = true }
@@ -867,23 +960,29 @@ extension LiDARScanner: ARSessionDelegate {
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        guard session === arSession else { return }
         let message = LiDARScanner.trackingMessage(for: camera.trackingState)
         if message != trackingWarning { trackingWarning = message }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
+        guard session === arSession else { return }
         scanError = "AR Session Error: \(error.localizedDescription)"
-        if isScanning { pauseScanning() }
+        if isScanning { pauseScanning(); needsRecoveryCheckpoint = true }
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
+        guard session === arSession else { return }
         scanProgress = "Session interrupted"
         isPaused = true
+        stopFrameCapture()
+        if isScanning { needsRecoveryCheckpoint = true }
     }
 
     func sessionInterruptionEnded(_ session: ARSession) {
-        scanProgress = "Resuming scan..."
-        isPaused = false
+        guard session === arSession else { return }
+        scanProgress = "Capture interrupted — save the checkpoint or start a new scan"
+        // Never silently assume the interrupted AR coordinate frame is unchanged.
     }
 }
 
@@ -900,6 +999,7 @@ final class DepthPointAccumulator {
     }
 
     private let queue = DispatchQueue(label: "scanview.depthcloud", qos: .utility)
+    private let epoch = CaptureEpoch()
     private let lock = NSLock()
     private var cells: [SIMD3<Int32>: Cell] = [:]
     private var voxelSize: Float = 0.01
@@ -920,10 +1020,16 @@ final class DepthPointAccumulator {
     }
 
     func reset() {
+        epoch.invalidate()
+        inFlight = false
         lock.lock()
         cells.removeAll()
         full = false
         lock.unlock()
+    }
+
+    func drain(completion: @escaping () -> Void) {
+        queue.async { DispatchQueue.main.async(execute: completion) }
     }
 
     /// Main thread. Converts one frame in the background (one at a time, so
@@ -931,6 +1037,7 @@ final class DepthPointAccumulator {
     func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool) -> Void) {
         guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
         inFlight = true
+        let token = epoch.current
         let depthMap = depthData.depthMap
         let confidence = depthData.confidenceMap
         let image = frame.capturedImage
@@ -943,24 +1050,29 @@ final class DepthPointAccumulator {
             let batch = DepthPointAccumulator.points(depth: depthMap, confidence: confidence, image: image,
                                                      transform: transform, intrinsics: intrinsics,
                                                      imageSize: SIMD2<Float>(imageW, imageH), maxDistance: maxDistance)
-            self.lock.lock()
-            let inv = 1 / self.voxelSize
-            for (p, c) in batch {
-                let s = p * inv
-                let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
-                if var cell = self.cells[key] {
-                    cell.position += p; cell.color += c; cell.count += 1
-                    self.cells[key] = cell
-                } else if self.cells.count < self.maxPoints {
-                    self.cells[key] = Cell(position: p, color: c, count: 1)
-                } else {
-                    self.full = true
+            var count = 0
+            var isFull = false
+            self.epoch.withCurrent(token) {
+                self.lock.lock()
+                defer { self.lock.unlock() }
+                let inv = 1 / self.voxelSize
+                for (p, c) in batch {
+                    let s = p * inv
+                    let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+                    if var cell = self.cells[key] {
+                        cell.position += p; cell.color += c; cell.count += 1
+                        self.cells[key] = cell
+                    } else if self.cells.count < self.maxPoints {
+                        self.cells[key] = Cell(position: p, color: c, count: 1)
+                    } else {
+                        self.full = true
+                    }
                 }
+                count = self.cells.count
+                isFull = self.full
             }
-            let count = self.cells.count
-            let isFull = self.full
-            self.lock.unlock()
             DispatchQueue.main.async {
+                guard self.epoch.isCurrent(token) else { return }
                 self.inFlight = false
                 onUpdate(count, isFull)
             }
@@ -1063,6 +1175,42 @@ final class DepthPointAccumulator {
 enum PoseFile {
     static let suffix = "_poses.json"
 
+    private struct Entry: Codable {
+        let index: Int
+        let width: Int
+        let height: Int
+        let transform: [Float]
+        let intrinsics: [Float]
+    }
+
+    static func write(_ poses: [CapturedPose], forPhotoFolder folder: URL) throws {
+        let entries = poses.map { pose -> Entry in
+            let m = pose.transform
+            let k = pose.intrinsics
+            return Entry(index: pose.index, width: pose.width, height: pose.height,
+                         transform: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
+                         intrinsics: [k.columns.0, k.columns.1, k.columns.2].flatMap { [$0.x, $0.y, $0.z] })
+        }
+        try JSONEncoder().encode(entries).write(to: url(forPhotoFolder: folder), options: .atomic)
+    }
+
+    static func read(forPhotoFolder folder: URL) throws -> [CapturedPose] {
+        let file = url(forPhotoFolder: folder)
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let entries = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: file))
+        var seen = Set<Int>()
+        return try entries.map { entry in
+            let k = entry.intrinsics
+            guard entry.index >= 0, seen.insert(entry.index).inserted, entry.width > 0, entry.height > 0,
+                  entry.transform.count == 16, entry.transform.allSatisfy({ $0.isFinite }),
+                  k.count == 9, k.allSatisfy({ $0.isFinite }), k[0] > 0, k[4] > 0,
+                  let transform = Scan.matrix(entry.transform) else { throw CocoaError(.fileReadCorruptFile) }
+            return CapturedPose(index: entry.index, transform: transform,
+                intrinsics: simd_float3x3(SIMD3(k[0], k[1], k[2]), SIMD3(k[3], k[4], k[5]), SIMD3(k[6], k[7], k[8])),
+                width: entry.width, height: entry.height)
+        }
+    }
+
     static func url(forPhotoFolder folder: URL) -> URL {
         folder.deletingLastPathComponent().appendingPathComponent(folder.lastPathComponent + suffix)
     }
@@ -1082,7 +1230,7 @@ enum PoseFile {
 }
 
 /// Combined mesh data from all scan anchors
-struct MeshData {
+struct MeshData: Codable {
     let vertices: [SIMD3<Float>]
     let normals: [SIMD3<Float>]
     let faces: [[UInt32]]

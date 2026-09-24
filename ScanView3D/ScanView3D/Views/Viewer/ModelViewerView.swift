@@ -167,13 +167,18 @@ struct ModelViewerView: View {
                         Text("Size: \(scan.formattedFileSize)")
                         Text("Created: \(scan.createdAt.formattedString)")
                         if scan.northAligned == true {
-                            Text("Aligned to north (−Z = north)")
+                            Text("Compass alignment requested (−Z ≈ north)")
                         }
                         if let lat = scan.latitude, let lon = scan.longitude {
-                            Text(String(format: "GPS: %.6f, %.6f", lat, lon))
+                            Text(String(format: "Approximate phone GPS: %.6f, %.6f", lat, lon))
                             if let acc = scan.locationAccuracy {
                                 Text(String(format: "GPS accuracy: ±%.0f m", acc))
                             }
+                            if let time = scan.locationTimestamp { Text("Observed: \(time.formatted())") }
+                            if let altitude = scan.altitude, let accuracy = scan.verticalLocationAccuracy {
+                                Text(String(format: "Phone altitude: %.1f m (±%.1f m)", altitude, accuracy))
+                            }
+                            Text("Not survey control. GPS does not georeference the local model.")
                         }
                     }
                 } label: {

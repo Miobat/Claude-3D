@@ -40,6 +40,11 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ arView: ARView, context: Context) {
+        if arView.session !== scanner.arSession {
+            context.coordinator.clearAllMesh()
+            arView.session = scanner.arSession
+            for case let coaching as ARCoachingOverlayView in arView.subviews { coaching.session = scanner.arSession }
+        }
         context.coordinator.showMeshOverlay = showMeshOverlay
         if !showMeshOverlay {
             context.coordinator.clearAllMesh()
@@ -48,6 +53,13 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
+    }
+
+    static func dismantleUIView(_ uiView: ARView, coordinator: Coordinator) {
+        coordinator.stopUpdateLoop()
+        coordinator.clearAllMesh()
+        coordinator.arView = nil
+        coordinator.scanner = nil
     }
 
     class Coordinator {
@@ -66,6 +78,11 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
             displayLink = CADisplayLink(target: self, selector: #selector(updateFrame))
             displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 4, maximum: 10, preferred: 6)
             displayLink?.add(to: .main, forMode: .common)
+        }
+
+        func stopUpdateLoop() {
+            displayLink?.invalidate()
+            displayLink = nil
         }
 
         deinit {

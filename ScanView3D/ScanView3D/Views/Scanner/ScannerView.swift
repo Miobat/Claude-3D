@@ -13,6 +13,18 @@ struct ScannerView: View {
     @StateObject private var scanner = LiDARScanner()
     #endif
     @StateObject private var location = LocationProvider()
+    @StateObject private var recovery = CaptureRecovery()
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var activeDraft: CaptureDraft?
+    @State private var recoveredDraft = false
+    @State private var recoveredPoses: [CapturedPose] = []
+    @State private var captureLocation: CaptureLocation?
+    @State private var showingRecovery = false
+    @State private var showingResetConfirmation = false
+    @State private var draftToDiscard: CaptureDraft?
+    @State private var checkpointInFlight = false
+    @State private var preparationToken = UUID()
+    @State private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
 
     @EnvironmentObject var storageManager: StorageManager
     @State private var settings = ScanSettings.load()
@@ -51,6 +63,14 @@ struct ScannerView: View {
 
             VStack(spacing: 0) {
                 topStatusBar
+                if settings.alignToNorth, scanner.isScanning {
+                    Text(location.status).font(.caption).padding(8).background(.black.opacity(0.6))
+                }
+                if !scanner.isScanning, !recovery.drafts.isEmpty {
+                    Button("Unfinished captures (\(recovery.drafts.count))") { showingRecovery = true }
+                        .buttonStyle(.borderedProminent).padding(8)
+                        .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
+                }
                 if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
                     trackingBanner(warning)
                 }
@@ -60,6 +80,7 @@ struct ScannerView: View {
                     scanningInfoBar
                 } else {
                     prescanControls
+                        .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
                 }
                 bottomControls
             }
@@ -75,9 +96,22 @@ struct ScannerView: View {
                 settings.captureMode = .fast
             }
             scanner.startPreview()
+            recovery.refresh()
+            if activeDraft != nil, !scanner.isScanning { showingSaveDialog = true }
         }
         .onDisappear {
+            suspendCapture()
             scanner.stopPreview()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { suspendCapture() }
+            if phase == .active, activeDraft != nil, !scanner.isScanning { showingSaveDialog = true }
+        }
+        .onChange(of: scanner.needsRecoveryCheckpoint) { _, needed in
+            if needed { suspendCapture() }
+        }
+        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in
+            checkpointWhileCapturing()
         }
         .onChange(of: settings) { _, newValue in
             newValue.save()
@@ -85,6 +119,11 @@ struct ScannerView: View {
         .sheet(isPresented: $showingSaveDialog) {
             saveDialogSheet
                 .interactiveDismissDisabled()
+        }
+        .sheet(isPresented: $showingRecovery) { recoverySheet }
+        .confirmationDialog("Discard this capture?", isPresented: $showingResetConfirmation, titleVisibility: .visible) {
+            Button("Discard Capture", role: .destructive) { discardCurrentCapture() }
+            Button("Cancel", role: .cancel) {}
         }
         .fullScreenCover(isPresented: $showingSavedScan) {
             if let scan = savedScan, let project = savedProject {
@@ -316,7 +355,7 @@ struct ScannerView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Align to north + GPS").font(.caption).foregroundColor(.white)
                     Text(settings.alignToNorth
-                         ? "Uses the compass (−Z = north) and saves the location. Best outdoors."
+                         ? "Requests compass alignment and approximate phone GPS. Not survey control."
                          : "Scan is levelled and lined up with the walls.")
                         .font(.caption2).foregroundColor(.gray)
                 }
@@ -413,13 +452,17 @@ struct ScannerView: View {
                 }
 
                 Button {
-                    scanner.resetScanning()
-                    scanner.startPreview()
+                    showingResetConfirmation = true
                 } label: {
                     controlLabel("Reset", icon: "arrow.counterclockwise.circle.fill")
                 }
             } else {
                 Button {
+                    guard activeDraft == nil else { showingSaveDialog = true; return }
+                    captureLocation = nil
+                    recoveredDraft = false
+                    recoveredPoses = []
+                    scanName = Scan.autoName()
                     scanner.startScanning(
                         captureTexture: settings.captureTexture,
                         meshMode: settings.meshMode,
@@ -429,7 +472,15 @@ struct ScannerView: View {
                         highResPhotos: settings.highResPhotos,
                         alignToNorth: settings.alignToNorth
                     )
-                    if settings.alignToNorth { location.requestFix() }
+                    guard scanner.isScanning else { return }
+                    if settings.alignToNorth { location.requestFix() } else { location.stop() }
+                    do {
+                        activeDraft = try recovery.begin(name: scanName, settings: settings, photos: scanner.getCaptureFolderURL())
+                    } catch {
+                        scanner.pauseScanning()
+                        errorMessage = "Could not start recovery storage. Capture paused: \(error.localizedDescription)"
+                        showingError = true
+                    }
                 } label: {
                     VStack(spacing: 4) {
                         ZStack {
@@ -442,6 +493,7 @@ struct ScannerView: View {
                 }
             }
         }
+        .disabled(scanner.isFinalizing || isPreparingMesh || isSaving)
         .padding(.top, 12)
         .padding(.bottom, 30)
         .padding(.horizontal, AppConstants.Layout.padding)
@@ -484,24 +536,52 @@ struct ScannerView: View {
 
     // MARK: - Save Dialog
 
-    private func stopAndPrepareSave() {
-        scanner.stopScanning()
-        scanName = Scan.autoName()
+    private func stopAndPrepareSave(present: Bool = true) {
+        guard !isPreparingMesh, !isSaving else { return }
+        let token = UUID()
+        preparationToken = token
+        captureLocation = settings.alignToNorth ? location.finishCapture() : nil
+        if scanName.isEmpty { scanName = Scan.autoName() }
         if selectedProject == nil {
             selectedProject = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt }).first
         }
         pendingMesh = nil
         isPreparingMesh = true
-        showingSaveDialog = true
-        scanner.buildCombinedMesh { mesh in
-            pendingMesh = mesh
-            isPreparingMesh = false
+        showingSaveDialog = present
+        scanner.stopScanning {
+            scanner.buildCombinedMesh { mesh in
+                guard preparationToken == token else { return }
+                pendingMesh = mesh
+                if var draft = activeDraft {
+                    draft.name = scanName
+                    draft.location = captureLocation
+                    draft.checkpointAt = Date()
+                    if mesh != nil { draft.geometryCheckpointAt = draft.checkpointAt }
+                    draft.isFinalized = true
+                    activeDraft = draft
+                    recovery.checkpoint(draft, mesh: mesh) { result in
+                        guard preparationToken == token else { return }
+                        isPreparingMesh = false
+                        endBackgroundCheckpoint()
+                        if case .failure(let error) = result {
+                            failSave("Checkpoint failed; capture remains in memory. \(error.localizedDescription)")
+                        }
+                    }
+                } else {
+                    isPreparingMesh = false
+                    endBackgroundCheckpoint()
+                }
+            }
         }
     }
 
-    /// Photos are enough on their own for High Quality / Splat; the others need geometry.
+    /// High Quality needs photos; desktop Splat additionally needs a point cloud.
     private var hasSomethingToSave: Bool {
-        usesPhotos ? scanner.highResFrameCount > 0 : pendingMesh != nil
+        switch settings.captureMode {
+        case .highQuality: return photoCount > 0
+        case .splatExport: return photoCount > 0 && !(pendingMesh?.vertices.isEmpty ?? true)
+        default: return !(pendingMesh?.vertices.isEmpty ?? true)
+        }
     }
 
     private var saveDialogSheet: some View {
@@ -599,7 +679,11 @@ struct ScannerView: View {
                             .foregroundColor(.secondary)
                     }
                     if usesPhotos {
-                        LabeledContent("Photos", value: "\(scanner.highResFrameCount)")
+                        LabeledContent("Photos", value: "\(photoCount)")
+                        if settings.captureMode == .splatExport, pendingMesh?.vertices.isEmpty ?? true {
+                            Text("Desktop export needs a point-cloud checkpoint. Your photos are preserved; use Keep for Later.")
+                                .foregroundColor(.secondary)
+                        }
                     } else if settings.captureTexture {
                         LabeledContent("Colour frames", value: "\(scanner.capturedFrameCount)")
                     }
@@ -620,7 +704,7 @@ struct ScannerView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { showingCancelOptions = true }
-                        .disabled(isSaving)
+                        .disabled(isSaving || isPreparingMesh || scanner.isFinalizing)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { saveScan() }
@@ -629,16 +713,17 @@ struct ScannerView: View {
                 }
             }
             .confirmationDialog("Not saving yet?", isPresented: $showingCancelOptions, titleVisibility: .visible) {
-                Button("Continue Scanning") {
-                    showingSaveDialog = false
-                    pendingMesh = nil
-                    scanner.continueScanning()
+                if !recoveredDraft, !scanner.needsRecoveryCheckpoint {
+                    Button("Continue Scanning") {
+                        showingSaveDialog = false
+                        pendingMesh = nil
+                        scanner.continueScanning()
+                        if settings.alignToNorth { location.requestFix() }
+                    }
                 }
+                Button("Keep for Later") { keepForLater() }
                 Button("Discard Scan", role: .destructive) {
-                    showingSaveDialog = false
-                    pendingMesh = nil
-                    scanner.resetScanning()
-                    scanner.startPreview()
+                    discardCurrentCapture()
                 }
                 Button("Keep Editing", role: .cancel) {}
             }
@@ -655,6 +740,175 @@ struct ScannerView: View {
         }
     }
 
+    // MARK: - Recoverable captures
+
+    private var capturePhotoFolder: URL? {
+        if recoveredDraft, let draft = activeDraft { return recovery.photoFolder(for: draft) }
+        return scanner.getCaptureFolderURL()
+    }
+
+    private var photoCount: Int { recoveredDraft ? recoveredPoses.count : scanner.highResFrameCount }
+
+    private var recoverySheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Recover the last completed checkpoint and saved photos. Recovery never resumes the old tracking session; finish saving, then start a new scan.")
+                        .font(.callout)
+                    if let warning = recovery.warning { Text(warning).foregroundStyle(.orange) }
+                }
+                ForEach(recovery.drafts) { draft in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(draft.name).font(.headline)
+                        Text("Checkpoint: \(draft.checkpointAt.formatted())").font(.caption)
+                        if let date = draft.geometryCheckpointAt {
+                            Text("Geometry: \(date.formatted())").font(.caption)
+                        } else { Text("No geometry checkpoint yet").font(.caption) }
+                        Text(draft.settings.captureMode.rawValue).font(.caption)
+                        HStack {
+                            Button("Recover") { restoreDraft(draft) }
+                            Spacer()
+                            Button("Discard", role: .destructive) { draftToDiscard = draft }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(activeDraft != nil || isPreparingMesh)
+                    }
+                }
+                if activeDraft != nil { Text("Finish or keep the current capture before opening another.") }
+            }
+            .navigationTitle("Unfinished captures")
+            .toolbar { Button("Done") { showingRecovery = false } }
+            .confirmationDialog("Permanently discard this unfinished capture?", isPresented: Binding(
+                get: { draftToDiscard != nil }, set: { if !$0 { draftToDiscard = nil } }
+            ), titleVisibility: .visible) {
+                Button("Discard Capture", role: .destructive) {
+                    if let draft = draftToDiscard { recovery.discard(draft) }
+                    draftToDiscard = nil
+                }
+                Button("Cancel", role: .cancel) { draftToDiscard = nil }
+            }
+        }
+    }
+
+    private func restoreDraft(_ draft: CaptureDraft) {
+        guard activeDraft == nil, !isPreparingMesh else { return }
+        isPreparingMesh = true
+        recovery.load(draft) { result in
+            isPreparingMesh = false
+            do {
+                let (loaded, mesh) = try result.get()
+                let poses = try recovery.photoFolder(for: loaded).map { try PoseFile.read(forPhotoFolder: $0) } ?? []
+                activeDraft = loaded
+                recoveredDraft = true
+                recoveredPoses = poses
+                captureLocation = loaded.location
+                settings = loaded.settings
+                scanName = loaded.name
+                pendingMesh = mesh
+                selectedProject = storageManager.projects.sorted { $0.modifiedAt > $1.modifiedAt }.first
+                showingRecovery = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showingSaveDialog = true }
+            } catch {
+                failSave("Could not recover this checkpoint. Its files are preserved. \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func checkpointWhileCapturing() {
+        guard scanner.isScanning, !scanner.isPaused, !scanner.isFinalizing,
+              !checkpointInFlight, !isPreparingMesh, let current = activeDraft else { return }
+        checkpointInFlight = true
+        let token = preparationToken
+        scanner.buildCombinedMesh { mesh in
+            guard preparationToken == token, activeDraft?.id == current.id, scanner.isScanning else {
+                checkpointInFlight = false
+                return
+            }
+            var draft = current
+            draft.checkpointAt = Date()
+            if mesh != nil { draft.geometryCheckpointAt = draft.checkpointAt }
+            draft.isFinalized = false
+            draft.location = settings.alignToNorth ? location.currentFix() : nil
+            activeDraft = draft
+            recovery.checkpoint(draft, mesh: mesh) { result in
+                checkpointInFlight = false
+                if case .failure(let error) = result {
+                    scanner.scanError = "Automatic checkpoint failed. Stop and save soon. \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func suspendCapture() {
+        guard scanner.isScanning, !isPreparingMesh, !isSaving else { return }
+        scanner.needsRecoveryCheckpoint = true
+        if backgroundTask == .invalid {
+            backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finish scan checkpoint") {
+                endBackgroundCheckpoint()
+            }
+        }
+        stopAndPrepareSave(present: false)
+    }
+
+    private func endBackgroundCheckpoint() {
+        if backgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTask)
+            backgroundTask = .invalid
+        }
+    }
+
+    private func keepForLater() {
+        guard var draft = activeDraft else {
+            failSave("No durable checkpoint exists yet. Save the scan before leaving it.")
+            return
+        }
+        isPreparingMesh = true
+        draft.name = scanName
+        draft.location = captureLocation
+        draft.checkpointAt = Date()
+        draft.isFinalized = true
+        recovery.checkpoint(draft, mesh: pendingMesh) { result in
+            isPreparingMesh = false
+            switch result {
+            case .success:
+                preparationToken = UUID()
+                scanner.resetScanning(keepPhotos: true)
+                activeDraft = nil
+                recoveredDraft = false
+                recoveredPoses = []
+                pendingMesh = nil
+                showingSaveDialog = false
+                location.stop()
+            case .failure(let error): failSave("Could not keep capture: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func completeRecovery() {
+        preparationToken = UUID()
+        if let draft = activeDraft {
+            scanner.resetScanning(keepPhotos: true)
+            recovery.discard(draft)
+        }
+        activeDraft = nil
+        recoveredDraft = false
+        recoveredPoses = []
+        location.stop()
+    }
+
+    private func discardCurrentCapture() {
+        preparationToken = UUID()
+        isPreparingMesh = true
+        scanner.stopScanning {
+            completeRecovery()
+            scanner.resetScanning()
+            pendingMesh = nil
+            showingSaveDialog = false
+            isPreparingMesh = false
+            endBackgroundCheckpoint()
+        }
+    }
+
     // MARK: - Actions
 
     private func saveScan() {
@@ -666,16 +920,18 @@ struct ScannerView: View {
 
         switch settings.captureMode {
         case .highQuality:
-            #if !targetEnvironment(simulator)
-            if let inputFolder = scanner.getPhotogrammetryInputURL(), PhotogrammetryProcessor.isSupported {
-                runPhotogrammetrySave(project: project, inputFolder: inputFolder)
+            guard highQualitySupported, let inputFolder = capturePhotoFolder else {
+                failSave("Photo reconstruction is unavailable on this device, or its source folder is missing. The checkpoint has been kept.")
+                return
             }
+            #if !targetEnvironment(simulator)
+            runPhotogrammetrySave(project: project, inputFolder: inputFolder)
             #endif
             break
         case .pointCloud:
             if let cloud = pendingMesh { savePointCloudFlow(project: project, cloud: cloud) }
         case .splatExport:
-            if let folder = scanner.getCaptureFolderURL() { runSplatExport(project: project, folder: folder) }
+            if let folder = capturePhotoFolder { runSplatExport(project: project, folder: folder) }
         case .fast:
             saveMeshFlow(project: project)
         }
@@ -685,15 +941,9 @@ struct ScannerView: View {
     /// saved scan, and get the camera ready again.
     private func finishSave(scan: Scan, project: Project, extra: ((inout Scan) -> Void)? = nil) {
         let north = settings.alignToNorth
-        let fix = north ? location.lastLocation : nil
+        let fix = north ? captureLocation : nil
         let change: (inout Scan) -> Void = { s in
-            if north { s.northAligned = true }
-            if let l = fix {
-                s.latitude = l.coordinate.latitude
-                s.longitude = l.coordinate.longitude
-                s.altitude = l.altitude
-                s.locationAccuracy = l.horizontalAccuracy
-            }
+            s.recordLocation(fix, compassRequested: north)
             extra?(&s)
         }
         var updated = scan
@@ -708,6 +958,7 @@ struct ScannerView: View {
         savingProgress = ""
         showingSaveDialog = false
         pendingMesh = nil
+        completeRecovery()
         scanner.resetScanning()
         scanner.startPreview()
         savedScan = updated
@@ -773,7 +1024,8 @@ struct ScannerView: View {
     /// Splat (Desktop): write transforms.json + points3D.ply + README into the
     /// captured-photo folder, zip it, and present the share sheet for the computer.
     private func runSplatExport(project: Project, folder: URL) {
-        let poses = scanner.capturedPoses
+        let poses = recoveredDraft ? recoveredPoses : scanner.capturedPoses
+        let fix = captureLocation
         guard !poses.isEmpty else {
             failSave("No photos captured. Move slowly around the subject, then save.")
             return
@@ -795,13 +1047,15 @@ struct ScannerView: View {
                     throw CocoaError(.fileWriteUnknown)
                 }
                 let levelled = cloud.transformed(by: SceneFrame.compute(from: cloud, keepHeading: north))
-                _ = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project, splatBundle: zipURL)
+                let record = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project, splatBundle: zipURL)
+                try storageManager.updateScan(record.id, in: project) { $0.recordLocation(fix, compassRequested: north) }
 
                 DispatchQueue.main.async {
                     isSaving = false
                     savingProgress = ""
                     showingSaveDialog = false
                     pendingMesh = nil
+                    completeRecovery()
                     scanner.resetScanning()
                     scanner.startPreview()
                     // Let the sheet finish closing before presenting the share sheet.
