@@ -476,6 +476,7 @@ class TextureMapper {
         // 5. Copy each patch's region of its photo (plus padding, so edges blend).
         var byFrame = [[Int]](repeating: [], count: poses.count)
         for i in patches.indices { byFrame[patches[i].frame].append(i) }
+        let supersample = scale < 0.75
         for (fi, members) in byFrame.enumerated() where !members.isEmpty {
             autoreleasepool {
                 guard let image = DecodedImage(url: frameList[fi].imageURL) else { return }
@@ -495,7 +496,16 @@ class TextureMapper {
                             let ax = p.origin.x + tx
                             guard ax < atlas else { continue }
                             let px = p.uvMin.x * storedW + (Float(tx - pad) + 0.5) / scale
-                            let c = image.sample(SIMD2<Float>(px / storedW, py / storedH), gain: gain)
+                            var c = image.sample(SIMD2<Float>(px / storedW, py / storedH), gain: gain)
+                            if supersample {
+                                // Average 2×2 samples when shrinking, so fine detail
+                                // (e.g. text) doesn't turn into moiré.
+                                let o = 0.25 / scale
+                                c += image.sample(SIMD2<Float>((px + o) / storedW, py / storedH), gain: gain)
+                                c += image.sample(SIMD2<Float>(px / storedW, (py + o) / storedH), gain: gain)
+                                c += image.sample(SIMD2<Float>((px + o) / storedW, (py + o) / storedH), gain: gain)
+                                c *= 0.25
+                            }
                             let idx = (ay * atlas + ax) * 4
                             buf[idx] = UInt8(max(0, min(255, c.x * 255)))
                             buf[idx + 1] = UInt8(max(0, min(255, c.y * 255)))
