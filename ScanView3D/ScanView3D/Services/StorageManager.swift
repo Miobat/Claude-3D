@@ -590,6 +590,10 @@ class StorageManager: ObservableObject {
         newScan.longitude = scan.longitude
         newScan.altitude = scan.altitude
         newScan.locationAccuracy = scan.locationAccuracy
+        newScan.locationTimestamp = scan.locationTimestamp
+        newScan.verticalLocationAccuracy = scan.verticalLocationAccuracy
+        newScan.locationReducedAccuracy = scan.locationReducedAccuracy
+        newScan.locationReference = scan.locationReference
 
         do { try addScan(newScan, to: destProject); return newScan }
         catch { report(error, action: "Duplicate scan"); return nil }

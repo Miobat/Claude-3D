@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10031 /* CaptureSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10031; };
+		A10032 /* CaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10032; };
 		A10030 /* LibraryPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10030; };
 		A10001 /* ScanView3DApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10001; };
 		A10002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10002; };
@@ -38,6 +40,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10031 /* CaptureSafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/CaptureSafety.swift; sourceTree = "<group>"; };
+		B10032 /* CaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRecovery.swift; sourceTree = "<group>"; };
 		B10030 /* LibraryPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/LibraryPersistence.swift; sourceTree = "<group>"; };
 		B10001 /* ScanView3DApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanView3DApp.swift; sourceTree = "<group>"; };
 		B10002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -86,6 +90,7 @@
 			children = (
 				G10002 /* ScanView3D */,
 				B10030 /* LibraryPersistence.swift */,
+				B10031 /* CaptureSafety.swift */,
 				G10010 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -165,6 +170,7 @@
 				B10029 /* LocationProvider.swift */,
 				B10026 /* MeasurementEngine.swift */,
 				B10009 /* StorageManager.swift */,
+				B10032 /* CaptureRecovery.swift */,
 				B10023 /* TextureMapper.swift */,
 			);
 			path = Services;
@@ -267,6 +273,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10030 /* LibraryPersistence.swift in Sources */,
+				A10031 /* CaptureSafety.swift in Sources */,
+				A10032 /* CaptureRecovery.swift in Sources */,
 				A10001 /* ScanView3DApp.swift in Sources */,
 				A10002 /* ContentView.swift in Sources */,
 				A10003 /* Project.swift in Sources */,

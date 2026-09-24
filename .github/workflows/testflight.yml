@@ -23,6 +23,8 @@ jobs:
 
   build-and-deploy:
     needs: validate
+    # Development pushes validate only; publishing a codex branch is manual.
+    if: github.event_name == 'workflow_dispatch' || !startsWith(github.ref, 'refs/heads/codex/')
     name: Build & Upload to TestFlight
     runs-on: macos-15
     timeout-minutes: 45

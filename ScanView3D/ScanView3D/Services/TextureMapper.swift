@@ -41,6 +41,7 @@ class TextureMapper {
     // MARK: - Properties
 
     private let lock = NSLock()
+    private let epoch = CaptureEpoch()
     private var frames: [CapturedFrame] = []
     private let captureQueue = DispatchQueue(label: "scanview.texture.capture", qos: .userInitiated)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -88,6 +89,8 @@ class TextureMapper {
     }
 
     func reset() {
+        epoch.invalidate()
+        conversionInFlight = false
         lock.lock()
         frames.removeAll()
         lock.unlock()
@@ -99,6 +102,12 @@ class TextureMapper {
         lastTickTransform = nil
         lastTickTime = 0
         referenceExposure = nil
+    }
+
+    /// No new frames may be accepted while draining. Count callbacks are queued
+    /// on main before this completion, so finalization sees the complete result.
+    func drain(completion: @escaping () -> Void) {
+        captureQueue.async { DispatchQueue.main.async(execute: completion) }
     }
 
     private func frameFolder() -> URL? {
@@ -166,6 +175,7 @@ class TextureMapper {
         let limit = maxFrames
         fileCounter += 1
         let url = dir.appendingPathComponent(String(format: "f_%05d.jpg", fileCounter))
+        let token = epoch.current
 
         captureQueue.async { [weak self] in
             guard let self = self else { return }
@@ -176,13 +186,17 @@ class TextureMapper {
                                           imageWidth: width, imageHeight: height, timestamp: now,
                                           depth: depth.values, depthWidth: depth.width, depthHeight: depth.height,
                                           gain: gain)
-                self.lock.lock()
-                if self.frames.count >= limit { self.removeRedundantFrameLocked() }
-                self.frames.append(frame)
-                count = self.frames.count
-                self.lock.unlock()
+                let accepted = self.epoch.withCurrent(token) {
+                    self.lock.lock()
+                    if self.frames.count >= limit { self.removeRedundantFrameLocked() }
+                    self.frames.append(frame)
+                    count = self.frames.count
+                    self.lock.unlock()
+                }
+                if !accepted { try? FileManager.default.removeItem(at: url) }
             }
             DispatchQueue.main.async {
+                guard self.epoch.isCurrent(token) else { return }
                 self.conversionInFlight = false
                 if count > 0 { onCountChanged?(count) }
             }
