@@ -48,6 +48,7 @@ struct ModelViewerView: View {
     enum VisualizationMode: String, CaseIterable {
         case textured = "Textured"
         case flat = "Flat"
+        case height = "Height"
         case wireframe = "Wireframe"
     }
 
@@ -92,8 +93,11 @@ struct ModelViewerView: View {
 
             if !isLoading && loadError == nil && !isProcessing {
                 VStack {
-                    // Top-right buttons
-                    HStack {
+                    // Top row: height legend (left), view buttons (right)
+                    HStack(alignment: .top) {
+                        if vizMode == .height, let node = modelNode {
+                            heightLegend(for: node)
+                        }
                         Spacer()
                         VStack(spacing: 12) {
                             // Camera view presets
@@ -162,6 +166,15 @@ struct ModelViewerView: View {
                         Text("Faces: \(scan.faceCount.formatted())")
                         Text("Size: \(scan.formattedFileSize)")
                         Text("Created: \(scan.createdAt.formattedString)")
+                        if scan.northAligned == true {
+                            Text("Aligned to north (−Z = north)")
+                        }
+                        if let lat = scan.latitude, let lon = scan.longitude {
+                            Text(String(format: "GPS: %.6f, %.6f", lat, lon))
+                            if let acc = scan.locationAccuracy {
+                                Text(String(format: "GPS accuracy: ±%.0f m", acc))
+                            }
+                        }
                     }
                 } label: {
                     Image(systemName: "info.circle")
@@ -187,6 +200,44 @@ struct ModelViewerView: View {
             Button("Delete All", role: .destructive) { session.clearAll() }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    /// Scans with triangles (not point clouds) can be exported as CAD meshes.
+    private var hasMesh: Bool {
+        scan.faceCount > 0 || (scan.fileName as NSString).pathExtension.lowercased() == "usdz"
+    }
+
+    // MARK: - Height legend
+
+    private func heightLegend(for node: SCNNode) -> some View {
+        let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
+        let range = maxB.y - minB.y
+        let step = SceneKitViewRepresentable.Coordinator.contourStep(for: range)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("Height").font(.caption2).fontWeight(.bold)
+            HStack(spacing: 6) {
+                LinearGradient(colors: [Color(red: 0.9, green: 0.2, blue: 0.1), Color(red: 0.95, green: 0.85, blue: 0.1),
+                                        Color(red: 0.2, green: 0.8, blue: 0.2), Color(red: 0, green: 0.7, blue: 0.9),
+                                        Color(red: 0.1, green: 0.2, blue: 0.8)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(width: 10, height: 90)
+                    .cornerRadius(3)
+                VStack(alignment: .leading) {
+                    Text("+" + measurementUnit.format(meters: range))
+                    Spacer()
+                    Text("lowest")
+                }
+                .font(.system(size: 10))
+                .frame(height: 90)
+            }
+            Text("Lines every " + measurementUnit.format(meters: step)).font(.system(size: 9))
+        }
+        .padding(8)
+        .background(Color.black.opacity(0.6))
+        .cornerRadius(8)
+        .foregroundColor(.white)
+        .padding(.leading, 12)
+        .padding(.top, 8)
     }
 
     // MARK: - Measuring Panel
@@ -466,7 +517,15 @@ struct ModelViewerView: View {
             .padding(.bottom, 8)
         }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
-            Button("Share Top-Down Image") { captureFloorplanImage() }
+            Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }
+            if hasMesh {
+                Button("Export for CAD (OBJ, Z up)") {
+                    if let url = storageManager.exportZUpOBJ(scan, from: project) { ShareSheetPresenter.present([url]) }
+                }
+                Button("Export STL (millimetres, Z up)") {
+                    if let url = storageManager.exportSTL(scan, from: project) { ShareSheetPresenter.present([url]) }
+                }
+            }
             if !session.measurements.isEmpty {
                 Button("Export Measurements (CSV)") {
                     if let url = storageManager.exportMeasurementsCSV(session.measurements, scanName: scan.name,
@@ -512,10 +571,15 @@ struct ModelViewerView: View {
                 ) { fraction in
                     DispatchQueue.main.async { self.processingMessage = "Reconstructing… \(Int(fraction * 100))%" }
                 }
-                let transform = ScannerView.alignmentTransform(
+                let alignment = ScannerView.alignmentTransform(
                     photoPositions: photoPositions,
                     arkitPositions: PoseFile.cameraPositions(forPhotoFolder: photos),
                     modelURL: outputURL, lidarExtent: lidarExtent)
+                // Reuse the tidy frame chosen when the scan was first saved.
+                var transform = alignment?.transform
+                if let a = alignment, a.poseBased, let frame = scan.sceneFrameMatrix {
+                    transform = frame * a.transform
+                }
                 try storageManager.replacePhotogrammetryModel(
                     scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform
                 )
@@ -672,6 +736,47 @@ extension Notification.Name {
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")
     static let captureTopDownImage = Notification.Name("captureTopDownImage")
+}
+
+/// Adds a scale bar to a top-down orthographic snapshot.
+enum FloorPlanImage {
+    static func addScaleBar(to image: UIImage, metresPerPoint: Float, unit: ScanSettings.MeasurementUnit) -> UIImage {
+        guard metresPerPoint > 0, metresPerPoint.isFinite else { return image }
+        let size = image.size
+        // Largest "nice" length (1, 2 or 5 × 10^n m) that fits ~30 % of the width.
+        let wanted = Float(size.width) * 0.3 * metresPerPoint
+        var nice: Float = 0.001
+        for exp in -3...5 {
+            for m in [1, 2, 5] as [Float] {
+                let v = m * powf(10, Float(exp))
+                if v <= wanted { nice = v }
+            }
+        }
+        let barLength = CGFloat(nice / metresPerPoint)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            image.draw(at: .zero)
+            let margin: CGFloat = 20
+            let label = unit.format(meters: nice) as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.font: UIFont.boldSystemFont(ofSize: 14), .foregroundColor: UIColor.black]
+            let labelSize = label.size(withAttributes: attrs)
+            let box = CGRect(x: margin, y: size.height - margin - 44,
+                             width: max(barLength, labelSize.width) + 24, height: 44)
+            UIColor.white.withAlphaComponent(0.9).setFill()
+            UIBezierPath(roundedRect: box, cornerRadius: 8).fill()
+            let barY = box.maxY - 12
+            let bar = UIBezierPath()
+            bar.move(to: CGPoint(x: box.minX + 12, y: barY - 6))
+            bar.addLine(to: CGPoint(x: box.minX + 12, y: barY))
+            bar.addLine(to: CGPoint(x: box.minX + 12 + barLength, y: barY))
+            bar.addLine(to: CGPoint(x: box.minX + 12 + barLength, y: barY - 6))
+            bar.lineWidth = 3
+            UIColor.black.setStroke()
+            bar.stroke()
+            label.draw(at: CGPoint(x: box.minX + 12, y: box.minY + 5), withAttributes: attrs)
+        }
+    }
 }
 
 /// Presents the system share sheet from whatever is currently on screen.

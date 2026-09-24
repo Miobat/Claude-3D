@@ -264,6 +264,16 @@ class StorageManager: ObservableObject {
         return scan
     }
 
+    /// Change stored details of a saved scan.
+    func updateScan(_ scanID: UUID, in project: Project, _ change: (inout Scan) -> Void) {
+        onMain {
+            guard let pi = projects.firstIndex(where: { $0.id == project.id }),
+                  let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { return }
+            change(&projects[pi].scans[si])
+            saveProjects()
+        }
+    }
+
     // MARK: - Measurements
 
     private func measurementsURL(for scan: Scan, in project: Project) -> URL {
@@ -556,6 +566,12 @@ class StorageManager: ObservableObject {
         newScan.captureFolderName = copyExtra(scan.captureFolderName, as: "\(newBase)_photos")
         _ = copyExtra(scan.captureFolderName.map { $0 + PoseFile.suffix }, as: "\(newBase)_photos" + PoseFile.suffix)
         newScan.modelTransform = scan.modelTransform
+        newScan.sceneFrame = scan.sceneFrame
+        newScan.northAligned = scan.northAligned
+        newScan.latitude = scan.latitude
+        newScan.longitude = scan.longitude
+        newScan.altitude = scan.altitude
+        newScan.locationAccuracy = scan.locationAccuracy
 
         if let dstIndex = projects.firstIndex(where: { $0.id == destProject.id }) {
             projects[dstIndex].addScan(newScan)
@@ -748,6 +764,145 @@ class StorageManager: ObservableObject {
             _ = try? copyModel(of: scan, from: srcDir, to: exportDir, newBase: base)
         }
         return exportDir
+    }
+
+    // MARK: - CAD / 3D-print exports (Z up)
+
+    /// OBJ with Z pointing up (the usual convention in CAD). Textured OBJ scans
+    /// keep their texture (shared as a .zip); other models export their geometry.
+    func exportZUpOBJ(_ scan: Scan, from project: Project) -> URL? {
+        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
+        try? fileManager.removeItem(at: shareRoot)
+        let base = exportBaseName(scan.name) + "_Zup"
+        let folder = shareRoot.appendingPathComponent(base)
+        do {
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+            if (scan.fileName as NSString).pathExtension.lowercased() == "obj" && scan.modelMatrix == nil {
+                let copy = try copyModel(of: scan, from: srcDir, to: folder, newBase: base)
+                try StorageManager.convertOBJToZUp(at: copy.model)
+                if copy.allFiles.count == 1 { return copy.model }
+                return StorageManager.zipFolder(folder, to: shareRoot.appendingPathComponent("\(base).zip"))
+            }
+            let triangles = worldTriangles(of: scan, in: project)
+            guard !triangles.isEmpty else { return nil }
+            let url = folder.appendingPathComponent("\(base).obj")
+            try StorageManager.writeOBJ(triangles: triangles, to: url)
+            return url
+        } catch {
+            DebugLogger.shared.error("Z-up OBJ export failed: \(error)", category: "Export")
+            return nil
+        }
+    }
+
+    /// Binary STL in millimetres with Z up (3D printing and most CAD tools).
+    func exportSTL(_ scan: Scan, from project: Project) -> URL? {
+        let triangles = worldTriangles(of: scan, in: project)
+        guard !triangles.isEmpty else { return nil }
+        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
+        try? fileManager.removeItem(at: shareRoot)
+        try? fileManager.createDirectory(at: shareRoot, withIntermediateDirectories: true)
+        let url = shareRoot.appendingPathComponent(exportBaseName(scan.name) + "_mm.stl")
+
+        let triCount = triangles.count / 3
+        var data = Data(capacity: 84 + triCount * 50)
+        var header = Data("ScanView 3D export - units: mm, Z up".utf8)
+        header.count = 80
+        data.append(header)
+        var count = UInt32(triCount).littleEndian
+        withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+        func zUpMM(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3<Float>(v.x, -v.z, v.y) * 1000 }
+        for t in 0..<triCount {
+            let a = zUpMM(triangles[t * 3]), b = zUpMM(triangles[t * 3 + 1]), c = zUpMM(triangles[t * 3 + 2])
+            var n = simd_cross(b - a, c - a)
+            let len = simd_length(n)
+            n = len > 0 ? n / len : SIMD3<Float>(0, 0, 1)
+            var floats: [Float] = [n.x, n.y, n.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]
+            floats.withUnsafeBytes { data.append(contentsOf: $0) }
+            data.append(contentsOf: [0, 0])   // attribute byte count
+        }
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    /// All triangles of a scan in world space (with its real-world transform),
+    /// flattened: every three points are one triangle.
+    private func worldTriangles(of scan: Scan, in project: Project) -> [SIMD3<Float>] {
+        let modelURL = getScanFileURL(scan: scan, project: project)
+        let scnURL = modelURL.deletingPathExtension().appendingPathExtension("scn")
+        let url = fileManager.fileExists(atPath: scnURL.path) ? scnURL : modelURL
+        guard let scene = try? SCNScene(url: url, options: [.checkConsistency: false]) else { return [] }
+        let root = SCNNode()
+        scene.rootNode.childNodes.forEach { root.addChildNode($0.clone()) }
+        if let m = scan.modelMatrix { root.simdTransform = m }
+
+        var result: [SIMD3<Float>] = []
+        for source in ModelGeometryIndex.sources(in: root) {
+            guard let vsrc = source.geometry.sources(for: .vertex).first, vsrc.usesFloatComponents,
+                  vsrc.bytesPerComponent == 4, vsrc.componentsPerVector >= 3 else { continue }
+            let m = source.transform
+            var positions = [SIMD3<Float>](repeating: .zero, count: vsrc.vectorCount)
+            vsrc.data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                for i in 0..<vsrc.vectorCount {
+                    let f = base.advanced(by: vsrc.dataOffset + vsrc.dataStride * i).assumingMemoryBound(to: Float.self)
+                    let w = m * SIMD4<Float>(f[0], f[1], f[2], 1)
+                    positions[i] = SIMD3<Float>(w.x, w.y, w.z)
+                }
+            }
+            for element in source.geometry.elements where element.primitiveType == .triangles {
+                let bpi = element.bytesPerIndex
+                element.data.withUnsafeBytes { raw in
+                    guard let base = raw.baseAddress else { return }
+                    for i in 0..<(element.primitiveCount * 3) {
+                        let p = base.advanced(by: i * bpi)
+                        let index: Int
+                        switch bpi {
+                        case 1: index = Int(p.assumingMemoryBound(to: UInt8.self).pointee)
+                        case 2: index = Int(p.assumingMemoryBound(to: UInt16.self).pointee)
+                        default: index = Int(p.assumingMemoryBound(to: UInt32.self).pointee)
+                        }
+                        result.append(index < positions.count ? positions[index] : .zero)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    /// Rewrite an OBJ's vertex and normal lines from Y-up to Z-up.
+    static func convertOBJToZUp(at url: URL) throws {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        var out = ""
+        out.reserveCapacity(text.utf8.count + 1024)
+        text.enumerateLines { line, _ in
+            if line.hasPrefix("v ") || line.hasPrefix("vn ") {
+                let parts = line.split(separator: " ")
+                if parts.count >= 4, let x = Double(parts[1]), let y = Double(parts[2]), let z = Double(parts[3]) {
+                    out += String(format: "%@ %.6f %.6f %.6f", String(parts[0]), x, -z, y)
+                    for extra in parts.dropFirst(4) { out += " " + extra }
+                    out += "\n"
+                    return
+                }
+            }
+            out += line + "\n"
+        }
+        try out.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Plain OBJ (geometry only, Z up) from world-space triangles.
+    static func writeOBJ(triangles: [SIMD3<Float>], to url: URL) throws {
+        var out = "# ScanView 3D export - metres, Z up\n"
+        out.reserveCapacity(triangles.count * 40)
+        for v in triangles { out += String(format: "v %.5f %.5f %.5f\n", v.x, -v.z, v.y) }
+        for t in 0..<(triangles.count / 3) {
+            out += "f \(t * 3 + 1) \(t * 3 + 2) \(t * 3 + 3)\n"
+        }
+        try out.write(to: url, atomically: true, encoding: .utf8)
     }
 
     /// Zip a folder (via NSFileCoordinator, no third-party library).

@@ -22,19 +22,23 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         sceneView.scene = SCNScene()
         sceneView.backgroundColor = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
         sceneView.autoenablesDefaultLighting = false
-        sceneView.allowsCameraControl = true
+        sceneView.allowsCameraControl = false   // our own touch navigation below
         sceneView.antialiasingMode = .multisampling4X
-
-        sceneView.defaultCameraController.interactionMode = .orbitTurntable
-        sceneView.defaultCameraController.inertiaEnabled = true
-        sceneView.defaultCameraController.inertiaFriction = 0.15
-        sceneView.defaultCameraController.maximumVerticalAngle = 80
 
         setupLighting(sceneView.scene!)
         setupCamera(sceneView)
 
-        let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
-        sceneView.addGestureRecognizer(tapGesture)
+        let coordinator = context.coordinator
+        if let cameraNode = sceneView.pointOfView {
+            let controller = OrbitCameraController(view: sceneView, cameraNode: cameraNode)
+            controller.surfacePoint = { [weak coordinator] location in coordinator?.surfacePointForFocus(at: location) }
+            let doubleTap = controller.install()
+            coordinator.cameraController = controller
+
+            let tapGesture = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
+            tapGesture.require(toFail: doubleTap)
+            sceneView.addGestureRecognizer(tapGesture)
+        }
 
         context.coordinator.sceneView = sceneView
 
@@ -237,10 +241,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     let extent = maxB - minB
                     let distance = max(max(extent.x, max(extent.y, extent.z)) * 2.0, 0.1)
 
-                    if let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false) {
-                        cameraNode.position = SCNVector3(center.x, center.y + distance * 0.3, center.z + distance)
-                        cameraNode.look(at: center)
-                    }
+                    context.coordinator.cameraController?.frame(center: centerV, extent: distance / 2)
 
                     context.coordinator.modelCenter = center
                     context.coordinator.modelExtent = extent
@@ -269,6 +270,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         var sceneView: SCNView?
         var activeTool: ModelViewerView.ViewerTool = .orbit
         weak var session: MeasurementSession?
+        var cameraController: OrbitCameraController?
         private var overlay: MeasurementOverlayScene?
         var geometryIndex: ModelGeometryIndex?
         private var previewTimer: Timer?
@@ -282,7 +284,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         /// World positions of point-cloud points (SceneKit can't hit-test points).
         private var pickablePoints: [SIMD3<Float>] = []
         /// Original material look, so "Textured" can restore it after Flat/Wireframe.
-        private var originalMaterials: [ObjectIdentifier: (diffuse: Any?, emission: Any?, lighting: SCNMaterial.LightingModel, fill: SCNFillMode)] = [:]
+        private var originalMaterials: [ObjectIdentifier: (diffuse: Any?, emission: Any?, lighting: SCNMaterial.LightingModel, fill: SCNFillMode, shaders: [SCNShaderModifierEntryPoint: String]?)] = [:]
 
         private var joystickMoveTimer: Timer?
         private var joystickLookTimer: Timer?
@@ -413,31 +415,20 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         // MARK: - Camera View Presets
 
-        private func topDownOrientation(_ cameraNode: SCNNode) {
-            // Looking straight down: "up" on screen must not be the world up axis.
-            cameraNode.look(at: modelCenter, up: SCNVector3(0, 0, -1), localFront: SCNVector3(0, 0, -1))
-        }
+        private var center: SIMD3<Float> { SIMD3<Float>(modelCenter.x, modelCenter.y, modelCenter.z) }
 
         @objc func handleSetCameraView(_ notification: Notification) {
-            guard let sceneView = sceneView,
-                  let viewStr = notification.userInfo?["view"] as? String,
-                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
-
-            SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.5
+            guard let viewStr = notification.userInfo?["view"] as? String, let rig = cameraController else { return }
             switch viewStr {
             case "top":
-                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 1.5, modelCenter.z)
-                topDownOrientation(cameraNode)
+                rig.set(yaw: 0, pitch: -.pi / 2, target: center, distance: viewDistance * 0.75)
             case "front":
-                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y, modelCenter.z + viewDistance)
-                cameraNode.look(at: modelCenter)
+                rig.set(yaw: 0, pitch: 0, target: center, distance: viewDistance * 0.6)
             case "side":
-                cameraNode.position = SCNVector3(modelCenter.x + viewDistance, modelCenter.y, modelCenter.z)
-                cameraNode.look(at: modelCenter)
-            default: break
+                rig.set(yaw: .pi / 2, pitch: 0, target: center, distance: viewDistance * 0.6)
+            default:
+                break
             }
-            SCNTransaction.commit()
         }
 
         // MARK: - Camera Projection
@@ -452,11 +443,10 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         @objc func handleSetCameraProjection(_ notification: Notification) {
             guard let sceneView = sceneView,
                   let projStr = notification.userInfo?["projection"] as? String,
-                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false),
-                  let camera = cameraNode.camera else { return }
+                  let camera = sceneView.pointOfView?.camera else { return }
 
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.5
+            SCNTransaction.animationDuration = 0.4
             switch projStr {
             case "Ortho":
                 camera.usesOrthographicProjection = true
@@ -464,8 +454,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             case "FloorPlan":
                 camera.usesOrthographicProjection = true
                 camera.orthographicScale = fittingOrthoScale(for: sceneView)
-                cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 2, modelCenter.z)
-                topDownOrientation(cameraNode)
+                cameraController?.set(yaw: 0, pitch: -.pi / 2, target: center, distance: viewDistance, animated: false)
             default: // Perspective
                 camera.usesOrthographicProjection = false
                 camera.fieldOfView = 60
@@ -473,23 +462,29 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             SCNTransaction.commit()
         }
 
-        /// Top-down orthographic snapshot, shared as an image.
+        /// Top-down orthographic snapshot with a scale bar, shared as an image.
         @objc func handleCaptureTopDown() {
-            guard let sceneView = sceneView,
-                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false),
-                  let camera = cameraNode.camera else { return }
+            guard let sceneView = sceneView, let camera = sceneView.pointOfView?.camera else { return }
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
             camera.usesOrthographicProjection = true
             camera.orthographicScale = fittingOrthoScale(for: sceneView)
-            cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 2, modelCenter.z)
-            topDownOrientation(cameraNode)
             SCNTransaction.commit()
+            cameraController?.set(yaw: 0, pitch: -.pi / 2, target: center, distance: viewDistance, animated: false)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak sceneView] in
-                guard let view = sceneView else { return }
-                ShareSheetPresenter.present([view.snapshot()])
+                guard let view = sceneView, let cam = view.pointOfView?.camera else { return }
+                let metresPerPoint = Float(cam.orthographicScale) * 2 / Float(max(view.bounds.height, 1))
+                let image = FloorPlanImage.addScaleBar(to: view.snapshot(), metresPerPoint: metresPerPoint,
+                                                       unit: .preferred)
+                ShareSheetPresenter.present([image])
             }
+        }
+
+        /// Surface point for double-tap focus.
+        func surfacePointForFocus(at location: CGPoint) -> SIMD3<Float>? {
+            guard let view = sceneView else { return nil }
+            return surfaceHit(at: location, in: view)?.point
         }
 
         // MARK: - Visualization Mode
@@ -498,36 +493,75 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             guard let modeStr = notification.userInfo?["mode"] as? String,
                   let model = parent.modelNode else { return }
 
+            let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: model)
+            let step = Coordinator.contourStep(for: maxB.y - minB.y)
+
             func apply(to node: SCNNode) {
                 for material in node.geometry?.materials ?? [] {
                     let id = ObjectIdentifier(material)
                     if originalMaterials[id] == nil {
                         originalMaterials[id] = (material.diffuse.contents, material.emission.contents,
-                                                 material.lightingModel, material.fillMode)
+                                                 material.lightingModel, material.fillMode, material.shaderModifiers)
+                    }
+                    // Start every mode from the original look.
+                    if let original = originalMaterials[id] {
+                        material.diffuse.contents = original.diffuse
+                        material.emission.contents = original.emission
+                        material.lightingModel = original.lighting
+                        material.fillMode = original.fill
+                        material.shaderModifiers = original.shaders
                     }
                     switch modeStr {
                     case "Flat":
                         material.diffuse.contents = UIColor(white: 0.85, alpha: 1.0)
                         material.emission.contents = UIColor.black
-                        material.fillMode = .fill
                         material.lightingModel = .physicallyBased
                     case "Wireframe":
                         material.fillMode = .lines
                         material.diffuse.contents = UIColor.cyan
                         material.lightingModel = .constant
-                    default: // Textured: restore exactly what the file had
-                        if let original = originalMaterials[id] {
-                            material.diffuse.contents = original.diffuse
-                            material.emission.contents = original.emission
-                            material.lightingModel = original.lighting
-                            material.fillMode = original.fill
-                        }
+                    case "Height":
+                        material.shaderModifiers = [.surface: Coordinator.heightShader]
+                        material.setValue(NSNumber(value: minB.y), forKey: "heightMin")
+                        material.setValue(NSNumber(value: maxB.y), forKey: "heightMax")
+                        material.setValue(NSNumber(value: step), forKey: "contourStep")
+                    default:
+                        break   // Textured: the original look restored above
                     }
                     material.isDoubleSided = true
                 }
             }
             apply(to: model)
             model.enumerateChildNodes { child, _ in apply(to: child) }
+        }
+
+        /// Colours the surface by world height (blue low → red high) with dark
+        /// contour lines every `contourStep` metres.
+        static let heightShader = """
+        #pragma arguments
+        float heightMin;
+        float heightMax;
+        float contourStep;
+        #pragma body
+        float4 worldPos = scn_frame.inverseViewTransform * float4(_surface.position, 1.0);
+        float h = worldPos.y;
+        float t = clamp((h - heightMin) / max(heightMax - heightMin, 0.001), 0.0, 1.0);
+        float3 c;
+        if (t < 0.25) { c = mix(float3(0.10, 0.20, 0.80), float3(0.00, 0.70, 0.90), t / 0.25); }
+        else if (t < 0.5) { c = mix(float3(0.00, 0.70, 0.90), float3(0.20, 0.80, 0.20), (t - 0.25) / 0.25); }
+        else if (t < 0.75) { c = mix(float3(0.20, 0.80, 0.20), float3(0.95, 0.85, 0.10), (t - 0.5) / 0.25); }
+        else { c = mix(float3(0.95, 0.85, 0.10), float3(0.90, 0.20, 0.10), (t - 0.75) / 0.25); }
+        float f = fract(h / max(contourStep, 0.001));
+        float onLine = step(f, 0.03) + step(0.97, f);
+        c = mix(c, float3(0.08, 0.08, 0.08), clamp(onLine, 0.0, 1.0) * 0.7);
+        _surface.diffuse = float4(c, 1.0);
+        """
+
+        /// Contour spacing giving roughly 10 lines over the height range.
+        static func contourStep(for range: Float) -> Float {
+            let options: [Float] = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50]
+            let wanted = max(range, 0.01) / 10
+            return options.first(where: { $0 >= wanted }) ?? 50
         }
 
         // MARK: - Tap / Measure
@@ -715,16 +749,13 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         @objc func resetCamera() {
-            guard let sceneView = sceneView,
-                  let cameraNode = sceneView.scene?.rootNode.childNode(withName: "camera", recursively: false) else { return }
-
+            guard let camera = sceneView?.pointOfView?.camera else { return }
             SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0.5
-            cameraNode.camera?.usesOrthographicProjection = false
-            cameraNode.camera?.fieldOfView = 60
-            cameraNode.position = SCNVector3(modelCenter.x, modelCenter.y + viewDistance * 0.3, modelCenter.z + viewDistance)
-            cameraNode.look(at: modelCenter)
+            SCNTransaction.animationDuration = 0.4
+            camera.usesOrthographicProjection = false
+            camera.fieldOfView = 60
             SCNTransaction.commit()
+            cameraController?.frame(center: center, extent: viewDistance / 2, animated: true)
         }
 
         // MARK: - Joystick Handlers
@@ -769,6 +800,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 cameraNode.position.z + right.z * dx + forward.z * dz
             )
             SCNTransaction.commit()
+            cameraController?.syncFromCamera()
         }
 
         private func applyLookInput() {
@@ -781,6 +813,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let newPitch = cameraNode.eulerAngles.x - Float(currentLookDY) * rotSpeed
             cameraNode.eulerAngles.x = max(-.pi / 2.5, min(.pi / 2.5, newPitch))
             SCNTransaction.commit()
+            cameraController?.syncFromCamera()
         }
     }
 }

@@ -50,7 +50,8 @@ class MockLiDARScanner: ObservableObject {
         rangeMeters: Float = 3.0,
         captureMode: ScanSettings.CaptureMode = .fast,
         detailMM: Float = 10,
-        highResPhotos: Bool = false
+        highResPhotos: Bool = false,
+        alignToNorth: Bool = false
     ) {
         meshData = nil
         self.rangeMeters = rangeMeters

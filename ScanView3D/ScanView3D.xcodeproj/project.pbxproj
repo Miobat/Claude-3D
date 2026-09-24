@@ -29,6 +29,8 @@
 		A10021 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10021; };
 		A10022 /* DebugLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10022; };
 		A10023 /* TextureMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10023; };
+		A10029 /* LocationProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10029; };
+		A10028 /* OrbitCameraController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10028; };
 		A10027 /* MeasurementOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10027; };
 		A10026 /* MeasurementEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10026; };
 		A10025 /* Measurement.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10025; };
@@ -58,6 +60,8 @@
 		B10021 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		B10022 /* DebugLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogView.swift; sourceTree = "<group>"; };
 		B10023 /* TextureMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextureMapper.swift; sourceTree = "<group>"; };
+		B10029 /* LocationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationProvider.swift; sourceTree = "<group>"; };
+		B10028 /* OrbitCameraController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrbitCameraController.swift; sourceTree = "<group>"; };
 		B10027 /* MeasurementOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementOverlay.swift; sourceTree = "<group>"; };
 		B10026 /* MeasurementEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeasurementEngine.swift; sourceTree = "<group>"; };
 		B10025 /* Measurement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Measurement.swift; sourceTree = "<group>"; };
@@ -132,6 +136,7 @@
 			children = (
 				B10012 /* ModelViewerView.swift */,
 				B10013 /* SceneKitView.swift */,
+				B10028 /* OrbitCameraController.swift */,
 				B10027 /* MeasurementOverlay.swift */,
 				B10020 /* AllScansView.swift */,
 			);
@@ -154,6 +159,7 @@
 				B10019 /* MockLiDARScanner.swift */,
 				B10007 /* MeshProcessor.swift */,
 				B10008 /* OBJExporter.swift */,
+				B10029 /* LocationProvider.swift */,
 				B10026 /* MeasurementEngine.swift */,
 				B10009 /* StorageManager.swift */,
 				B10023 /* TextureMapper.swift */,
@@ -278,6 +284,8 @@
 			A10021 /* DebugLogger.swift in Sources */,
 			A10022 /* DebugLogView.swift in Sources */,
 			A10023 /* TextureMapper.swift in Sources */,
+			A10029 /* LocationProvider.swift in Sources */,
+			A10028 /* OrbitCameraController.swift in Sources */,
 			A10027 /* MeasurementOverlay.swift in Sources */,
 			A10026 /* MeasurementEngine.swift in Sources */,
 			A10025 /* Measurement.swift in Sources */,

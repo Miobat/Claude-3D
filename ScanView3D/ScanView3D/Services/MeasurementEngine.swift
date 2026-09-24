@@ -496,3 +496,100 @@ final class ModelGeometryIndex {
         return ModelGeometryIndex(points: points, faceNormals: faceNormals)
     }
 }
+
+// MARK: - Tidy scan coordinate frame
+
+/// Puts a scan in a tidy frame for viewing and exporting: floor at height 0,
+/// the main walls along the X and Z axes (skipped for compass-aligned scans, so
+/// -Z stays north), and centred on the origin.
+enum SceneFrame {
+
+    static func compute(from mesh: MeshData, keepHeading: Bool) -> simd_float4x4 {
+        let points = mesh.vertices
+        guard points.count > 10 else { return matrix_identity_float4x4 }
+
+        var rotation = matrix_identity_float4x4
+        if !keepHeading {
+            var axes: [SIMD3<Float>] = []
+            if mesh.normals.count == points.count {
+                let step = max(1, points.count / 200_000)
+                var normals: [(SIMD3<Float>, Float)] = []
+                var i = 0
+                while i < points.count { normals.append((mesh.normals[i], 1)); i += step }
+                axes = ModelGeometryIndex.dominantWallAxes(normals)
+            } else {
+                // Point cloud: estimate wall directions from local surfaces.
+                axes = ModelGeometryIndex(points: sample(points, max: 300_000), faceNormals: []).wallAxes
+            }
+            if let a = axes.first {
+                // Rotating by the wall angle about Y maps that wall direction onto +X.
+                rotation = simd_float4x4(simd_quatf(angle: atan2(a.z, a.x), axis: SIMD3<Float>(0, 1, 0)))
+            }
+        }
+
+        let floorY = floorHeight(mesh)
+        var minXZ = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+        var maxXZ = SIMD2<Float>(repeating: -.greatestFiniteMagnitude)
+        for p in sample(points, max: 500_000) {
+            let r = rotation * SIMD4<Float>(p.x, p.y, p.z, 1)
+            minXZ = simd_min(minXZ, SIMD2<Float>(r.x, r.z))
+            maxXZ = simd_max(maxXZ, SIMD2<Float>(r.x, r.z))
+        }
+        let centre = (minXZ + maxXZ) / 2
+        var translation = matrix_identity_float4x4
+        translation.columns.3 = SIMD4<Float>(-centre.x, -floorY, -centre.y, 1)
+        return translation * rotation
+    }
+
+    /// Height of the floor (or ground): the most common height of upward-facing
+    /// surfaces in the lower half of the scan; falls back to the lowest 2 %.
+    static func floorHeight(_ mesh: MeshData) -> Float {
+        let sampled = sample(Array(mesh.vertices.indices), max: 400_000)
+        var ys = sampled.map { mesh.vertices[$0].y }
+        ys.sort()
+        guard !ys.isEmpty else { return 0 }
+        let lowY = ys[Int(Float(ys.count - 1) * 0.02)]
+        guard mesh.normals.count == mesh.vertices.count else { return lowY }
+
+        let minY = ys.first!, maxY = ys.last!
+        let half = minY + (maxY - minY) * 0.5
+        let bin: Float = 0.03
+        var bins: [Int: Int] = [:]
+        var upward = 0
+        for i in sampled where mesh.normals[i].y > 0.9 {
+            upward += 1
+            let y = mesh.vertices[i].y
+            if y < half { bins[Int((y - minY) / bin), default: 0] += 1 }
+        }
+        guard upward > sampled.count / 10,
+              let best = bins.max(by: { $0.value < $1.value }), best.value > upward / 20 else { return lowY }
+        return minY + (Float(best.key) + 0.5) * bin
+    }
+
+    private static func sample<T>(_ items: [T], max limit: Int) -> [T] {
+        guard items.count > limit else { return items }
+        let step = Double(items.count) / Double(limit)
+        return (0..<limit).map { items[Int(Double($0) * step)] }
+    }
+}
+
+extension MeshData {
+    /// The same mesh moved by a rigid (or uniformly scaled) transform.
+    func transformed(by m: simd_float4x4) -> MeshData {
+        let normalMatrix = simd_float3x3(SIMD3<Float>(m.columns.0.x, m.columns.0.y, m.columns.0.z),
+                                         SIMD3<Float>(m.columns.1.x, m.columns.1.y, m.columns.1.z),
+                                         SIMD3<Float>(m.columns.2.x, m.columns.2.y, m.columns.2.z))
+        let moved = vertices.map { v -> SIMD3<Float> in
+            let w = m * SIMD4<Float>(v.x, v.y, v.z, 1)
+            return SIMD3<Float>(w.x, w.y, w.z)
+        }
+        let turned = normals.map { n -> SIMD3<Float> in
+            let r = normalMatrix * n
+            let len = simd_length(r)
+            return len > 1e-6 ? r / len : n
+        }
+        let (minB, maxB) = MeshData.bounds(of: moved)
+        return MeshData(vertices: moved, normals: turned, faces: faces, colors: colors,
+                        boundingBoxMin: minB, boundingBoxMax: maxB)
+    }
+}

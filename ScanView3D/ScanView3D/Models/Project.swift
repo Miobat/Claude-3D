@@ -90,17 +90,28 @@ struct Scan: Identifiable, Codable {
     var captureFolderName: String?   // folder of source photos kept for later re-reconstruction (HQ mode)
     var modelScale: Float?           // uniform metric scale correction (older photogrammetry scans)
     var modelTransform: [Float]?     // 4×4 column-major: puts a photogrammetry model into real-world space
+    var sceneFrame: [Float]?         // 4×4: world → tidy frame used when the scan was saved (HQ re-runs reuse it)
+    var northAligned: Bool?          // -Z points to true north (compass-aligned scan)
+    var latitude: Double?
+    var longitude: Double?
+    var altitude: Double?
+    var locationAccuracy: Double?    // metres
 
     /// Transform to apply to the stored model file when showing/measuring it.
     var modelMatrix: simd_float4x4? {
-        if let t = modelTransform, t.count == 16 {
-            return simd_float4x4(SIMD4<Float>(t[0], t[1], t[2], t[3]), SIMD4<Float>(t[4], t[5], t[6], t[7]),
-                                 SIMD4<Float>(t[8], t[9], t[10], t[11]), SIMD4<Float>(t[12], t[13], t[14], t[15]))
-        }
+        if let m = Scan.matrix(modelTransform) { return m }
         if let s = modelScale, s > 0, abs(s - 1) > 0.0001 {
             return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
         }
         return nil
+    }
+
+    var sceneFrameMatrix: simd_float4x4? { Scan.matrix(sceneFrame) }
+
+    static func matrix(_ t: [Float]?) -> simd_float4x4? {
+        guard let t = t, t.count == 16 else { return nil }
+        return simd_float4x4(SIMD4<Float>(t[0], t[1], t[2], t[3]), SIMD4<Float>(t[4], t[5], t[6], t[7]),
+                             SIMD4<Float>(t[8], t[9], t[10], t[11]), SIMD4<Float>(t[12], t[13], t[14], t[15]))
     }
 
     init(name: String, fileName: String, vertexCount: Int = 0, faceCount: Int = 0, fileSize: Int64 = 0) {
@@ -151,6 +162,7 @@ struct ScanSettings: Codable, Equatable {
     var captureTexture: Bool = true    // colour for Fast / Point Cloud
     var reconstructQuality: ReconstructQuality = .best
     var highResPhotos: Bool = false    // 12 MP stills for High Quality / Splat
+    var alignToNorth: Bool = false     // compass-aligned world + GPS tag (outdoor / land)
 
     init() {}
 
@@ -166,6 +178,7 @@ struct ScanSettings: Codable, Equatable {
         captureTexture = (try? c.decodeIfPresent(Bool.self, forKey: .captureTexture)) ?? d.captureTexture
         reconstructQuality = (try? c.decodeIfPresent(ReconstructQuality.self, forKey: .reconstructQuality)) ?? d.reconstructQuality
         highResPhotos = (try? c.decodeIfPresent(Bool.self, forKey: .highResPhotos)) ?? d.highResPhotos
+        alignToNorth = (try? c.decodeIfPresent(Bool.self, forKey: .alignToNorth)) ?? d.alignToNorth
     }
 
     // MARK: - Persistence

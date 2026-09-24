@@ -12,6 +12,7 @@ struct ScannerView: View {
     #else
     @StateObject private var scanner = LiDARScanner()
     #endif
+    @StateObject private var location = LocationProvider()
 
     @EnvironmentObject var storageManager: StorageManager
     @State private var settings = ScanSettings.load()
@@ -310,7 +311,19 @@ struct ScannerView: View {
                 .tint(.green)
             }
 
-            // 6. Colour (Fast / Point Cloud)
+            // 6. Compass north + GPS (outdoor / land)
+            Toggle(isOn: $settings.alignToNorth) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Align to north + GPS").font(.caption).foregroundColor(.white)
+                    Text(settings.alignToNorth
+                         ? "Uses the compass (−Z = north) and saves the location. Best outdoors."
+                         : "Scan is levelled and lined up with the walls.")
+                        .font(.caption2).foregroundColor(.gray)
+                }
+            }
+            .tint(.green)
+
+            // 7. Colour (Fast / Point Cloud)
             if settings.captureMode.usesColorToggle {
                 Toggle(isOn: $settings.captureTexture) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -413,8 +426,10 @@ struct ScannerView: View {
                         rangeMeters: settings.rangeValue,
                         captureMode: settings.captureMode,
                         detailMM: settings.detailMM,
-                        highResPhotos: settings.highResPhotos
+                        highResPhotos: settings.highResPhotos,
+                        alignToNorth: settings.alignToNorth
                     )
+                    if settings.alignToNorth { location.requestFix() }
                 } label: {
                     VStack(spacing: 4) {
                         ZStack {
@@ -666,15 +681,32 @@ struct ScannerView: View {
         }
     }
 
-    /// Hide the save sheet, open the saved scan, and get the camera ready again.
-    private func finishSave(scan: Scan, project: Project) {
+    /// Hide the save sheet, record where/how the scan was aligned, open the
+    /// saved scan, and get the camera ready again.
+    private func finishSave(scan: Scan, project: Project, extra: ((inout Scan) -> Void)? = nil) {
+        let north = settings.alignToNorth
+        let fix = north ? location.lastLocation : nil
+        let change: (inout Scan) -> Void = { s in
+            if north { s.northAligned = true }
+            if let l = fix {
+                s.latitude = l.coordinate.latitude
+                s.longitude = l.coordinate.longitude
+                s.altitude = l.altitude
+                s.locationAccuracy = l.horizontalAccuracy
+            }
+            extra?(&s)
+        }
+        var updated = scan
+        change(&updated)
+        storageManager.updateScan(scan.id, in: project, change)
+
         isSaving = false
         savingProgress = ""
         showingSaveDialog = false
         pendingMesh = nil
         scanner.resetScanning()
         scanner.startPreview()
-        savedScan = scan
+        savedScan = updated
         savedProject = project
         showingSavedScan = true
     }
@@ -700,6 +732,7 @@ struct ScannerView: View {
         let level = processingLevel
         let format = exportFormat
         let name = scanName
+        let north = settings.alignToNorth
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -719,6 +752,9 @@ struct ScannerView: View {
                     DispatchQueue.main.async { self.savingProgress = "Baking texture..." }
                     baked = scanner.bakeTexture(meshData: meshData)
                 }
+
+                // Level and square up AFTER baking (baking needs the camera-space positions).
+                meshData = meshData.transformed(by: SceneFrame.compute(from: meshData, keepHeading: north))
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
                 let scan = try storageManager.saveScan(meshData: meshData, name: name, toProject: project,
@@ -742,14 +778,19 @@ struct ScannerView: View {
         savingProgress = "Packaging for desktop…"
         let cloud = pendingMesh
         let name = scanName
+        let north = settings.alignToNorth
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // The bundle keeps ARKit's frame (it must match the camera poses).
             SplatExporter.writeBundle(imageFolder: folder, poses: poses, pointCloud: cloud)
             let zipURL = SplatExporter.zip(folder: folder)
 
-            // Keep an in-app record so the scan shows up in Projects, with the zip
-            // stored next to it so it can be re-sent later.
-            let record = cloud.flatMap { try? storageManager.savePointCloud(meshData: $0, name: name, toProject: project) }
+            // Keep an in-app (levelled) record so the scan shows up in Projects, with
+            // the zip stored next to it so it can be re-sent later.
+            let record = cloud.flatMap { c -> Scan? in
+                let levelled = c.transformed(by: SceneFrame.compute(from: c, keepHeading: north))
+                return try? storageManager.savePointCloud(meshData: levelled, name: name, toProject: project)
+            }
             if let zipURL = zipURL, let record = record {
                 storageManager.attachSplatBundle(zipURL: zipURL, toScan: record.id, in: project)
             }
@@ -794,10 +835,12 @@ struct ScannerView: View {
         let detailMeters = max(0.001, settings.detailMM / 1000.0)
         let grey = !settings.captureTexture
         let name = scanName
+        let north = settings.alignToNorth
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 var points = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
+                points = points.transformed(by: SceneFrame.compute(from: points, keepHeading: north))
                 let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project)
                 DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
@@ -814,9 +857,11 @@ struct ScannerView: View {
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).usdz")
         // Metric reference from the LiDAR mesh captured in the same session.
-        let lidarExtent = ScannerView.metricExtent(of: pendingMesh)
+        let lidarMesh = pendingMesh
+        let lidarExtent = ScannerView.metricExtent(of: lidarMesh)
         let quality: PhotogrammetryProcessor.Quality = settings.reconstructQuality == .draft ? .draft : .best
         let name = scanName
+        let north = settings.alignToNorth
 
         Task {
             do {
@@ -830,10 +875,18 @@ struct ScannerView: View {
                     }
                 }
 
-                let transform = ScannerView.alignmentTransform(
+                let alignment = ScannerView.alignmentTransform(
                     photoPositions: photoPositions,
                     arkitPositions: PoseFile.cameraPositions(forPhotoFolder: inputFolder),
                     modelURL: outputURL, lidarExtent: lidarExtent)
+                // When aligned to ARKit's world, also level/square it like other scans.
+                var transform = alignment?.transform
+                var frame: simd_float4x4?
+                if let a = alignment, a.poseBased, let lidar = lidarMesh {
+                    let f = SceneFrame.compute(from: lidar, keepHeading: north)
+                    frame = f
+                    transform = f * a.transform
+                }
                 let scan = try storageManager.importProcessedModel(
                     modelURL: outputURL,
                     name: name,
@@ -842,7 +895,10 @@ struct ScannerView: View {
                     photosFolder: inputFolder
                 )
                 try? FileManager.default.removeItem(at: outputURL)
-                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
+                let sceneFrame = frame.map(StorageManager.array(of:))
+                DispatchQueue.main.async {
+                    finishSave(scan: scan, project: project) { s in s.sceneFrame = sceneFrame }
+                }
             } catch {
                 DispatchQueue.main.async { failSave(PhotogrammetryProcessor.friendlyMessage(for: error)) }
             }
@@ -884,7 +940,7 @@ extension ScannerView {
     /// true metric scale, gravity-up and the same placement as the LiDAR scan.
     /// Falls back to a size-only correction if that isn't reliable.
     static func alignmentTransform(photoPositions: [Int: SIMD3<Float>], arkitPositions: [Int: SIMD3<Float>],
-                                   modelURL: URL, lidarExtent: Float?) -> simd_float4x4? {
+                                   modelURL: URL, lidarExtent: Float?) -> (transform: simd_float4x4, poseBased: Bool)? {
         let ids = photoPositions.keys.filter { arkitPositions[$0] != nil }.sorted()
         if ids.count >= 6 {
             var src = ids.compactMap { photoPositions[$0] }
@@ -912,13 +968,13 @@ extension ScannerView {
                 }
                 if sane {
                     DebugLogger.shared.info("HQ model aligned by \(src.count) cameras, scale \(f.scale), rms \(f.rms) m", category: "Photogrammetry")
-                    return f.transform
+                    return (f.transform, true)
                 }
                 DebugLogger.shared.warn("Pose alignment rejected (spread \(spread), rms \(f.rms)); using size match", category: "Photogrammetry")
             }
         }
         if let s = metricScale(forModel: modelURL, lidarExtent: lidarExtent) {
-            return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
+            return (simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1)), false)
         }
         return nil
     }

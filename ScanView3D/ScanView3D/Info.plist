@@ -28,6 +28,8 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>ScanView 3D needs camera access to perform LiDAR scanning and capture textures of your environment.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Used only when you turn on "Align to north + GPS", to record where a scan was taken.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>ScanView 3D needs photo library access to save scan screenshots.</string>
 	<key>UILaunchScreen</key>

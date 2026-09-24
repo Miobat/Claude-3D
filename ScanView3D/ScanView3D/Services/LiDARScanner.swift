@@ -136,7 +136,8 @@ class LiDARScanner: NSObject, ObservableObject {
         rangeMeters: Float = 3.0,
         captureMode: ScanSettings.CaptureMode = .fast,
         detailMM: Float = 10,
-        highResPhotos: Bool = false
+        highResPhotos: Bool = false,
+        alignToNorth: Bool = false
     ) {
         guard LiDARScanner.isLiDARAvailable else {
             scanError = "LiDAR is not available on this device"
@@ -168,6 +169,8 @@ class LiDARScanner: NSObject, ObservableObject {
         configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
             ? .meshWithClassification : .mesh
         configuration.planeDetection = [.horizontal, .vertical]
+        // Compass alignment: -Z = true north, +X = east (needs a working compass).
+        configuration.worldAlignment = alignToNorth ? .gravityAndHeading : .gravity
         // Depth is used to hide occluded surfaces when colouring and for the point cloud.
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             configuration.frameSemantics.insert(.smoothedSceneDepth)
