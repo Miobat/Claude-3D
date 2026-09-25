@@ -26,7 +26,16 @@ jobs:
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
       - name: Storage failure-path tests
+        env:
+          EXPORT_FIXTURE_DIR: ${{ runner.temp }}/export-fixtures
         run: swift test --package-path ScanView3D/StorageCore
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify exports with independent OpenUSD reader
+        run: |
+          python -m pip install usd-core==25.11
+          python ScanView3D/Tests/verify_usdz.py "$RUNNER_TEMP/export-fixtures/aligned.usdz"
       - name: Compile device and simulator without signing
         shell: bash
         run: |
@@ -41,11 +50,21 @@ jobs:
               'SUPPORTED_PLATFORMS=iphoneos iphonesimulator' build \
               2>&1 | tee -a "$RUNNER_TEMP/validation.log"
           done
+      - name: Capture native design previews
+        if: contains(fromJSON('["refs/heads/codex/design-system-upgrade", "refs/heads/codex/live-capture-navigation"]'), github.ref) || contains(fromJSON('["codex/design-system-upgrade", "codex/live-capture-navigation"]'), github.head_ref)
+        run: bash .github/scripts/design-screenshots.sh
+      - name: Keep native design previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-design-previews
+          path: ${{ runner.temp }}/design-screenshots
+          if-no-files-found: ignore
       - name: Report compiler errors
         if: failure()
         shell: bash
         run: |
-          grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null | head -20 | while IFS= read -r line; do
+          { grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null || true; } | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
       - name: Keep compiler log

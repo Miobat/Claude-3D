@@ -11,7 +11,7 @@ class MeshProcessor {
     // MARK: - Post-Processing Pipeline
 
     /// Full post-processing pipeline to clean up raw scan data
-    static func postProcess(_ meshData: MeshData, level: ProcessingLevel = .standard) -> MeshData {
+    static func postProcess(_ meshData: MeshData, level: ProcessingLevel = .standard, preservePositions: Bool = false) -> MeshData {
         var result = meshData
 
         switch level {
@@ -24,14 +24,14 @@ class MeshProcessor {
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.01)
             result = removeSmallComponents(result, minVertices: 80)
-            result = smoothVertexPositions(result, iterations: 1, factor: 0.3)
+            if !preservePositions { result = smoothVertexPositions(result, iterations: 1, factor: 0.3) }
             result = recalculateNormals(result)
             result = smoothNormals(result)
         case .high:
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.015)
             result = removeSmallComponents(result, minVertices: 150)
-            result = smoothVertexPositions(result, iterations: 3, factor: 0.4)
+            if !preservePositions { result = smoothVertexPositions(result, iterations: 3, factor: 0.4) }
             result = recalculateNormals(result)
             result = smoothNormals(result)
         }
@@ -417,12 +417,13 @@ class MeshProcessor {
     /// Simplify to roughly one vertex per `cellSize` cube: vertices in the same
     /// cell merge into their average, triangles that collapse are dropped. Used
     /// by the Detail setting (e.g. 20 mm for big outdoor areas).
-    static func clusterVertices(_ meshData: MeshData, cellSize: Float) -> MeshData {
+    static func clusterVertices(_ meshData: MeshData, cellSize: Float, preservePositions: Bool = false) -> MeshData {
         guard cellSize > 0, !meshData.vertices.isEmpty else { return meshData }
         let inv = 1 / cellSize
         var cellIndex: [SIMD3<Int32>: Int32] = [:]
         var remap = [Int32](repeating: 0, count: meshData.vertices.count)
         var sums: [SIMD3<Float>] = []
+        var representatives: [SIMD3<Float>] = []
         var colorSums: [SIMD4<Float>] = []
         var counts: [Float] = []
 
@@ -440,12 +441,13 @@ class MeshProcessor {
                 cellIndex[key] = idx
                 remap[i] = idx
                 sums.append(v)
+                representatives.append(v)
                 colorSums.append(c)
                 counts.append(1)
             }
         }
 
-        let vertices = zip(sums, counts).map { $0 / $1 }
+        let vertices = preservePositions ? representatives : zip(sums, counts).map { $0 / $1 }
         let colors = zip(colorSums, counts).map { $0 / $1 }
         var seen = Set<SIMD3<UInt32>>()
         var faces: [[UInt32]] = []
@@ -603,7 +605,7 @@ class MeshProcessor {
                 Int32(floor(v.z * inv))
             )
             var acc = voxels[key] ?? Accum()
-            acc.p += v
+            if acc.count == 0 { acc.p = v }
             if hasColor && i < meshData.colors.count { acc.c += meshData.colors[i] }
             if hasNormal && i < meshData.normals.count { acc.n += meshData.normals[i] }
             acc.count += 1
@@ -619,7 +621,7 @@ class MeshProcessor {
         var maxB = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
 
         for (_, acc) in voxels {
-            let p = acc.p / acc.count
+            let p = acc.p // Retain an actual captured point at range boundaries.
             newVertices.append(p)
             if hasColor {
                 var c = acc.c / acc.count
@@ -819,7 +821,17 @@ enum PhotogrammetryProcessor {
         // faster but likelier to fail on sparse-texture scenes.
         configuration.featureSensitivity = (quality == .best) ? .high : .normal
 
-        let session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
+        let capturedPoses = try PoseFile.read(forPhotoFolder: inputFolder)
+        let hasRangeMasks = try PoseFile.requiresRangeMasks(forPhotoFolder: inputFolder) || capturedPoses.contains { $0.rangeMask != nil }
+        configuration.isObjectMaskingEnabled = hasRangeMasks
+        let maskedSamples = try hasRangeMasks ? RangePhotoInput.Samples(folder: inputFolder, poses: capturedPoses) : nil
+        let session: PhotogrammetrySession
+        if let samples = maskedSamples {
+            session = try PhotogrammetrySession(input: samples, configuration: configuration)
+        } else {
+            // Old captures remain reconstructable; no retroactive range promise.
+            session = try PhotogrammetrySession(input: inputFolder, configuration: configuration)
+        }
         try session.process(requests: [
             .modelFile(url: outputUSDZ, detail: requestDetail),
             .poses
@@ -827,6 +839,7 @@ enum PhotogrammetryProcessor {
 
         var cameraPositions: [Int: SIMD3<Float>] = [:]
         for try await output in session.outputs {
+            try maskedSamples?.checkFailure()
             switch output {
             case .requestProgress(let request, let fraction):
                 if case .modelFile = request { progress(fraction) }
@@ -834,12 +847,17 @@ enum PhotogrammetryProcessor {
                 if case .modelFile = request { progress(1.0) }
                 if case .poses(let poses) = result {
                     for (id, pose) in poses.posesBySample {
+                        if maskedSamples != nil {
+                            cameraPositions[id] = pose.translation
+                            continue
+                        }
                         guard let url = poses.urlsBySample[id],
                               let index = photoIndex(from: url) else { continue }
                         cameraPositions[index] = pose.translation
                     }
                 }
             case .processingComplete:
+                try maskedSamples?.checkFailure()
                 return cameraPositions
             case .requestError(let request, let error):
                 // Poses are a bonus; only a failed model is fatal.
@@ -871,6 +889,9 @@ enum SplatExporter {
     /// and a README into the folder that already holds the captured frames.
     static func writeBundle(imageFolder: URL, poses: [CapturedPose], pointCloud: MeshData?) throws {
         guard !poses.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        if try PoseFile.requiresRangeMasks(forPhotoFolder: imageFolder) {
+            guard poses.allSatisfy({ $0.rangeMask?.isValid == true }) else { throw CocoaError(.fileReadCorruptFile) }
+        }
         // Do not claim a complete bundle when a pending/failed photo write is missing.
         for pose in poses {
             let image = imageFolder.appendingPathComponent(String(format: "frame_%04d.jpg", pose.index))
@@ -894,13 +915,22 @@ enum SplatExporter {
                 }
                 // Per-frame camera (Nerfstudio reads these over the global values),
                 // so photos of different resolutions stay correct.
-                frames.append([
+                var frame: [String: Any] = [
                     "file_path": String(format: "frame_%04d.jpg", p.index),
                     "transform_matrix": rows,
                     "fl_x": Double(p.intrinsics[0][0]), "fl_y": Double(p.intrinsics[1][1]),
                     "cx": Double(p.intrinsics[2][0]), "cy": Double(p.intrinsics[2][1]),
                     "w": p.width, "h": p.height
-                ])
+                ]
+                if let mask = p.rangeMask {
+                    let name = String(format: "masks/frame_%04d.png", p.index)
+                    let maskURL = imageFolder.appendingPathComponent(name)
+                    try FileManager.default.createDirectory(at: maskURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try RangePhotoInput.writeMask(mask, width: p.width, height: p.height, to: maskURL)
+                    frame["mask_path"] = name
+                    frame["capture_range_metres"] = mask.rangeMetres
+                }
+                frames.append(frame)
             }
 
             let root: [String: Any] = [
@@ -928,6 +958,14 @@ enum SplatExporter {
           transforms.json    Camera intrinsics + per-image poses
                              (instant-ngp / Nerfstudio convention, OpenGL axes)
           points3D.ply       LiDAR colored point cloud (use as init)
+          masks/            Binary per-photo capture-range masks, when available
+
+        RANGE: New captures include mask_path per frame in transforms.json.
+        Black pixels are outside range or have unreliable/missing depth. A
+        trainer MUST honor these masks; otherwise the full original photographs
+        can reconstruct excluded background. Not all desktop importers do so.
+        The app's LiDAR point cloud is range-filtered independently. Old bundles
+        without masks have no photo-background range restriction.
 
         Poses are included from ARKit, so you can SKIP COLMAP / structure-from-motion.
 

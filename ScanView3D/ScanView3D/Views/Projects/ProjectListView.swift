@@ -3,15 +3,24 @@ import SwiftUI
 /// Main project list view showing all scanning projects
 struct ProjectListView: View {
     @EnvironmentObject var storageManager: StorageManager
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingNewProject = false
     @State private var newProjectName = ""
     @State private var showingImporter = false
     @State private var editingProject: Project?
     @State private var renameName = ""
     @State private var importTargetProject: Project?
+    @State private var searchText = ""
+    @State private var projectsToDelete: [Project] = []
+
+    private var sortedProjects: [Project] {
+        storageManager.projects.sorted { $0.modifiedAt > $1.modifiedAt }.filter {
+            searchText.isEmpty || $0.name.localizedCaseInsensitiveContains(searchText)
+        }
+    }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Group {
                 if storageManager.projects.isEmpty {
                     emptyState
@@ -20,6 +29,10 @@ struct ProjectListView: View {
                 }
             }
             .navigationTitle("Projects")
+            .navigationBarTitleDisplayMode(.inline)
+            .fieldScreen()
+            .searchable(text: $searchText, prompt: "Find a project")
+            .overlay { ExportProgressView(store: storageManager) }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -38,6 +51,7 @@ struct ProjectListView: View {
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .accessibilityLabel("Create or import")
                 }
             }
             .alert("New Project", isPresented: $showingNewProject) {
@@ -74,53 +88,67 @@ struct ProjectListView: View {
             ) { result in
                 handleImport(result)
             }
+            .confirmationDialog("Delete \(projectsToDelete.count) project(s)?", isPresented: Binding(
+                get: { !projectsToDelete.isEmpty }, set: { if !$0 { projectsToDelete = [] } }
+            ), titleVisibility: .visible) {
+                Button("Delete Projects and Scans", role: .destructive) {
+                    for project in projectsToDelete { storageManager.deleteProject(project) }
+                    projectsToDelete = []
+                }
+            } message: { Text("This permanently removes their scan files. This cannot be undone.") }
         }
     }
 
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "cube.transparent")
-                .font(.system(size: 60))
-                .foregroundColor(.gray)
-
-            Text("No Projects Yet")
-                .font(.title2)
-                .fontWeight(.bold)
-
-            Text("Create a project to organize your 3D scans,\nor import existing OBJ/PLY files.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-
-            VStack(spacing: 12) {
-                Button {
-                    showingNewProject = true
-                } label: {
-                    Label("Create Project", systemImage: "folder.badge.plus")
-                        .frame(maxWidth: 250)
+        ScrollView {
+            VStack(spacing: 20) {
+                libraryHero
+                FieldEmptyState(icon: "folder.badge.plus", title: "A place for every capture",
+                                message: "Group your scans by site, object, or room. Everything stays on this device.")
+                VStack(spacing: 10) {
+                    Button { showingNewProject = true } label: {
+                        Label("Create your first project", systemImage: "plus")
+                    }.buttonStyle(FieldButtonStyle(prominent: true))
+                    Button { showingImporter = true } label: {
+                        Label("Import OBJ or PLY", systemImage: "square.and.arrow.down")
+                    }.buttonStyle(FieldButtonStyle())
                 }
-                .buttonStyle(.borderedProminent)
-
-                Button {
-                    showingImporter = true
-                } label: {
-                    Label("Import File", systemImage: "square.and.arrow.down")
-                        .frame(maxWidth: 250)
-                }
-                .buttonStyle(.bordered)
             }
-            .padding(.top, 8)
+            .padding(20).frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
-        .padding()
+    }
+
+    private var libraryHero: some View {
+        FieldHero(eyebrow: "Workspace", title: typeSize.isAccessibilitySize ? "Your projects" : "Your world.\nIn three dimensions.",
+                  subtitle: "Capture, organize, and explore your spaces.", icon: "square.stack.3d.up")
     }
 
     // MARK: - Project List
 
     private var projectList: some View {
         List {
-            ForEach(storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })) { project in
+            Section {
+                libraryHero.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                if typeSize.isAccessibilitySize {
+                    Text("\(storageManager.projects.count) projects · \(storageManager.projects.reduce(0) { $0 + $1.scanCount }) scans · On device")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
+                } else {
+                HStack(spacing: 16) {
+                    StatItem(label: "Projects", value: "\(storageManager.projects.count)", icon: "folder")
+                    StatItem(label: "Scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })", icon: "cube")
+                    StatItem(label: "Storage", value: "On device", icon: "iphone")
+                }.padding(.vertical, 8)
+                }
+            }.listRowSeparator(.hidden)
+            Section("Recently updated") {
+            if sortedProjects.isEmpty {
+                FieldEmptyState(icon: "magnifyingglass", title: "No matching projects", message: "Try another name or clear your search.")
+            }
+            ForEach(sortedProjects) { project in
                 NavigationLink(destination: ProjectDetailView(project: project)) {
                     ProjectRow(project: project)
                 }
@@ -150,19 +178,19 @@ struct ProjectListView: View {
                     Divider()
 
                     Button(role: .destructive) {
-                        storageManager.deleteProject(project)
+                        projectsToDelete = [project]
                     } label: {
                         Label("Delete", systemImage: "trash")
                     }
                 }
             }
             .onDelete { indexSet in
-                let sorted = storageManager.projects.sorted(by: { $0.modifiedAt > $1.modifiedAt })
-                for index in indexSet {
-                    storageManager.deleteProject(sorted[index])
-                }
+                projectsToDelete = indexSet.map { sortedProjects[$0] }
             }
+            }.listRowBackground(FieldStyle.surface)
         }
+        .listStyle(.insetGrouped)
+        .contentMargins(.top, 8)
     }
 
     // MARK: - Import Handler
@@ -197,13 +225,8 @@ struct ProjectListView: View {
     }
 
     private func exportProject(_ project: Project) {
-        if let url = storageManager.exportProject(project) {
-            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(activityVC, animated: true)
-            }
-        }
+        let store = storageManager
+        store.prepareExport({ try store.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 
@@ -211,44 +234,25 @@ struct ProjectListView: View {
 
 struct ProjectRow: View {
     let project: Project
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         HStack(spacing: 12) {
             // Thumbnail or icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.accentColor.opacity(0.15))
-                    .frame(width: AppConstants.Layout.thumbnailSize, height: AppConstants.Layout.thumbnailSize)
-
-                if let thumbnailData = project.thumbnailData,
-                   let uiImage = UIImage(data: thumbnailData) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: AppConstants.Layout.thumbnailSize, height: AppConstants.Layout.thumbnailSize)
-                        .cornerRadius(10)
-                } else {
-                    Image(systemName: "cube.fill")
-                        .font(.system(size: 24))
-                        .foregroundColor(.accentColor)
-                }
+            if !typeSize.isAccessibilitySize {
+            FieldThumbnail(data: project.thumbnailData, icon: "square.stack.3d.up")
+                .frame(width: 68, height: 76)
             }
 
             // Project info
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 7) {
                 Text(project.name)
                     .font(.headline)
+                    .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
 
-                HStack(spacing: 8) {
-                    Label("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")", systemImage: "viewfinder")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    if project.totalFileSize > 0 {
-                        Text(project.formattedTotalSize)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { projectMetadata }
+                    VStack(alignment: .leading, spacing: 4) { projectMetadata }
                 }
 
                 Text(project.modifiedAt.relativeString)
@@ -256,19 +260,26 @@ struct ProjectRow: View {
                     .foregroundColor(.secondary)
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            // Scan count badge
-            if project.scanCount > 0 {
-                Text("\(project.scanCount)")
-                    .font(.caption)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .frame(width: 26, height: 26)
-                    .background(Color.accentColor)
-                    .clipShape(Circle())
-            }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var projectMetadata: some View {
+                    if typeSize.isAccessibilitySize {
+                        Text("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                    Label("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")", systemImage: "viewfinder")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+
+                    if project.totalFileSize > 0 {
+                        Text(project.formattedTotalSize)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
     }
 }

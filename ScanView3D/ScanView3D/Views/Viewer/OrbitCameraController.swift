@@ -1,6 +1,13 @@
 import UIKit
 import SceneKit
 import simd
+import Combine
+
+final class WalkNavigation: ObservableObject {
+    @Published var enabled = false
+    @Published var isWalking = false
+    @Published var message = "Tap the scanned ground to start · Eye height 1.8 m"
+}
 
 /// Touch navigation for the 3D viewer, replacing SceneKit's built-in camera
 /// control (whose two-finger pan is hard to use):
@@ -19,6 +26,14 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
     /// Turn around the vertical axis and tilt up/down (radians).
     private(set) var yaw: Float = 0
     private(set) var pitch: Float = -0.29
+    private var orbitOffset = SIMD3<Float>(0, 0, 5)
+    private var touchDown = CGPoint.zero
+    private var orbitHasSurface = false
+    private(set) var walkGround: SIMD3<Float>?
+    var choosingWalkStart = false
+    var groundPoint: ((SIMD3<Float>) -> SIMD3<Float>?)?
+    var movementBlocked: ((SIMD3<Float>, SIMD3<Float>) -> Bool)?
+    var walkMessage: ((String) -> Void)?
 
     private var minDistance: Float = 0.02
     private var maxDistance: Float = 1000
@@ -72,6 +87,11 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         (g === movePan && other === pinch) || (g === pinch && other === movePan)
     }
 
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === orbitPan, gestureRecognizer.numberOfTouches == 0 { touchDown = touch.location(in: view) }
+        return true
+    }
+
     // MARK: - Placing the camera
 
     private var orientation: simd_quatf {
@@ -85,7 +105,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         SCNTransaction.animationDuration = animated ? 0.4 : 0
         let q = orientation
         node.simdOrientation = q
-        node.simdPosition = target + q.act(SIMD3<Float>(0, 0, distance))
+        node.simdPosition = walkGround.map { $0 + SIMD3(0, WalkGeometry.eyeHeight, 0) } ?? (target + q.act(orbitOffset))
         SCNTransaction.commit()
     }
 
@@ -96,6 +116,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         maxDistance = size * 30 + 10
         target = center
         distance = size * 2.1
+        orbitOffset = SIMD3(0, 0, distance)
         yaw = 0
         pitch = -0.29
         apply(animated: animated)
@@ -108,6 +129,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         self.pitch = pitch
         self.target = target
         self.distance = min(max(distance, minDistance), maxDistance)
+        orbitOffset = SIMD3(0, 0, self.distance)
         apply(animated: animated)
     }
 
@@ -119,6 +141,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         pitch = asin(min(1, max(-1, forward.y)))
         yaw = atan2(-forward.x, -forward.z)
         target = node.simdPosition + forward * distance
+        orbitOffset = SIMD3(0, 0, distance)
     }
 
     // MARK: - Gestures
@@ -128,15 +151,26 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         switch g.state {
         case .began:
             stopInertia()
+            orbitHasSurface = false
+            guard !choosingWalkStart else { return }
+            if walkGround != nil { orbitHasSurface = true; return }
+            guard let p = surfacePoint?(touchDown), let node = cameraNode else { return }
+            target = p
+            orbitOffset = WalkGeometry.orbitOffset(camera: node.simdPosition, pivot: p, orientation: orientation)
+            distance = max(0.001, simd_length(orbitOffset))
+            orbitHasSurface = true
         case .changed:
             let t = g.translation(in: view)
             g.setTranslation(.zero, in: view)
+            guard orbitHasSurface else { return }
             rotate(dx: Float(t.x), dy: Float(t.y))
         case .ended:
+            guard orbitHasSurface, walkGround == nil else { return }
             let v = g.velocity(in: view)
             startInertia(SIMD2<Float>(Float(v.x), Float(v.y)))
         default:
-            break
+            orbitHasSurface = false
+            stopInertia()
         }
     }
 
@@ -151,6 +185,8 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         stopInertia()
         let t = g.translation(in: view)
         g.setTranslation(.zero, in: view)
+        // Keep two-finger pan in orbit; walking remains height-locked.
+        guard walkGround == nil, !choosingWalkStart else { return }
         let k = worldUnitsPerPoint()
         let q = orientation
         let right = q.act(SIMD3<Float>(1, 0, 0))
@@ -162,6 +198,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
         guard g.state == .changed || g.state == .began, g.scale > 0 else { return }
+        guard walkGround == nil, !choosingWalkStart else { g.scale = 1; return }
         stopInertia()
         let s = Float(g.scale)
         g.scale = 1
@@ -169,17 +206,21 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
             let scale = camera.orthographicScale / Double(s)
             camera.orthographicScale = min(max(scale, Double(minDistance) * 0.5), Double(maxDistance))
         } else {
-            distance = min(max(distance / s, minDistance), maxDistance)
+            let newDistance = min(max(distance / s, minDistance), maxDistance)
+            orbitOffset *= newDistance / max(distance, 0.001)
+            distance = newDistance
             apply()
         }
     }
 
     @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) {
+        guard walkGround == nil, !choosingWalkStart else { return }
         guard let view = view, let p = surfacePoint?(g.location(in: view)) else { return }
         stopInertia()
         // Keep the camera's direction, move the focus to the tapped point, come a bit closer.
         target = p
         distance = max(minDistance, distance * 0.75)
+        orbitOffset = SIMD3(0, 0, distance)
         apply(animated: true)
     }
 
@@ -211,9 +252,61 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
         if simd_length(inertia) < 15 { stopInertia() }
     }
 
-    private func stopInertia() {
+    func stopInertia() {
         inertiaLink?.invalidate()
         inertiaLink = nil
         inertia = .zero
+    }
+
+    func beginWalk(at ground: SIMD3<Float>) {
+        stopInertia()
+        choosingWalkStart = false
+        walkGround = ground
+        pitch = -0.08
+        cameraNode?.camera?.usesOrthographicProjection = false
+        cameraNode?.camera?.zNear = 0.02
+        apply()
+    }
+
+    func endWalk() {
+        stopInertia()
+        choosingWalkStart = false
+        walkGround = nil
+        syncFromCamera()
+    }
+
+    func look(dx: Float, dy: Float) {
+        guard !choosingWalkStart, let node = cameraNode else { return }
+        stopInertia()
+        // Look turns at the camera, not around the orbit target.
+        let position = node.simdPosition
+        yaw -= dx; pitch = min(maxPitch, max(-maxPitch, pitch - dy))
+        node.simdOrientation = orientation
+        node.simdPosition = position
+        if walkGround == nil { syncFromCamera() }
+    }
+
+    func move(right: Float, forward: Float, elevation: Float) {
+        guard !choosingWalkStart, let node = cameraNode else { return }
+        stopInertia()
+        if var ground = walkGround {
+            let q = simd_quatf(angle: yaw, axis: SIMD3(0, 1, 0))
+            let delta = q.act(SIMD3(right, 0, -forward))
+            // Substeps prevent skipping narrow holes/obstacles during a hitch.
+            let steps = max(1, Int(ceil(simd_length(delta) / 0.04)))
+            for _ in 0..<min(steps, 40) {
+                let next = ground + delta / Float(steps)
+                guard let landed = groundPoint?(next), movementBlocked?(ground, landed) != true else {
+                    walkMessage?("Stopped at an edge, obstacle or unscanned ground")
+                    break
+                }
+                ground = landed
+                walkMessage?("Walk · Eye height 1.8 m · Ground locked")
+            }
+            walkGround = ground; apply()
+        } else {
+            node.simdPosition += orientation.act(SIMD3(right, 0, -forward)) + SIMD3(0, elevation, 0)
+            syncFromCamera()
+        }
     }
 }

@@ -2,6 +2,11 @@ import SwiftUI
 import SceneKit
 import simd
 
+private struct MeasurePanelHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 200
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// Full-screen 3D model viewer with measurement, processing, and visualization tools
 struct ModelViewerView: View {
     @State var scan: Scan
@@ -26,8 +31,11 @@ struct ModelViewerView: View {
 
     // Measuring
     @StateObject private var session = MeasurementSession()
+    @StateObject private var navigation = WalkNavigation()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
     @State private var showingClearMeasurements = false
+    @State private var measurePanelHeight: CGFloat = 200
 
     // Long-running work (re-reconstruction)
     @State private var isProcessing = false
@@ -39,6 +47,8 @@ struct ModelViewerView: View {
 
     // More menu
     @State private var showingMoreMenu = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     enum ViewerTool: String, CaseIterable {
         case orbit = "Orbit"
@@ -79,7 +89,8 @@ struct ModelViewerView: View {
                 showBoundingBox: $showBoundingBox,
                 vizMode: $vizMode,
                 activeTool: $activeTool,
-                session: session
+                session: session,
+                navigation: navigation
             )
             .id(reloadToken)
             .ignoresSafeArea(edges: .bottom)
@@ -92,66 +103,72 @@ struct ModelViewerView: View {
             }
 
             if !isLoading && loadError == nil && !isProcessing {
+                GeometryReader { geometry in
+                let compact = geometry.size.width > geometry.size.height
                 VStack {
+                    if !scan.hasKnownScale || scan.scaleStatus == .estimatedFromBounds {
+                        Label(scan.scaleDescription, systemImage: "exclamationmark.circle")
+                            .font(.caption).foregroundStyle(.white)
+                            .padding(12).fieldPanel().padding(.horizontal, 12)
+                            .accessibilityIdentifier("scaleWarning")
+                    }
                     // Top row: height legend (left), view buttons (right)
+                    if !(compact && activeTool == .measure) {
                     HStack(alignment: .top) {
-                        if vizMode == .height, let node = modelNode {
+                        if scan.hasKnownScale, vizMode == .height, let node = modelNode {
                             heightLegend(for: node)
                         }
                         Spacer()
-                        VStack(spacing: 12) {
-                            // Camera view presets
-                            Menu {
-                                Button { setCameraView(.top) } label: { Label("Top", systemImage: "arrow.down.to.line") }
-                                Button { setCameraView(.front) } label: { Label("Front", systemImage: "arrow.right.to.line") }
-                                Button { setCameraView(.side) } label: { Label("Side", systemImage: "arrow.left.to.line") }
-                            } label: {
-                                Image(systemName: "camera.viewfinder")
-                                    .font(.system(size: 18))
-                                    .foregroundColor(.white)
-                                    .frame(width: 40, height: 40)
-                                    .background(Color.black.opacity(0.5))
-                                    .clipShape(Circle())
-                            }
-
-                            // Projection toggle
-                            Menu {
-                                ForEach(CameraProjection.allCases, id: \.self) { proj in
-                                    Button {
-                                        cameraProjection = proj
-                                        applyCameraProjection(proj)
-                                    } label: {
-                                        Label(proj.rawValue, systemImage: proj.icon)
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: cameraProjection.icon)
-                                    .font(.system(size: 18))
-                                    .foregroundColor(.white)
-                                    .frame(width: 40, height: 40)
-                                    .background(Color.black.opacity(0.5))
-                                    .clipShape(Circle())
-                            }
+                        Group {
+                            if compact { HStack(spacing: 8) { cameraControls } }
+                            else { VStack(spacing: 12) { cameraControls } }
                         }
                         .padding(.trailing, 12)
                         .padding(.top, 8)
                     }
+                    }
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
-                    if showJoysticks { joystickOverlay }
+                    if navigation.enabled {
+                        HStack(spacing: 10) {
+                            Image(systemName: "figure.walk")
+                            Text(navigation.message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Button("Exit") { navigation.enabled = false }
+                                .font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+                        }
+                        .padding(.horizontal, 12).fieldPanel().padding(.horizontal, 12)
+                        .accessibilityIdentifier("walkStatus")
+                    }
+                    if showJoysticks || navigation.isWalking { joystickOverlay }
 
                     // Bottom toolbar: More | Process | Measure | Share
-                    bottomToolbar
+                    if compact && activeTool == .measure {
+                        HStack {
+                            Spacer(minLength: 0)
+                            bottomToolbar(compact: true)
+                                .frame(width: min(360, geometry.size.width * 0.46))
+                        }
+                    } else {
+                        bottomToolbar(compact: compact)
+                            .frame(width: geometry.size.width)
+                    }
+                }
+                .environment(\.colorScheme, .dark)
                 }
             }
         }
         .navigationTitle(scan.name)
+        .overlay { ExportProgressView(store: storageManager) }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(FieldStyle.viewport, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
-                    if let node = modelNode {
+                    if scan.hasKnownScale, let node = modelNode {
                         // boundingBox is in the node's own space; include its scale
                         // (High-Quality models carry a metric scale correction).
                         let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
@@ -162,6 +179,13 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        Text(scan.scaleDescription)
+                        if let provenance = scan.coordinateProvenance {
+                            Text(provenance.localDatum)
+                            if let rms = provenance.alignmentRMSErrorMetres {
+                                Text(String(format: "Camera fit RMS: %.3f m (not field accuracy)", rms))
+                            }
+                        }
                         Text("Vertices: \(scan.vertexCount.formatted())")
                         Text("Faces: \(scan.faceCount.formatted())")
                         Text("Size: \(scan.formattedFileSize)")
@@ -183,7 +207,7 @@ struct ModelViewerView: View {
                     }
                 } label: {
                     Image(systemName: "info.circle")
-                }
+                }.accessibilityLabel("Model information and coordinate reference")
             }
         }
         .sheet(isPresented: $showingShareSheet) {
@@ -192,6 +216,11 @@ struct ModelViewerView: View {
             }
         }
         .onAppear {
+            #if DEBUG && targetEnvironment(simulator)
+            if DesignPreview.screen == "measure" { activeTool = .measure }
+            if DesignPreview.screen == "joysticks" { showJoysticks = true }
+            if DesignPreview.screen == "walk" { navigation.enabled = true }
+            #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
@@ -199,6 +228,24 @@ struct ModelViewerView: View {
         }
         .onChange(of: activeTool) { _, tool in
             session.isActive = (tool == .measure)
+            if tool == .measure { navigation.enabled = false }
+        }
+        .onChange(of: navigation.enabled) { _, enabled in
+            stopNavigationInputs()
+            navigation.isWalking = false
+            if enabled {
+                activeTool = .orbit
+                cameraProjection = .perspective
+                navigation.message = "Tap the scanned ground to start · Eye height 1.8 m"
+            }
+        }
+        .onChange(of: showJoysticks) { _, _ in stopNavigationInputs() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { stopNavigationInputs() }
+        }
+        .onDisappear {
+            stopNavigationInputs()
+            navigation.enabled = false
         }
         .confirmationDialog("Delete all measurements on this scan?", isPresented: $showingClearMeasurements,
                             titleVisibility: .visible) {
@@ -232,14 +279,13 @@ struct ModelViewerView: View {
                     Spacer()
                     Text("lowest")
                 }
-                .font(.system(size: 10))
+                .font(.caption2)
                 .frame(height: 90)
             }
-            Text("Lines every " + measurementUnit.format(meters: step)).font(.system(size: 9))
+            Text("Lines every " + measurementUnit.format(meters: step)).font(.caption2)
         }
         .padding(8)
-        .background(Color.black.opacity(0.6))
-        .cornerRadius(8)
+        .fieldPanel()
         .foregroundColor(.white)
         .padding(.leading, 12)
         .padding(.top, 8)
@@ -259,15 +305,15 @@ struct ModelViewerView: View {
                                 .font(.caption)
                                 .fontWeight(.medium)
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
+                                .frame(minHeight: 44)
                                 .background(selected ? Color.yellow : Color.white.opacity(0.15))
                                 .foregroundColor(selected ? .black : .white)
                                 .cornerRadius(8)
-                        }
+                        }.accessibilityAddTraits(selected ? .isSelected : [])
                     }
                 }
                 .padding(.horizontal, 12)
-            }
+            }.fixedSize(horizontal: false, vertical: true)
 
             Text(session.status)
                 .font(.caption)
@@ -277,9 +323,9 @@ struct ModelViewerView: View {
                 .frame(minHeight: 30)
 
             // Actions: Undo · Add point · Done · Snap
-            HStack(spacing: 22) {
+            HStack(spacing: 14) {
                 Button { session.undo() } label: {
-                    Image(systemName: "arrow.uturn.backward.circle.fill").font(.system(size: 30))
+                    Image(systemName: "arrow.uturn.backward").font(.title3).frame(minWidth: 44, minHeight: 44)
                 }
                 .disabled(session.draftPoints.isEmpty && session.measurements.isEmpty)
                 .accessibilityLabel("Undo")
@@ -301,10 +347,13 @@ struct ModelViewerView: View {
                 Button { session.snappingEnabled.toggle() } label: {
                     VStack(spacing: 2) {
                         Image(systemName: "scope").font(.system(size: 22))
-                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.system(size: 9))
+                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
                     }
-                    .opacity(session.snappingEnabled ? 1 : 0.45)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .opacity(session.snappingEnabled ? 1 : 0.55)
                 }
+                .accessibilityLabel("Snap to geometry")
+                .accessibilityValue(session.snappingEnabled ? "On" : "Off")
             }
             .foregroundColor(.white)
 
@@ -322,22 +371,22 @@ struct ModelViewerView: View {
                                         .font(.caption)
                                         .fontWeight(.medium)
                                         .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
+                                        .frame(minHeight: 44)
                                         .background(selected ? Color.orange : Color.black.opacity(0.7))
                                         .foregroundColor(.white)
                                         .cornerRadius(8)
                                 }
                             }
                         }
-                    }
+                    }.fixedSize(horizontal: false, vertical: true)
                     if session.selectedID != nil {
                         Button { session.deleteSelected() } label: {
-                            Image(systemName: "trash.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                            Image(systemName: "trash.circle.fill").font(.system(size: 26)).foregroundColor(.red).frame(width: 44, height: 44)
                         }
                         .accessibilityLabel("Delete selected measurement")
                     } else {
                         Button { showingClearMeasurements = true } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 26)).foregroundColor(.red).frame(width: 44, height: 44)
                         }
                         .accessibilityLabel("Delete all measurements")
                     }
@@ -346,7 +395,7 @@ struct ModelViewerView: View {
             }
         }
         .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.6)))
+        .fieldPanel()
         .padding(.horizontal, 8)
     }
 
@@ -368,22 +417,30 @@ struct ModelViewerView: View {
 
     private var loadingOverlay: some View {
         VStack(spacing: 16) {
-            ProgressView().scaleEffect(1.5)
-            Text("Loading model...").font(.headline).foregroundColor(.secondary)
+            ProgressView().tint(FieldStyle.mint).controlSize(.large)
+            Text("Opening your scan").font(.headline).foregroundStyle(.white)
+            Text("Preparing geometry and materials").font(.subheadline).foregroundStyle(.white.opacity(0.65))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(FieldStyle.viewport)
     }
 
     private func errorOverlay(_ error: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 40)).foregroundColor(.orange)
-            Text("Failed to Load Model").font(.headline)
-            Text(error).font(.body).foregroundColor(.secondary).multilineTextAlignment(.center)
+            Text("Unable to open this scan").font(.title2.weight(.semibold)).foregroundStyle(.white)
+            Text(error).font(.body).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+            Button {
+                loadError = nil
+                isLoading = true
+                modelNode = nil
+                reloadToken = UUID()
+            } label: { Label("Try again", systemImage: "arrow.clockwise") }
+            .buttonStyle(FieldButtonStyle(prominent: true)).frame(maxWidth: 280)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(FieldStyle.viewport)
     }
 
     // MARK: - Joystick Overlay
@@ -398,6 +455,17 @@ struct ModelViewerView: View {
 
             Spacer()
 
+            if !navigation.enabled {
+                VerticalPanSlider { value in
+                    NotificationCenter.default.post(name: .joystickElevate, object: nil, userInfo: ["dy": value])
+                }
+            } else {
+                Image(systemName: "figure.walk").foregroundStyle(FieldStyle.mint)
+                    .frame(width: 44, height: 100).accessibilityLabel("Height locked to 1.8 metres")
+            }
+
+            Spacer()
+
             VirtualJoystick(label: "Look") { dx, dy in
                 NotificationCenter.default.post(name: .joystickLook, object: nil, userInfo: ["dx": dx, "dy": dy])
             }
@@ -407,131 +475,104 @@ struct ModelViewerView: View {
         .padding(.bottom, 8)
     }
 
-    // MARK: - Bottom Toolbar (More | Process | Measure | Share)
+    @ViewBuilder private var cameraControls: some View {
+                            // Camera view presets
+                            Menu {
+                                Button { setCameraView(.top) } label: { Label("Top", systemImage: "arrow.down.to.line") }
+                                Button { setCameraView(.front) } label: { Label("Front", systemImage: "arrow.right.to.line") }
+                                Button { setCameraView(.side) } label: { Label("Side", systemImage: "arrow.left.to.line") }
+                            } label: {
+                                FieldIcon(symbol: "camera.viewfinder")
+                            }
 
-    private var bottomToolbar: some View {
+                            .accessibilityLabel("Camera view: top, front, or side")
+
+                            // Projection toggle
+                            Menu {
+                                ForEach(CameraProjection.allCases, id: \.self) { proj in
+                                    Button {
+                                        cameraProjection = proj
+                                        applyCameraProjection(proj)
+                                    } label: {
+                                        Label(proj.rawValue, systemImage: proj.icon)
+                                    }
+                                }
+                            } label: {
+                                FieldIcon(symbol: cameraProjection.icon)
+                            }
+                            .accessibilityLabel("Projection: \(cameraProjection.rawValue)")
+                            Menu {
+                                Toggle("Ground grid", isOn: $showGrid)
+                                Toggle("Bounding box", isOn: $showBoundingBox)
+                                Toggle("Navigation joysticks", isOn: $showJoysticks)
+                            } label: { FieldIcon(symbol: "square.3.layers.3d") }
+                            .accessibilityLabel("Visible layers and controls")
+                            Button {
+                                NotificationCenter.default.post(name: .resetCameraView, object: nil)
+                            } label: { FieldIcon(symbol: "arrow.counterclockwise") }
+                            .accessibilityLabel("Fit model in view")
+    }
+
+    // MARK: - Bottom Toolbar
+
+    private func bottomToolbar(compact: Bool) -> some View {
         VStack(spacing: 8) {
             if activeTool == .measure {
-                measurePanel
-            }
-
-            // Visualization mode selector (hidden while measuring to keep it simple)
-            if activeTool != .measure {
-            HStack(spacing: 8) {
-                ForEach(VisualizationMode.allCases, id: \.self) { mode in
-                    Button {
-                        vizMode = mode
-                        applyVisualizationMode(mode)
-                    } label: {
-                        Text(mode.rawValue)
-                            .font(.caption2)
-                            .fontWeight(.medium)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(vizMode == mode ? Color.accentColor : Color.white.opacity(0.15))
-                            .foregroundColor(vizMode == mode ? .white : .gray)
-                            .cornerRadius(8)
+                ScrollView {
+                    measurePanel.background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: MeasurePanelHeightKey.self, value: proxy.size.height)
+                        }
                     }
                 }
-
-                Divider().frame(height: 20)
-
-                // Display toggles
-                Button { showGrid.toggle() } label: {
-                    Image(systemName: "grid")
-                        .foregroundColor(showGrid ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button { showBoundingBox.toggle() } label: {
-                    Image(systemName: "cube.transparent")
-                        .foregroundColor(showBoundingBox ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button {
-                    withAnimation { showJoysticks.toggle() }
-                } label: {
-                    Image(systemName: "gamecontroller.fill")
-                        .foregroundColor(showJoysticks ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button {
-                    NotificationCenter.default.post(name: .resetCameraView, object: nil)
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .foregroundColor(.gray)
-                        .font(.system(size: 16))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .cornerRadius(10)
-            .padding(.horizontal, 8)
+                .frame(height: min(measurePanelHeight, compact ? 200 : 260))
+                .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 
-            // Main action buttons
-            HStack(spacing: 0) {
-                // More
-                Button {
-                    showingMoreMenu = true
-                } label: {
-                    Text("More")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .foregroundColor(.white)
-                .background(Color(white: 0.25))
-                .cornerRadius(12)
-
-
-                Spacer().frame(width: 8)
-
-                // Measure
-                Button {
-                    activeTool = activeTool == .measure ? .orbit : .measure
-                } label: {
-                    Text("Measure")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .foregroundColor(activeTool == .measure ? .black : .white)
-                .background(activeTool == .measure ? Color.yellow : Color(white: 0.25))
-                .cornerRadius(12)
-
-                Spacer().frame(width: 8)
-
-                // Share
-                Button {
-                    exportAndShare()
-                } label: {
-                    Text("Share")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                }
-                .foregroundColor(.white)
-                .background(Color.accentColor)
-                .cornerRadius(12)
+            if activeTool != .measure && !compact {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(VisualizationMode.allCases, id: \.self) { mode in
+                            Button {
+                                vizMode = mode
+                                applyVisualizationMode(mode)
+                            } label: {
+                                Text(mode.rawValue).font(.subheadline.weight(.medium))
+                                    .padding(.horizontal, 16).frame(minHeight: 44)
+                                    .foregroundStyle(vizMode == mode ? FieldStyle.ink : .white)
+                                    .background(vizMode == mode ? FieldStyle.mint : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 13))
+                            }.buttonStyle(.plain)
+                            .accessibilityAddTraits(vizMode == mode ? .isSelected : [])
+                        }
+                    }.padding(6)
+                }.fixedSize(horizontal: false, vertical: true).fieldPanel().padding(.horizontal, 12)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
+
+            Group {
+                if typeSize.isAccessibilitySize {
+                    ScrollView(.horizontal) { actionDock(compact: compact) }
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    actionDock(compact: compact)
+                }
+            }
+            .padding(.horizontal, 12).padding(.bottom, 12)
         }
+        .frame(maxWidth: 660).frame(maxWidth: .infinity)
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
-            Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }
+            Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }.disabled(!scan.hasKnownScale)
             if hasMesh {
                 Button("Export for CAD (OBJ, Z up)") {
-                    if let url = storageManager.exportZUpOBJ(scan, from: project) { ShareSheetPresenter.present([url]) }
+                    let record = scan, destination = project, store = storageManager
+                    store.prepareExport({ try store.exportZUpOBJ(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
                 }
                 Button("Export STL (millimetres, Z up)") {
-                    if let url = storageManager.exportSTL(scan, from: project) { ShareSheetPresenter.present([url]) }
+                    let record = scan, destination = project, store = storageManager
+                    store.prepareExport({ try store.exportSTL(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
                 }
             }
-            if !session.measurements.isEmpty {
+            if scan.hasKnownScale, !session.measurements.isEmpty {
                 Button("Export Measurements (CSV)") {
                     if let url = storageManager.exportMeasurementsCSV(session.measurements, scanName: scan.name,
                                                                       unit: measurementUnit) {
@@ -549,6 +590,66 @@ struct ModelViewerView: View {
             #endif
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private func actionDock(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            if compact && activeTool != .measure {
+                Menu {
+                    ForEach(VisualizationMode.allCases, id: \.self) { mode in
+                        Button(mode.rawValue) { vizMode = mode; applyVisualizationMode(mode) }
+                    }
+                } label: { viewerAction(vizMode.rawValue, icon: "cube") }
+                .accessibilityLabel("Rendering style")
+            }
+            mainViewerActions
+        }.buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var mainViewerActions: some View {
+                Button { showingMoreMenu = true } label: {
+                    viewerAction("Tools", icon: "slider.horizontal.3")
+                }
+                Button { navigation.enabled.toggle() } label: {
+                    viewerAction(navigation.enabled ? "Exit Walk" : "Walk", icon: "figure.walk", selected: navigation.enabled)
+                }
+                .disabled(!scan.hasKnownScale)
+                .accessibilityHint("Choose a ground point, then explore at 1.8 metres eye height")
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        activeTool = activeTool == .measure ? .orbit : .measure
+                    }
+                } label: {
+                    viewerAction(activeTool == .measure ? "Done" : "Measure", icon: "ruler",
+                                 selected: activeTool == .measure)
+                }
+                .disabled(!scan.hasKnownScale)
+                .opacity(scan.hasKnownScale ? 1 : 0.45)
+                .accessibilityHint(scan.hasKnownScale ? "Measure distances and areas" : "Requires verified model scale")
+                Button { exportAndShare() } label: {
+                    viewerAction("Share", icon: "square.and.arrow.up", selected: true)
+                }
+    }
+
+    private func viewerAction(_ title: String, icon: String, selected: Bool = false) -> some View {
+        VStack(spacing: 6) {
+            if !typeSize.isAccessibilitySize {
+                Image(systemName: icon).font(.system(size: 18, weight: .medium))
+            }
+            Text(title).font(.caption.weight(.semibold))
+                .fixedSize(horizontal: typeSize.isAccessibilitySize, vertical: true)
+        }
+        .padding(.horizontal, typeSize.isAccessibilitySize ? 18 : 4)
+        .frame(minWidth: typeSize.isAccessibilitySize ? 150 : 0, maxWidth: .infinity)
+        .frame(minHeight: 64)
+        .foregroundStyle(selected ? FieldStyle.ink : .white)
+        .background(selected ? FieldStyle.mint : FieldStyle.panel,
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 1))
+    }
+
+    private func stopNavigationInputs() {
+        NotificationCenter.default.post(name: .stopViewerNavigation, object: nil)
     }
 
     /// Re-share the Splat bundle zip that was saved with this scan.
@@ -586,7 +687,8 @@ struct ModelViewerView: View {
                     transform = frame * a.transform
                 }
                 try storageManager.replacePhotogrammetryModel(
-                    scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform
+                    scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform,
+                    provenance: ScannerView.photoProvenance(alignment, frame: scan.sceneFrameMatrix)
                 )
                 try? FileManager.default.removeItem(at: outputURL)
                 DispatchQueue.main.async {
@@ -658,9 +760,8 @@ struct ModelViewerView: View {
     // MARK: - Helpers
 
     private func exportAndShare() {
-        // Textured OBJs come back as one .zip (obj + mtl + texture), others as the file itself.
-        guard let url = storageManager.exportScan(scan, from: project) else { return }
-        ShareSheetPresenter.present([url])
+        let record = scan, destination = project, store = storageManager
+        store.prepareExport({ try store.exportScan(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 
@@ -717,9 +818,15 @@ struct VirtualJoystick: View {
                         .onEnded { _ in isDragging = false; knobOffset = .zero; onMove(0, 0) }
                 )
 
-            Text(label).font(.system(size: 8, weight: .medium)).foregroundColor(.white.opacity(0.4))
+            Text(label).font(.caption2.weight(.medium)).foregroundColor(.white.opacity(0.7))
                 .offset(y: joystickRadius + 10)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) joystick")
+        .onChange(of: dragOffset) { _, offset in
+            if offset == .zero { isDragging = false; onMove(0, 0) }
+        }
+        .onDisappear { isDragging = false; onMove(0, 0) }
     }
 
     private var effectiveOffset: CGSize { isDragging ? clampToRadius(dragOffset) : .zero }
@@ -737,10 +844,41 @@ struct VirtualJoystick: View {
 
 // MARK: - Supporting Types
 
+/// Spring-centred rate control: drag up/down to elevate, release to stop.
+/// Small visual track, but a full 44-point-wide touch target.
+private struct VerticalPanSlider: View {
+    var onMove: (CGFloat) -> Void
+    @GestureState private var offset: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Image(systemName: "chevron.up").font(.caption2)
+            ZStack {
+                Capsule().fill(.white.opacity(0.18)).frame(width: 5, height: 62)
+                Capsule().fill(FieldStyle.mint).frame(width: 26, height: 16).offset(y: offset)
+            }.frame(width: 44, height: 70).contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .updating($offset) { value, state, _ in state = min(26, max(-26, value.translation.height)) }
+                    .onChanged { value in onMove(-min(26, max(-26, value.translation.height)) / 26) }
+                    .onEnded { _ in onMove(0) })
+            Image(systemName: "chevron.down").font(.caption2)
+        }
+        .foregroundStyle(.white.opacity(0.8))
+        .frame(width: 44, height: 100)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Pan vertically")
+        .accessibilityHint("Slide up or down; release to stop. Two-finger pan is also available.")
+        .onChange(of: offset) { _, value in if value == 0 { onMove(0) } }
+        .onDisappear { onMove(0) }
+    }
+}
+
 extension Notification.Name {
     static let resetCameraView = Notification.Name("resetCameraView")
     static let joystickMove = Notification.Name("joystickMove")
     static let joystickLook = Notification.Name("joystickLook")
+    static let joystickElevate = Notification.Name("joystickElevate")
+    static let stopViewerNavigation = Notification.Name("stopViewerNavigation")
     static let setCameraView = Notification.Name("setCameraView")
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")
@@ -802,6 +940,25 @@ enum ShareSheetPresenter {
         activity.popoverPresentationController?.sourceView = top.view
         activity.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 0, height: 0)
         top.present(activity, animated: true)
+    }
+}
+
+struct ExportProgressView: View {
+    @ObservedObject var store: StorageManager
+    var body: some View {
+        if store.isExporting {
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView().controlSize(.large).tint(FieldStyle.accent)
+                    Text(store.exportMessage).font(.headline).multilineTextAlignment(.center)
+                    Text("Includes units and coordinate metadata. Not a project backup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Cancel export") { store.cancelExport() }.buttonStyle(FieldButtonStyle())
+                }
+                .padding(24).fieldCard().frame(maxWidth: 420).padding(24)
+            }
+        }
     }
 }
 

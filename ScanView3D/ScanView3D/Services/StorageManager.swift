@@ -1,11 +1,39 @@
 import Foundation
 import SceneKit
+import CryptoKit
 
 /// Manages persistent storage for projects and scan files
 class StorageManager: ObservableObject {
     @Published private(set) var projects: [Project] = []
     @Published var storageError: String?
     @Published private(set) var isLibraryReadOnly = false
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportMessage = ""
+    private let exportQueue = DispatchQueue(label: "scanview.export", qos: .userInitiated)
+    private let exportCancellation = ExportCancellation()
+
+    func cancelExport() { exportCancellation.cancel() }
+
+    /// One bounded worker; UI only receives a complete package. Exporting is a
+    /// model-delivery action, not a project backup or a mutation of saved scans.
+    func prepareExport(_ work: @escaping () throws -> URL, completion: @escaping (URL) -> Void) {
+        guard !isExporting else { return }
+        isExporting = true
+        exportMessage = "Preparing model package…"
+        exportCancellation.reset()
+        exportQueue.async {
+            let result = Result { try work() }
+            DispatchQueue.main.async {
+                self.isExporting = false
+                self.exportMessage = ""
+                if self.exportCancellation.isCancelled { return }
+                switch result {
+                case .success(let url): completion(url)
+                case .failure(let error): self.report(error, action: "Export")
+                }
+            }
+        }
+    }
 
     private let fileManager = FileManager.default
     private let projectsFileName = "projects.json"
@@ -346,7 +374,7 @@ class StorageManager: ObservableObject {
     /// Publish a new model only after it is copied. The old model, measurements,
     /// and metadata stay with the scan as recovery files, including across moves.
     func replacePhotogrammetryModel(scanID: UUID, in project: Project,
-                                    newModelURL: URL, modelTransform: simd_float4x4?) throws {
+                                    newModelURL: URL, modelTransform: simd_float4x4?, provenance: CoordinateProvenance? = nil) throws {
         try onMain {
             guard let pi = projects.firstIndex(where: { $0.id == project.id }),
                   let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { throw StorageFailure.missingItem }
@@ -361,6 +389,7 @@ class StorageManager: ObservableObject {
                 updated.fileSize = (try fileManager.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
                 updated.modelScale = nil
                 updated.modelTransform = modelTransform.map(StorageManager.array(of:))
+                updated.coordinateProvenance = provenance
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
                     throw StorageFailure.missingItem
@@ -590,6 +619,7 @@ class StorageManager: ObservableObject {
         _ = copyExtra(scan.captureFolderName.map { $0 + PoseFile.suffix }, as: "\(newBase)_photos" + PoseFile.suffix)
         newScan.modelTransform = scan.modelTransform
         newScan.sceneFrame = scan.sceneFrame
+        newScan.coordinateProvenance = scan.coordinateProvenance
         newScan.northAligned = scan.northAligned
         newScan.latitude = scan.latitude
         newScan.longitude = scan.longitude
@@ -655,25 +685,17 @@ class StorageManager: ObservableObject {
         return ModelCopy(model: dst, textureName: newTexture, allFiles: files)
     }
 
-    /// Stream-copy a text file, replacing `old` with `new` in its first 64 KB
-    /// (where OBJ `mtllib` lines live). Works for very large OBJ files.
+    /// Stream-copy OBJ references, including late material declarations and
+    /// UTF-8 characters that cross a read boundary.
     private func copyPatchingHeader(from src: URL, to dst: URL, replacing old: String, with new: String) throws {
-        let input = try FileHandle(forReadingFrom: src)
-        defer { try? input.close() }
         guard fileManager.createFile(atPath: dst.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         let output = try FileHandle(forWritingTo: dst)
         defer { try? output.close() }
 
-        let head = try input.read(upToCount: 65_536) ?? Data()
-        if let text = String(data: head, encoding: .utf8) {
-            try output.write(contentsOf: Data(text.replacingOccurrences(of: old, with: new).utf8))
-        } else {
-            try output.write(contentsOf: head)
-        }
-        while let chunk = try input.read(upToCount: 4 << 20), !chunk.isEmpty {
-            try output.write(contentsOf: chunk)
+        try ExportText.lines(src) { line in
+            try output.write(contentsOf: Data((line.replacingOccurrences(of: old, with: new) + "\n").utf8))
         }
     }
 
@@ -741,6 +763,8 @@ class StorageManager: ObservableObject {
         )
         scan.textureFileName = textureName
         scan.hasTexture = textureName != nil
+        scan.coordinateProvenance = CoordinateProvenance(sourceKind: "imported", scaleStatus: .unknown,
+            alignmentMethod: "none", localDatum: "Unknown source origin and units; calibration required")
 
         try addScan(scan, to: project)
         return scan
@@ -748,114 +772,183 @@ class StorageManager: ObservableObject {
 
     // MARK: - Export / Share
 
-    /// Prepare a scan for sharing under its display name. Returns a single URL:
-    /// the model file itself, or — for a textured OBJ — a .zip containing the
-    /// .obj, .mtl and texture so it opens correctly in other apps.
-    func exportScan(_ scan: Scan, from project: Project) -> URL? {
-        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        guard fileManager.fileExists(atPath: srcDir.appendingPathComponent(scan.fileName).path) else { return nil }
-
-        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
-        try? fileManager.removeItem(at: shareRoot)   // previous shares are finished by now
-        let base = exportBaseName(scan.name)
-        let folder = shareRoot.appendingPathComponent(base)
-        do {
-            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
-            let copy = try copyModel(of: scan, from: srcDir, to: folder, newBase: base)
-            if copy.allFiles.count == 1 { return copy.model }
-            return StorageManager.zipFolder(folder, to: shareRoot.appendingPathComponent("\(base).zip"))
-        } catch {
-            DebugLogger.shared.error("Export failed: \(error)", category: "Export")
-            return nil
-        }
+    func exportScan(_ scan: Scan, from project: Project) throws -> URL {
+        try exportPackage([scan], project: project, name: scan.name, kind: .native)
     }
-
-    /// Export all scans from a project into one folder (textured OBJs complete).
-    func exportProject(_ project: Project) -> URL? {
-        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        let exportDir = documentsDirectory
-            .appendingPathComponent(AppConstants.exportDirectory)
-            .appendingPathComponent(exportBaseName(project.name))
-        try? fileManager.removeItem(at: exportDir)
-        try? fileManager.createDirectory(at: exportDir, withIntermediateDirectories: true)
-
-        var used = Set<String>()
-        for scan in project.scans {
-            var base = exportBaseName(scan.name)
-            var n = 2
-            while used.contains(base) { base = "\(exportBaseName(scan.name))_\(n)"; n += 1 }
-            used.insert(base)
-            _ = try? copyModel(of: scan, from: srcDir, to: exportDir, newBase: base)
-        }
-        return exportDir
+    func exportProject(_ project: Project) throws -> URL {
+        try exportPackage(project.scans, project: project, name: project.name, kind: .native)
     }
 
     // MARK: - CAD / 3D-print exports (Z up)
 
     /// OBJ with Z pointing up (the usual convention in CAD). Textured OBJ scans
     /// keep their texture (shared as a .zip); other models export their geometry.
-    func exportZUpOBJ(_ scan: Scan, from project: Project) -> URL? {
-        let srcDir = scansDirectory.appendingPathComponent(project.id.uuidString)
-        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
-        try? fileManager.removeItem(at: shareRoot)
-        let base = exportBaseName(scan.name) + "_Zup"
-        let folder = shareRoot.appendingPathComponent(base)
-        do {
-            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
-            if (scan.fileName as NSString).pathExtension.lowercased() == "obj" && scan.modelMatrix == nil {
-                let copy = try copyModel(of: scan, from: srcDir, to: folder, newBase: base)
-                try StorageManager.convertOBJToZUp(at: copy.model)
-                if copy.allFiles.count == 1 { return copy.model }
-                return StorageManager.zipFolder(folder, to: shareRoot.appendingPathComponent("\(base).zip"))
-            }
-            let triangles = worldTriangles(of: scan, in: project)
-            guard !triangles.isEmpty else { return nil }
-            let url = folder.appendingPathComponent("\(base).obj")
-            try StorageManager.writeOBJ(triangles: triangles, to: url)
-            return url
-        } catch {
-            DebugLogger.shared.error("Z-up OBJ export failed: \(error)", category: "Export")
-            return nil
-        }
+    func exportZUpOBJ(_ scan: Scan, from project: Project) throws -> URL {
+        try exportPackage([scan], project: project, name: scan.name + "_Zup", kind: .zUpOBJ)
     }
 
     /// Binary STL in millimetres with Z up (3D printing and most CAD tools).
-    func exportSTL(_ scan: Scan, from project: Project) -> URL? {
-        let triangles = worldTriangles(of: scan, in: project)
-        guard !triangles.isEmpty else { return nil }
-        let shareRoot = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory).appendingPathComponent("Share")
-        try? fileManager.removeItem(at: shareRoot)
-        try? fileManager.createDirectory(at: shareRoot, withIntermediateDirectories: true)
-        let url = shareRoot.appendingPathComponent(exportBaseName(scan.name) + "_mm.stl")
+    func exportSTL(_ scan: Scan, from project: Project) throws -> URL {
+        try exportPackage([scan], project: project, name: scan.name + "_mm", kind: .stl)
+    }
 
-        let triCount = triangles.count / 3
-        var data = Data(capacity: 84 + triCount * 50)
-        var header = Data("ScanView 3D export - units: mm, Z up".utf8)
-        header.count = 80
-        data.append(header)
-        var count = UInt32(triCount).littleEndian
-        withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
-        func zUpMM(_ v: SIMD3<Float>) -> SIMD3<Float> { SIMD3<Float>(v.x, -v.z, v.y) * 1000 }
-        for t in 0..<triCount {
-            let a = zUpMM(triangles[t * 3]), b = zUpMM(triangles[t * 3 + 1]), c = zUpMM(triangles[t * 3 + 2])
-            var n = simd_cross(b - a, c - a)
-            let len = simd_length(n)
-            n = len > 0 ? n / len : SIMD3<Float>(0, 0, 1)
-            var floats: [Float] = [n.x, n.y, n.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z]
-            floats.withUnsafeBytes { data.append(contentsOf: $0) }
-            data.append(contentsOf: [0, 0])   // attribute byte count
+    private enum ModelExportKind { case native, zUpOBJ, stl }
+
+    private func exportPackage(_ scans: [Scan], project: Project, name: String, kind: ModelExportKind) throws -> URL {
+        guard !scans.isEmpty else { throw CoordinateError.incompleteExport }
+        let request = documentsDirectory.appendingPathComponent(AppConstants.exportDirectory)
+            .appendingPathComponent("Share").appendingPathComponent(UUID().uuidString)
+        let package = request.appendingPathComponent("Models")
+        try fileManager.createDirectory(at: package, withIntermediateDirectories: true)
+        var completed = false
+        defer { if !completed { try? fileManager.removeItem(at: request) } }
+        let sourceDirectory = scansDirectory.appendingPathComponent(project.id.uuidString)
+        for scan in scans {
+            try exportCancellation.check()
+            onMain { exportMessage = "Preparing \(scan.name)…" }
+            let transform = try scan.validatedModelTransform()
+            if kind != .native, !scan.hasKnownScale { throw CoordinateError.unknownScale }
+            let base = "model" // Each scan has its own UUID folder: no collisions/path injection.
+            let folder = package.appendingPathComponent(scan.id.uuidString)
+            try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+            let source = getScanFileURL(scan: scan, project: project)
+            let sourceHash = try exportSHA256(source)
+            let ext = source.pathExtension.lowercased()
+            var limitations = [scan.scaleDescription, "Local coordinates, not georeferenced. Phone GPS is not survey control.",
+                               "Model delivery only: not a project backup. Photos and measurements are not included."]
+            let model: URL
+            switch kind {
+            case .native:
+                if ext == "usdz", transform != CoordinateMath.identity {
+                    model = folder.appendingPathComponent("\(base).usdz")
+                    try AlignedUSDZ.write(source: source, to: model, transform: transform, cancelled: { self.exportCancellation.isCancelled })
+                    try exportCancellation.check()
+                    try SceneCoordinateValidation.verify(source: source, exported: model, transform: transform)
+                } else {
+                    guard transform == CoordinateMath.identity else { throw CoordinateError.unsupportedArchive }
+                    try validateExportCompanions(scan, directory: sourceDirectory)
+                    model = try copyModel(of: scan, from: sourceDirectory, to: folder, newBase: base).model
+                }
+            case .zUpOBJ:
+                if ext == "obj", transform == CoordinateMath.identity {
+                    try validateExportCompanions(scan, directory: sourceDirectory)
+                    model = try copyModel(of: scan, from: sourceDirectory, to: folder, newBase: base).model
+                    try StorageManager.convertOBJToZUp(at: model, cancelled: { self.exportCancellation.isCancelled })
+                } else {
+                    let triangles = try worldTriangles(of: scan, in: project)
+                    guard !triangles.isEmpty else { throw CoordinateError.incompleteExport }
+                    model = folder.appendingPathComponent("\(base).obj")
+                    try StorageManager.writeOBJ(triangles: triangles, to: model, cancelled: { self.exportCancellation.isCancelled })
+                    limitations.append("Converted CAD mesh is geometry-only; materials are not included.")
+                }
+            case .stl:
+                let triangles = try worldTriangles(of: scan, in: project)
+                guard !triangles.isEmpty else { throw CoordinateError.incompleteExport }
+                model = folder.appendingPathComponent("\(base).stl")
+                try writeSTL(triangles, to: model)
+                limitations.append("STL does not embed units or colour; coordinates are millimetres.")
+            }
+            try exportCancellation.check()
+            // A replacement/move/delete during export must not silently change its source revision.
+            guard try exportSHA256(source) == sourceHash else { throw CoordinateError.incompleteExport }
+            let factor: Double = kind == .stl ? 1000 : 1
+            let convention = kind == .native ? CoordinateMath.identity :
+                [factor, 0, 0, 0, 0, 0, factor, 0, 0, -factor, 0, 0, 0, 0, 0, 1]
+            let manifest = ModelExportManifest(scanID: scan.id, sourceRevision: scan.fileName, sourceSHA256: sourceHash,
+                exportedAt: Date(), modelFile: model.lastPathComponent,
+                units: scan.hasKnownScale ? (kind == .stl ? "millimetres" : "metres") : "source units — scale unverified",
+                axes: kind == .native ? (scan.hasKnownScale ? "right-handed Y up" : "source convention unverified") : "right-handed Z up; X'=X, Y'=-Z, Z'=Y",
+                sourceModelToLocal: transform, localToExport: convention, provenance: scan.coordinateProvenance, limitations: limitations)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode(manifest).write(to: folder.appendingPathComponent("coordinates.json"), options: .atomic)
+            try "\(scan.name)\nOpen \(model.lastPathComponent).\n\(limitations.joined(separator: "\n"))\nSee coordinates.json for units, axes and source revision.\n"
+                .write(to: folder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
         }
-        do {
-            try data.write(to: url)
-            return url
-        } catch {
-            return nil
+        try exportCancellation.check()
+        guard let zip = StorageManager.zipFolder(package, to: request.appendingPathComponent(exportBaseName(name) + ".zip")) else {
+            throw CoordinateError.incompleteExport
         }
+        try exportCancellation.check()
+        completed = true
+        return zip
+    }
+
+    private func exportSHA256(_ url: URL) throws -> String {
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        var hash = SHA256()
+        while let data = try input.read(upToCount: 1 << 20), !data.isEmpty {
+            try exportCancellation.check()
+            hash.update(data: data)
+        }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func validateExportCompanions(_ scan: Scan, directory: URL) throws {
+        if (scan.fileName as NSString).pathExtension.lowercased() == "obj" {
+            let expected = (scan.fileName as NSString).deletingPathExtension + ".mtl"
+            try ExportText.lines(directory.appendingPathComponent(scan.fileName)) { line in
+                try exportCancellation.check()
+                let parts = line.split(whereSeparator: { $0.isWhitespace })
+                if parts.first == "mtllib" {
+                    guard parts.count == 2, String(parts[1]) == expected,
+                          fileManager.fileExists(atPath: directory.appendingPathComponent(expected).path) else {
+                        throw CoordinateError.incompleteExport
+                    }
+                    // Arbitrary imported material packaging is not implemented:
+                    // reject unsupported maps instead of sharing a broken package.
+                    try ExportText.lines(directory.appendingPathComponent(expected)) { material in
+                        let fields = material.split(whereSeparator: { $0.isWhitespace })
+                        if let keyword = fields.first, keyword.hasPrefix("map_") || ["bump", "disp", "decal", "refl"].contains(String(keyword)) {
+                            guard fields.count == 2, String(fields[1]) == scan.textureFileName,
+                                  fileManager.fileExists(atPath: directory.appendingPathComponent(String(fields[1])).path) else {
+                                throw CoordinateError.incompleteExport
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let texture = scan.textureFileName {
+            guard fileManager.fileExists(atPath: directory.appendingPathComponent(texture).path),
+                  fileManager.fileExists(atPath: directory.appendingPathComponent((scan.fileName as NSString).deletingPathExtension + ".mtl").path) else {
+                throw CoordinateError.incompleteExport
+            }
+        }
+    }
+
+    private func writeSTL(_ triangles: [SIMD3<Float>], to url: URL) throws {
+        let count = triangles.count / 3
+        guard count <= Int(UInt32.max), triangles.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) else {
+            throw CoordinateError.incompleteExport
+        }
+        guard fileManager.createFile(atPath: url.path, contents: nil) else { throw CoordinateError.incompleteExport }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        var header = Data("ScanView 3D — millimetres, Z up".utf8); header.count = 80
+        var number = UInt32(count).littleEndian
+        withUnsafeBytes(of: &number) { header.append(contentsOf: $0) }
+        try handle.write(contentsOf: header)
+        for index in 0..<count {
+            if index % 4096 == 0 { try exportCancellation.check() }
+            func point(_ i: Int) -> SIMD3<Float> { let v = triangles[index * 3 + i]; return SIMD3(v.x, -v.z, v.y) * 1000 }
+            let a = point(0), b = point(1), c = point(2)
+            let cross = simd_cross(b - a, c - a), length = simd_length(cross)
+            let n = length > 0 ? cross / length : SIMD3<Float>(0, 0, 1)
+            var data = Data()
+            for scalar in [n.x, n.y, n.z, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z] {
+                guard scalar.isFinite else { throw CoordinateError.incompleteExport }
+                var bits = scalar.bitPattern.littleEndian
+                withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
+            }
+            data.append(contentsOf: [0, 0]); try handle.write(contentsOf: data)
+        }
+        try handle.synchronize()
     }
 
     /// All triangles of a scan in world space (with its real-world transform),
     /// flattened: every three points are one triangle.
-    private func worldTriangles(of scan: Scan, in project: Project) -> [SIMD3<Float>] {
+    private func worldTriangles(of scan: Scan, in project: Project) throws -> [SIMD3<Float>] {
         let modelURL = getScanFileURL(scan: scan, project: project)
         let scnURL = modelURL.deletingPathExtension().appendingPathExtension("scn")
         let url = fileManager.fileExists(atPath: scnURL.path) ? scnURL : modelURL
@@ -866,31 +959,41 @@ class StorageManager: ObservableObject {
 
         var result: [SIMD3<Float>] = []
         for source in ModelGeometryIndex.sources(in: root) {
+            try exportCancellation.check()
             guard let vsrc = source.geometry.sources(for: .vertex).first, vsrc.usesFloatComponents,
-                  vsrc.bytesPerComponent == 4, vsrc.componentsPerVector >= 3 else { continue }
+                  vsrc.bytesPerComponent == 4, vsrc.componentsPerVector >= 3,
+                  vsrc.dataOffset >= 0, vsrc.dataStride >= 12,
+                  vsrc.vectorCount <= vsrc.data.count / vsrc.dataStride + 1 else { throw CoordinateError.incompleteExport }
             let m = source.transform
             var positions = [SIMD3<Float>](repeating: .zero, count: vsrc.vectorCount)
-            vsrc.data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
+            try vsrc.data.withUnsafeBytes { raw in
+                guard raw.baseAddress != nil else { return }
                 for i in 0..<vsrc.vectorCount {
-                    let f = base.advanced(by: vsrc.dataOffset + vsrc.dataStride * i).assumingMemoryBound(to: Float.self)
-                    let w = m * SIMD4<Float>(f[0], f[1], f[2], 1)
+                    let start = vsrc.dataOffset + vsrc.dataStride * i
+                    guard start <= raw.count - 12 else { throw CoordinateError.incompleteExport }
+                    let w = m * SIMD4<Float>(raw.loadUnaligned(fromByteOffset: start, as: Float.self),
+                                             raw.loadUnaligned(fromByteOffset: start + 4, as: Float.self),
+                                             raw.loadUnaligned(fromByteOffset: start + 8, as: Float.self), 1)
+                    guard w.x.isFinite, w.y.isFinite, w.z.isFinite else { throw CoordinateError.incompleteExport }
                     positions[i] = SIMD3<Float>(w.x, w.y, w.z)
                 }
             }
             for element in source.geometry.elements where element.primitiveType == .triangles {
                 let bpi = element.bytesPerIndex
-                element.data.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress else { return }
+                guard [1, 2, 4].contains(bpi), element.primitiveCount <= element.data.count / (3 * bpi) else {
+                    throw CoordinateError.incompleteExport
+                }
+                try element.data.withUnsafeBytes { raw in
+                    guard raw.baseAddress != nil else { return }
                     for i in 0..<(element.primitiveCount * 3) {
-                        let p = base.advanced(by: i * bpi)
                         let index: Int
                         switch bpi {
-                        case 1: index = Int(p.assumingMemoryBound(to: UInt8.self).pointee)
-                        case 2: index = Int(p.assumingMemoryBound(to: UInt16.self).pointee)
-                        default: index = Int(p.assumingMemoryBound(to: UInt32.self).pointee)
+                        case 1: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt8.self))
+                        case 2: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt16.self))
+                        default: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt32.self))
                         }
-                        result.append(index < positions.count ? positions[index] : .zero)
+                        guard index < positions.count else { throw CoordinateError.incompleteExport }
+                        result.append(positions[index])
                     }
                 }
             }
@@ -899,34 +1002,38 @@ class StorageManager: ObservableObject {
     }
 
     /// Rewrite an OBJ's vertex and normal lines from Y-up to Z-up.
-    static func convertOBJToZUp(at url: URL) throws {
-        let text = try String(contentsOf: url, encoding: .utf8)
-        var out = ""
-        out.reserveCapacity(text.utf8.count + 1024)
-        text.enumerateLines { line, _ in
-            if line.hasPrefix("v ") || line.hasPrefix("vn ") {
-                let parts = line.split(separator: " ")
-                if parts.count >= 4, let x = Double(parts[1]), let y = Double(parts[2]), let z = Double(parts[3]) {
-                    out += String(format: "%@ %.6f %.6f %.6f", String(parts[0]), x, -z, y)
-                    for extra in parts.dropFirst(4) { out += " " + extra }
-                    out += "\n"
-                    return
-                }
-            }
-            out += line + "\n"
+    static func convertOBJToZUp(at url: URL, cancelled: () -> Bool = { false }) throws {
+        // url is this export's disposable copy, never the library's source model.
+        let temporary = url.deletingLastPathComponent().appendingPathComponent("\(UUID().uuidString).obj")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else { throw CoordinateError.incompleteExport }
+        let handle = try FileHandle(forWritingTo: temporary)
+        defer { try? handle.close() }
+        try ExportText.lines(url) { line in
+            if cancelled() { throw CancellationError() }
+            try handle.write(contentsOf: Data((try ExportText.zUpLine(line) + "\n").utf8))
         }
-        try out.write(to: url, atomically: true, encoding: .utf8)
+        try handle.synchronize(); try handle.close()
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: temporary, to: url)
     }
 
     /// Plain OBJ (geometry only, Z up) from world-space triangles.
-    static func writeOBJ(triangles: [SIMD3<Float>], to url: URL) throws {
-        var out = "# ScanView 3D export - metres, Z up\n"
-        out.reserveCapacity(triangles.count * 40)
-        for v in triangles { out += String(format: "v %.5f %.5f %.5f\n", v.x, -v.z, v.y) }
-        for t in 0..<(triangles.count / 3) {
-            out += "f \(t * 3 + 1) \(t * 3 + 2) \(t * 3 + 3)\n"
+    static func writeOBJ(triangles: [SIMD3<Float>], to url: URL, cancelled: () -> Bool = { false }) throws {
+        guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw CoordinateError.incompleteExport }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data("# ScanView 3D export - metres, Z up\n".utf8))
+        for v in triangles {
+            if cancelled() { throw CancellationError() }
+            guard v.x.isFinite, v.y.isFinite, v.z.isFinite else { throw CoordinateError.incompleteExport }
+            try handle.write(contentsOf: Data("v \(v.x) \(-v.z) \(v.y)\n".utf8))
         }
-        try out.write(to: url, atomically: true, encoding: .utf8)
+        for t in 0..<(triangles.count / 3) {
+            if cancelled() { throw CancellationError() }
+            try handle.write(contentsOf: Data("f \(t * 3 + 1) \(t * 3 + 2) \(t * 3 + 3)\n".utf8))
+        }
+        try handle.synchronize()
     }
 
     /// Zip a folder (via NSFileCoordinator, no third-party library).

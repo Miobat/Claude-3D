@@ -16,11 +16,12 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     @Binding var vizMode: ModelViewerView.VisualizationMode
     @Binding var activeTool: ModelViewerView.ViewerTool
     let session: MeasurementSession
+    @ObservedObject var navigation: WalkNavigation
 
     func makeUIView(context: Context) -> SCNView {
         let sceneView = SCNView(frame: .zero)
         sceneView.scene = SCNScene()
-        sceneView.backgroundColor = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
+        sceneView.backgroundColor = UIColor(FieldStyle.viewport)
         sceneView.autoenablesDefaultLighting = false
         sceneView.allowsCameraControl = false   // our own touch navigation below
         sceneView.antialiasingMode = .multisampling4X
@@ -32,6 +33,12 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         if let cameraNode = sceneView.pointOfView {
             let controller = OrbitCameraController(view: sceneView, cameraNode: cameraNode)
             controller.surfacePoint = { [weak coordinator] location in coordinator?.surfacePointForFocus(at: location) }
+            controller.groundPoint = { [weak coordinator] point in coordinator?.ground(at: point) }
+            controller.movementBlocked = { [weak coordinator] a, b in coordinator?.walkBlocked(from: a, to: b) ?? true }
+            controller.walkMessage = { [weak coordinator] message in
+                guard let coordinator, coordinator.parent.navigation.message != message else { return }
+                coordinator.parent.navigation.message = message
+            }
             let doubleTap = controller.install()
             coordinator.cameraController = controller
 
@@ -56,6 +63,9 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.resetCamera), name: .resetCameraView, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleJoystickMove(_:)), name: .joystickMove, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleJoystickLook(_:)), name: .joystickLook, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleJoystickElevate(_:)), name: .joystickElevate, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.stopNavigation), name: .stopViewerNavigation, object: nil)
+        nc.addObserver(context.coordinator, selector: #selector(Coordinator.stopNavigation), name: UIApplication.willResignActiveNotification, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraView(_:)), name: .setCameraView, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetCameraProjection(_:)), name: .setCameraProjection, object: nil)
         nc.addObserver(context.coordinator, selector: #selector(Coordinator.handleSetVisualizationMode(_:)), name: .setVisualizationMode, object: nil)
@@ -77,6 +87,15 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         } else if !showBoundingBox { bbNode?.removeFromParentNode() }
 
         context.coordinator.activeTool = activeTool
+        context.coordinator.updateWalkMode()
+    }
+
+    static func dismantleUIView(_ view: SCNView, coordinator: Coordinator) {
+        coordinator.stopNavigation()
+        coordinator.tearDown()
+        view.delegate = nil
+        view.overlaySKScene = nil
+        view.gestureRecognizers?.forEach { view.removeGestureRecognizer($0) }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -255,6 +274,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                         DispatchQueue.main.async { context.coordinator.geometryIndex = index }
                     }
                     self.isLoading = false
+                    #if DEBUG && targetEnvironment(simulator)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        DesignPreview.navigationChecks(view: sceneView, coordinator: context.coordinator)
+                    }
+                    #endif
                 } else {
                     self.loadError = "Failed to load model file"
                     self.isLoading = false
@@ -283,15 +307,19 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         /// World positions of point-cloud points (SceneKit can't hit-test points).
         private var pickablePoints: [SIMD3<Float>] = []
+        private var pointPicker: PointCloudPicker?
+        private var disposed = false
+        private var walkEnabled = false
         /// Original material look, so "Textured" can restore it after Flat/Wireframe.
         private var originalMaterials: [ObjectIdentifier: (diffuse: Any?, emission: Any?, lighting: SCNMaterial.LightingModel, fill: SCNFillMode, shaders: [SCNShaderModifierEntryPoint: String]?)] = [:]
 
-        private var joystickMoveTimer: Timer?
-        private var joystickLookTimer: Timer?
+        private var navigationTimer: Timer?
+        private var lastNavigationTick: TimeInterval = 0
         private var currentMoveDX: CGFloat = 0
         private var currentMoveDY: CGFloat = 0
         private var currentLookDX: CGFloat = 0
         private var currentLookDY: CGFloat = 0
+        private var currentElevation: CGFloat = 0
 
         /// How close (on screen, in points) a tap must be to snap.
         private let snapDistance: CGFloat = 24
@@ -299,9 +327,17 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         init(parent: SceneKitViewRepresentable) { self.parent = parent }
 
         deinit {
-            joystickMoveTimer?.invalidate()
-            joystickLookTimer?.invalidate()
+            navigationTimer?.invalidate()
             previewTimer?.invalidate()
+        }
+
+        func tearDown() {
+            disposed = true
+            NotificationCenter.default.removeObserver(self)
+            previewTimer?.invalidate(); previewTimer = nil
+            activeCancellable?.cancel()
+            session?.geometry = nil
+            session?.renderSink = nil
         }
 
         func attach(session: MeasurementSession, overlay: MeasurementOverlayScene) {
@@ -388,29 +424,41 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             }
             visit(root)
             pickablePoints = points
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let picker = PointCloudPicker(points: points)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.disposed else { return }
+                    self.pointPicker = picker
+                    self.lastPreviewCamera = nil
+                }
+            }
         }
 
         /// Front-most point-cloud point near a screen location.
         private func pickPoint(at location: CGPoint, in view: SCNView) -> SCNVector3? {
-            guard !pickablePoints.isEmpty else { return nil }
-            let step = max(1, pickablePoints.count / 400_000)
-            var best: SCNVector3?
-            var bestDepth: Float = .greatestFiniteMagnitude
-            let maxDist = Float(snapDistance)
-            var i = 0
-            while i < pickablePoints.count {
-                let p = pickablePoints[i]
-                let s = view.projectPoint(SCNVector3(p.x, p.y, p.z))
-                if s.z > 0, s.z < 1,
-                   abs(s.x - Float(location.x)) < maxDist, abs(s.y - Float(location.y)) < maxDist,
-                   hypotf(s.x - Float(location.x), s.y - Float(location.y)) < maxDist,
-                   s.z < bestDepth {
-                    bestDepth = s.z
-                    best = SCNVector3(p.x, p.y, p.z)
+            guard let picker = pointPicker, let projection = pickingProjection(in: view) else { return nil }
+            return picker.pick(at: SIMD2(Float(location.x), Float(location.y)),
+                viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: projection)
+                .map { SCNVector3($0.x, $0.y, $0.z) }
+        }
+
+        func pickingProjection(in view: SCNView) -> simd_float4x4? {
+            guard let camera = view.pointOfView, let lens = camera.camera else { return nil }
+            if lens.usesOrthographicProjection {
+                // SceneKit's rendered orthographic bounds can differ from the
+                // camera's standalone projection (aspect / automatic clipping).
+                // Derive the exact affine map from the renderer's own unprojection.
+                let width = Float(view.bounds.width), height = Float(view.bounds.height)
+                func world(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+                    let p = view.unprojectPoint(SCNVector3(x, y, z)); return SIMD3(p.x, p.y, p.z)
                 }
-                i += step
+                let origin = world(0, height, 0)
+                let x = (world(width, height, 0) - origin) * 0.5
+                let y = (world(0, 0, 0) - origin) * 0.5
+                let z = (world(0, height, 1) - origin) * 0.5
+                return simd_float4x4(SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(origin + x + y + z, 1)).inverse
             }
-            return best
+            return simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.presentation.simdWorldTransform.inverse
         }
 
         // MARK: - Camera View Presets
@@ -418,6 +466,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         private var center: SIMD3<Float> { SIMD3<Float>(modelCenter.x, modelCenter.y, modelCenter.z) }
 
         @objc func handleSetCameraView(_ notification: Notification) {
+            exitWalk()
             guard let viewStr = notification.userInfo?["view"] as? String, let rig = cameraController else { return }
             switch viewStr {
             case "top":
@@ -441,6 +490,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         @objc func handleSetCameraProjection(_ notification: Notification) {
+            exitWalk()
             guard let sceneView = sceneView,
                   let projStr = notification.userInfo?["projection"] as? String,
                   let camera = sceneView.pointOfView?.camera else { return }
@@ -464,6 +514,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         /// Top-down orthographic snapshot with a scale bar, shared as an image.
         @objc func handleCaptureTopDown() {
+            exitWalk()
             guard let sceneView = sceneView, let camera = sceneView.pointOfView?.camera else { return }
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0
@@ -567,6 +618,20 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Tap / Measure
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            if walkEnabled {
+                guard let view = sceneView, let hit = surfaceHit(at: gesture.location(in: view), in: view),
+                      (hit.normal.map { abs($0.y) >= 0.75 } ?? true),
+                      let start = ground(at: hit.point), abs(start.y - hit.point.y) < 0.12,
+                      !walkBlocked(from: start, to: start) else {
+                    parent.navigation.message = "Choose a clear, scanned floor or ground surface"
+                    return
+                }
+                stopNavigation()
+                cameraController?.beginWalk(at: start)
+                parent.navigation.isWalking = true
+                parent.navigation.message = "Walk · Eye height 1.8 m · Ground locked"
+                return
+            }
             guard activeTool == .measure, let sceneView = sceneView, let session = session else { return }
             if let result = snap(at: gesture.location(in: sceneView)) {
                 session.place(result)
@@ -591,7 +656,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 .searchMode: SCNHitTestSearchMode.all.rawValue,
                 .ignoreHiddenNodes: true
             ])
-            if let hit = hits.first(where: { !isHelper($0.node) }) {
+            if let hit = hits.first(where: { !isHelper($0.node) && isSurface($0.node) }) {
                 let p = hit.worldCoordinates, n = hit.worldNormal
                 return (SIMD3<Float>(p.x, p.y, p.z), simd_normalize(SIMD3<Float>(n.x, n.y, n.z)))
             }
@@ -608,7 +673,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 from: SCNVector3(a.x, a.y, a.z), to: SCNVector3(b.x, b.y, b.z),
                 options: [SCNHitTestOption.searchMode.rawValue: SCNHitTestSearchMode.all.rawValue,
                           SCNHitTestOption.backFaceCulling.rawValue: false])
-            return results.filter { !isHelper($0.node) }.map {
+            return results.filter { !isHelper($0.node) && isSurface($0.node) }.map {
                 SIMD3<Float>($0.worldCoordinates.x, $0.worldCoordinates.y, $0.worldCoordinates.z)
             }
         }
@@ -622,6 +687,9 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let p = hit.point
             let surface = SnapResult(point: p, kind: .surface, normal: hit.normal)
             guard session.snappingEnabled else { return surface }
+            // Point clouds must land on a rendered sample. A fitted corner / axis
+            // can move the result off the touched surface, especially near edges.
+            if !pickablePoints.isEmpty && hit.normal == nil { return surface }
 
             func screenDistance(_ q: SIMD3<Float>) -> CGFloat {
                 let s = view.projectPoint(SCNVector3(q.x, q.y, q.z))
@@ -749,6 +817,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         @objc func resetCamera() {
+            exitWalk()
             guard let camera = sceneView?.pointOfView?.camera else { return }
             SCNTransaction.begin()
             SCNTransaction.animationDuration = 0.4
@@ -761,59 +830,121 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Joystick Handlers
 
         @objc func handleJoystickMove(_ notification: Notification) {
-            guard let userInfo = notification.userInfo,
-                  let dx = userInfo["dx"] as? CGFloat,
-                  let dy = userInfo["dy"] as? CGFloat else { return }
-            currentMoveDX = dx; currentMoveDY = dy
-            if dx == 0 && dy == 0 {
-                joystickMoveTimer?.invalidate(); joystickMoveTimer = nil
-            } else if joystickMoveTimer == nil {
-                joystickMoveTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.applyMoveInput() }
-            }
+            currentMoveDX = (notification.userInfo?["dx"] as? CGFloat) ?? 0
+            currentMoveDY = (notification.userInfo?["dy"] as? CGFloat) ?? 0
+            updateNavigationTimer()
+        }
+
+        private func isSurface(_ node: SCNNode) -> Bool {
+            guard let geometry = node.geometry else { return false }
+            // Imported polygon meshes and procedural surfaces can have no exposed
+            // triangle elements. Reject points/lines, not genuine SceneKit hits.
+            return !geometry.elements.contains { $0.primitiveType == .point || $0.primitiveType == .line }
         }
 
         @objc func handleJoystickLook(_ notification: Notification) {
-            guard let userInfo = notification.userInfo,
-                  let dx = userInfo["dx"] as? CGFloat,
-                  let dy = userInfo["dy"] as? CGFloat else { return }
-            currentLookDX = dx; currentLookDY = dy
-            if dx == 0 && dy == 0 {
-                joystickLookTimer?.invalidate(); joystickLookTimer = nil
-            } else if joystickLookTimer == nil {
-                joystickLookTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.applyLookInput() }
+            currentLookDX = (notification.userInfo?["dx"] as? CGFloat) ?? 0
+            currentLookDY = (notification.userInfo?["dy"] as? CGFloat) ?? 0
+            updateNavigationTimer()
+        }
+
+        @objc func handleJoystickElevate(_ notification: Notification) {
+            currentElevation = (notification.userInfo?["dy"] as? CGFloat) ?? 0
+            updateNavigationTimer()
+        }
+
+        @objc func stopNavigation() {
+            currentMoveDX = 0; currentMoveDY = 0
+            currentLookDX = 0; currentLookDY = 0; currentElevation = 0
+            navigationTimer?.invalidate(); navigationTimer = nil
+            cameraController?.stopInertia()
+        }
+
+        private func updateNavigationTimer() {
+            if currentMoveDX == 0 && currentMoveDY == 0 && currentLookDX == 0 &&
+                currentLookDY == 0 && currentElevation == 0 {
+                navigationTimer?.invalidate(); navigationTimer = nil
+            } else if navigationTimer == nil {
+                lastNavigationTick = CACurrentMediaTime()
+                let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.navigationTick() }
+                RunLoop.main.add(timer, forMode: .common)
+                navigationTimer = timer
             }
         }
 
-        private func applyMoveInput() {
-            guard let cameraNode = sceneView?.pointOfView else { return }
-            let speed: Float = viewDistance * 0.02
-            let right = SCNVector3(cameraNode.transform.m11, cameraNode.transform.m12, cameraNode.transform.m13)
-            let forward = SCNVector3(-cameraNode.transform.m31, -cameraNode.transform.m32, -cameraNode.transform.m33)
-            let dx = Float(currentMoveDX) * speed
-            let dz = Float(-currentMoveDY) * speed
-
-            SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0
-            cameraNode.position = SCNVector3(
-                cameraNode.position.x + right.x * dx + forward.x * dz,
-                cameraNode.position.y + right.y * dx + forward.y * dz,
-                cameraNode.position.z + right.z * dx + forward.z * dz
-            )
-            SCNTransaction.commit()
-            cameraController?.syncFromCamera()
+        private func navigationTick() {
+            let now = CACurrentMediaTime()
+            let dt = Float(min(0.05, max(0, now - lastNavigationTick)))
+            lastNavigationTick = now
+            // Same deflection: old move 0.02/frame -> 0.01; look 0.02 -> 0.04,
+            // with 30 legacy ticks/second. Time-based on 60 and 120 Hz displays.
+            let speed = walkEnabled ? Float(1.4 / 0.56) : viewDistance * 0.01 * 30
+            cameraController?.look(dx: Float(currentLookDX) * 0.04 * 30 * dt,
+                                   dy: Float(currentLookDY) * 0.04 * 30 * dt)
+            cameraController?.move(right: Float(currentMoveDX) * speed * dt,
+                forward: Float(-currentMoveDY) * speed * dt,
+                elevation: Float(currentElevation) * viewDistance * 0.01 * 30 * dt)
         }
 
-        private func applyLookInput() {
-            guard let cameraNode = sceneView?.pointOfView else { return }
-            let rotSpeed: Float = 0.02
+        func updateWalkMode() {
+            let enabled = parent.navigation.enabled && parent.scan.hasKnownScale
+            guard enabled != walkEnabled else { return }
+            stopNavigation()
+            walkEnabled = enabled
+            if enabled { cameraController?.choosingWalkStart = true }
+            else { cameraController?.endWalk() }
+        }
 
-            SCNTransaction.begin()
-            SCNTransaction.animationDuration = 0
-            cameraNode.eulerAngles.y -= Float(currentLookDX) * rotSpeed
-            let newPitch = cameraNode.eulerAngles.x - Float(currentLookDY) * rotSpeed
-            cameraNode.eulerAngles.x = max(-.pi / 2.5, min(.pi / 2.5, newPitch))
-            SCNTransaction.commit()
-            cameraController?.syncFromCamera()
+        private func exitWalk() {
+            stopNavigation()
+            walkEnabled = false
+            cameraController?.endWalk()
+            parent.navigation.enabled = false
+            parent.navigation.isWalking = false
+        }
+
+        /// Downward mesh ray, or a locally supported point-cloud plane. Restrict
+        /// height to one modest step so upstairs/ceilings cannot become the floor.
+        func ground(at p: SIMD3<Float>) -> SIMD3<Float>? {
+            guard let root = sceneView?.scene?.rootNode else { return nil }
+            let reach = WalkGeometry.maximumStep
+            let results = root.hitTestWithSegment(from: SCNVector3(p.x, p.y + reach + 0.01, p.z),
+                to: SCNVector3(p.x, p.y - reach - 0.01, p.z),
+                options: [SCNHitTestOption.searchMode.rawValue: SCNHitTestSearchMode.all.rawValue,
+                          SCNHitTestOption.backFaceCulling.rawValue: false])
+            let groundHits = results.filter {
+                !isHelper($0.node) && isSurface($0.node) &&
+                WalkGeometry.acceptsGround(previousY: p.y, groundY: $0.worldCoordinates.y, normalY: $0.worldNormal.y)
+            }
+            if let hit = groundHits.min(by: { abs($0.worldCoordinates.y - p.y) < abs($1.worldCoordinates.y - p.y) }) {
+                return SIMD3(p.x, hit.worldCoordinates.y, p.z)
+            }
+            guard !pickablePoints.isEmpty, let index = geometryIndex else { return nil }
+            let neighbours = index.neighbours(of: p, radius: 0.18, limit: 300)
+                .filter { abs($0.y - p.y) <= reach }
+            guard neighbours.count >= 8, let plane = GeometryMath.fitPlane(neighbours),
+                  abs(plane.normal.y) >= 0.75 else { return nil }
+            let y = p.y - plane.signedDistance(p) / plane.normal.y
+            guard WalkGeometry.acceptsGround(previousY: p.y, groundY: y, normalY: plane.normal.y),
+                  neighbours.filter({ abs(plane.signedDistance($0)) < 0.035 }).count >= neighbours.count * 4 / 5,
+                  neighbours.contains(where: { simd_distance(SIMD2($0.x, $0.z), SIMD2(p.x, p.z)) < 0.07 }) else { return nil }
+            return SIMD3(p.x, y, p.z)
+        }
+
+        /// Prevent walking through scanned walls and ceilings. Missing geometry
+        /// is not a physical safety guarantee; this is model navigation only.
+        func walkBlocked(from a: SIMD3<Float>, to b: SIMD3<Float>) -> Bool {
+            for height: Float in [0.35, 0.9, 1.5] {
+                let up = SIMD3<Float>(0, height, 0)
+                if !segmentHits(from: a + up, to: b + up).isEmpty { return true }
+            }
+            if !segmentHits(from: b + SIMD3(0, 0.3, 0), to: b + SIMD3(0, 1.9, 0)).isEmpty { return true }
+            if !pickablePoints.isEmpty, let index = geometryIndex {
+                for height: Float in [0.4, 0.8, 1.2, 1.6] {
+                    if !index.neighbours(of: b + SIMD3(0, height, 0), radius: 0.16, limit: 1).isEmpty { return true }
+                }
+            }
+            return false
         }
     }
 }

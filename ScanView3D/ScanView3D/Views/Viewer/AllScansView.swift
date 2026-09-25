@@ -1,231 +1,99 @@
 import SwiftUI
 
-/// Shows all scans across all projects in a browsable grid/list
+/// A visual library with a compact list alternative for large collections.
 struct AllScansView: View {
     @EnvironmentObject var storageManager: StorageManager
-    @State private var viewMode: ViewMode = .list
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage("scanLibraryGrid") private var showsGrid = true
     @State private var searchText = ""
 
-    enum ViewMode {
-        case list
-        case grid
-    }
-
-    /// All scans paired with their project, sorted by date
     private var allScans: [(scan: Scan, project: Project)] {
-        var results: [(Scan, Project)] = []
-        for project in storageManager.projects {
-            for scan in project.scans {
-                results.append((scan, project))
-            }
-        }
-        // Sort newest first
-        results.sort { $0.0.createdAt > $1.0.createdAt }
-
-        // Filter by search text
-        if !searchText.isEmpty {
-            results = results.filter {
-                $0.0.name.localizedCaseInsensitiveContains(searchText) ||
-                $0.1.name.localizedCaseInsensitiveContains(searchText)
-            }
-        }
-
-        return results
-    }
-
-    private var totalScans: Int {
-        storageManager.projects.reduce(0) { $0 + $1.scanCount }
+        storageManager.projects.flatMap { project in
+            project.scans.map { (scan: $0, project: project) }
+        }.filter {
+            searchText.isEmpty || $0.scan.name.localizedCaseInsensitiveContains(searchText)
+                || $0.project.name.localizedCaseInsensitiveContains(searchText)
+        }.sorted { $0.scan.createdAt > $1.scan.createdAt }
     }
 
     var body: some View {
-        NavigationView {
-            Group {
-                if allScans.isEmpty && searchText.isEmpty {
-                    emptyState
-                } else if allScans.isEmpty {
-                    noResultsState
-                } else {
-                    scanContent
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    if searchText.isEmpty {
+                        FieldHero(eyebrow: "Scan library", title: "Every detail.\nReady to explore.",
+                                  subtitle: "Your captures, together in one view.", icon: "cube.transparent")
+                    }
+                    HStack {
+                        Text(searchText.isEmpty ? "Latest captures" : "Search results").font(.headline)
+                        Spacer()
+                        Text("\(allScans.count) scans").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    if allScans.isEmpty {
+                        FieldEmptyState(icon: searchText.isEmpty ? "viewfinder" : "magnifyingglass",
+                                        title: searchText.isEmpty ? "Your next perspective starts here" : "No matching scans",
+                                        message: searchText.isEmpty ? "Open Scan to capture something new, or import a model from Projects." : "Search by scan or project name.")
+                    } else if showsGrid {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 280 : 155), spacing: 14)], spacing: 14) {
+                            ForEach(allScans, id: \.scan.id) { item in
+                                NavigationLink {
+                                    ModelViewerView(scan: item.scan, project: item.project)
+                                } label: { scanCard(item.scan, project: item.project) }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    } else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(allScans, id: \.scan.id) { item in
+                                NavigationLink {
+                                    ModelViewerView(scan: item.scan, project: item.project)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        ScanRow(scan: item.scan)
+                                        Label(item.project.name, systemImage: "folder")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }.padding(16).fieldCard()
+                                }.buttonStyle(.plain)
+                            }
+                        }
+                    }
                 }
+                .padding(20).frame(maxWidth: 1100).frame(maxWidth: .infinity)
             }
+            .fieldScreen()
             .navigationTitle("All Scans")
-            .searchable(text: $searchText, prompt: "Search scans...")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Find a scan or project")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        withAnimation {
-                            viewMode = viewMode == .list ? .grid : .list
-                        }
-                    } label: {
-                        Image(systemName: viewMode == .list ? "square.grid.2x2" : "list.bullet")
+                    Button { showsGrid.toggle() } label: {
+                        Image(systemName: showsGrid ? "list.bullet" : "square.grid.2x2")
                     }
+                    .accessibilityLabel(showsGrid ? "Show scans as a list" : "Show scans as a grid")
                 }
             }
         }
     }
 
-    // MARK: - Empty State
-
-    private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "cube.transparent")
-                .font(.system(size: 60))
-                .foregroundColor(.gray)
-
-            Text("No Scans Yet")
-                .font(.title2)
-                .fontWeight(.bold)
-
-            Text("Scans from all your projects will\nappear here for quick access.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding()
-    }
-
-    private var noResultsState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 40))
-                .foregroundColor(.gray)
-            Text("No scans matching \"\(searchText)\"")
-                .foregroundColor(.secondary)
-        }
-    }
-
-    // MARK: - Scan Content
-
-    private var scanContent: some View {
-        Group {
-            if viewMode == .list {
-                listView
-            } else {
-                gridView
-            }
-        }
-    }
-
-    private var listView: some View {
-        List {
-            Section {
-                Text("\(totalScans) scan\(totalScans == 1 ? "" : "s") across \(storageManager.projects.count) project\(storageManager.projects.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            ForEach(allScans, id: \.scan.id) { item in
-                NavigationLink(destination: ModelViewerView(scan: item.scan, project: item.project)) {
-                    HStack(spacing: 12) {
-                        // Thumbnail
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.blue.opacity(0.15))
-                                .frame(width: 50, height: 50)
-
-                            if let thumbData = item.scan.thumbnailData,
-                               let uiImage = UIImage(data: thumbData) {
-                                Image(uiImage: uiImage)
-                                    .resizable()
-                                    .scaledToFill()
-                                    .frame(width: 50, height: 50)
-                                    .cornerRadius(8)
-                            } else {
-                                Image(systemName: "cube.fill")
-                                    .foregroundColor(.blue)
-                            }
-                        }
-
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(item.scan.name)
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                                .lineLimit(1)
-
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder")
-                                    .font(.caption2)
-                                Text(item.project.name)
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-
-                            HStack(spacing: 8) {
-                                if let dims = item.scan.shortDimensions {
-                                    Text(dims)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                Text(item.scan.formattedFileSize)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-
-                        Spacer()
-
-                        Text(item.scan.createdAt.relativeString)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.vertical, 2)
+    private func scanCard(_ scan: Scan, project: Project) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            FieldThumbnail(data: scan.thumbnailData)
+                .aspectRatio(1.2, contentMode: .fit)
+                .padding(8)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(scan.name).font(.headline).foregroundStyle(.primary).lineLimit(2)
+                Text(project.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                HStack(spacing: 5) {
+                    Text((scan.fileName as NSString).pathExtension.uppercased())
+                        .font(.caption2.weight(.bold)).foregroundStyle(FieldStyle.accent)
+                    Spacer(minLength: 0)
+                    Text(scan.formattedFileSize).font(.caption2).foregroundStyle(.secondary)
                 }
-            }
+            }.padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 16)
+            Spacer(minLength: 0)
         }
-    }
-
-    private var gridView: some View {
-        ScrollView {
-            LazyVGrid(columns: [
-                GridItem(.adaptive(minimum: 140), spacing: 12)
-            ], spacing: 12) {
-                ForEach(allScans, id: \.scan.id) { item in
-                    NavigationLink(destination: ModelViewerView(scan: item.scan, project: item.project)) {
-                        VStack(spacing: 6) {
-                            // Thumbnail
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Color.blue.opacity(0.1))
-                                    .aspectRatio(1, contentMode: .fit)
-
-                                if let thumbData = item.scan.thumbnailData,
-                                   let uiImage = UIImage(data: thumbData) {
-                                    Image(uiImage: uiImage)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .aspectRatio(1, contentMode: .fit)
-                                        .cornerRadius(10)
-                                } else {
-                                    VStack(spacing: 4) {
-                                        Image(systemName: "cube.fill")
-                                            .font(.system(size: 30))
-                                            .foregroundColor(.blue)
-                                        if let dims = item.scan.shortDimensions {
-                                            Text(dims)
-                                                .font(.system(size: 9))
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-
-                            VStack(spacing: 2) {
-                                Text(item.scan.name)
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                                    .lineLimit(1)
-                                    .foregroundColor(.primary)
-
-                                Text(item.project.name)
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding()
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .fieldCard()
+        .accessibilityElement(children: .combine)
     }
 }
