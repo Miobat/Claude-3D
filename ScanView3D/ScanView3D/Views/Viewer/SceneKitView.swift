@@ -20,7 +20,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let sceneView = SCNView(frame: .zero)
         sceneView.scene = SCNScene()
-        sceneView.backgroundColor = UIColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 1.0)
+        sceneView.backgroundColor = UIColor(FieldStyle.viewport)
         sceneView.autoenablesDefaultLighting = false
         sceneView.allowsCameraControl = false   // our own touch navigation below
         sceneView.antialiasingMode = .multisampling4X

@@ -39,6 +39,7 @@ struct ModelViewerView: View {
 
     // More menu
     @State private var showingMoreMenu = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum ViewerTool: String, CaseIterable {
         case orbit = "Orbit"
@@ -94,8 +95,10 @@ struct ModelViewerView: View {
             if !isLoading && loadError == nil && !isProcessing {
                 VStack {
                     if !scan.hasKnownScale || scan.scaleStatus == .estimatedFromBounds {
-                        Text(scan.scaleDescription).font(.callout).padding(8)
-                            .background(.regularMaterial).accessibilityIdentifier("scaleWarning")
+                        Label(scan.scaleDescription, systemImage: "exclamationmark.circle")
+                            .font(.caption).foregroundStyle(.white)
+                            .padding(12).fieldPanel().padding(.horizontal, 12)
+                            .accessibilityIdentifier("scaleWarning")
                     }
                     // Top row: height legend (left), view buttons (right)
                     HStack(alignment: .top) {
@@ -110,13 +113,10 @@ struct ModelViewerView: View {
                                 Button { setCameraView(.front) } label: { Label("Front", systemImage: "arrow.right.to.line") }
                                 Button { setCameraView(.side) } label: { Label("Side", systemImage: "arrow.left.to.line") }
                             } label: {
-                                Image(systemName: "camera.viewfinder")
-                                    .font(.system(size: 18))
-                                    .foregroundColor(.white)
-                                    .frame(width: 40, height: 40)
-                                    .background(Color.black.opacity(0.5))
-                                    .clipShape(Circle())
+                                FieldIcon(symbol: "camera.viewfinder")
                             }
+
+                            .accessibilityLabel("Camera view: top, front, or side")
 
                             // Projection toggle
                             Menu {
@@ -129,13 +129,19 @@ struct ModelViewerView: View {
                                     }
                                 }
                             } label: {
-                                Image(systemName: cameraProjection.icon)
-                                    .font(.system(size: 18))
-                                    .foregroundColor(.white)
-                                    .frame(width: 40, height: 40)
-                                    .background(Color.black.opacity(0.5))
-                                    .clipShape(Circle())
+                                FieldIcon(symbol: cameraProjection.icon)
                             }
+                            .accessibilityLabel("Projection: \(cameraProjection.rawValue)")
+                            Menu {
+                                Toggle("Ground grid", isOn: $showGrid)
+                                Toggle("Bounding box", isOn: $showBoundingBox)
+                                Toggle("Navigation joysticks", isOn: $showJoysticks)
+                            } label: { FieldIcon(symbol: "square.3.layers.3d") }
+                            .accessibilityLabel("Visible layers and controls")
+                            Button {
+                                NotificationCenter.default.post(name: .resetCameraView, object: nil)
+                            } label: { FieldIcon(symbol: "arrow.counterclockwise") }
+                            .accessibilityLabel("Fit model in view")
                         }
                         .padding(.trailing, 12)
                         .padding(.top, 8)
@@ -148,11 +154,15 @@ struct ModelViewerView: View {
                     // Bottom toolbar: More | Process | Measure | Share
                     bottomToolbar
                 }
+                .environment(\.colorScheme, .dark)
             }
         }
         .navigationTitle(scan.name)
         .overlay { ExportProgressView(store: storageManager) }
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(FieldStyle.viewport, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .navigationBar)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
@@ -195,7 +205,7 @@ struct ModelViewerView: View {
                     }
                 } label: {
                     Image(systemName: "info.circle")
-                }
+                }.accessibilityLabel("Model information and coordinate reference")
             }
         }
         .sheet(isPresented: $showingShareSheet) {
@@ -244,14 +254,13 @@ struct ModelViewerView: View {
                     Spacer()
                     Text("lowest")
                 }
-                .font(.system(size: 10))
+                .font(.caption2)
                 .frame(height: 90)
             }
-            Text("Lines every " + measurementUnit.format(meters: step)).font(.system(size: 9))
+            Text("Lines every " + measurementUnit.format(meters: step)).font(.caption2)
         }
         .padding(8)
-        .background(Color.black.opacity(0.6))
-        .cornerRadius(8)
+        .fieldPanel()
         .foregroundColor(.white)
         .padding(.leading, 12)
         .padding(.top, 8)
@@ -271,11 +280,11 @@ struct ModelViewerView: View {
                                 .font(.caption)
                                 .fontWeight(.medium)
                                 .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
+                                .frame(minHeight: 44)
                                 .background(selected ? Color.yellow : Color.white.opacity(0.15))
                                 .foregroundColor(selected ? .black : .white)
                                 .cornerRadius(8)
-                        }
+                        }.accessibilityAddTraits(selected ? .isSelected : [])
                     }
                 }
                 .padding(.horizontal, 12)
@@ -289,9 +298,9 @@ struct ModelViewerView: View {
                 .frame(minHeight: 30)
 
             // Actions: Undo · Add point · Done · Snap
-            HStack(spacing: 22) {
+            HStack(spacing: 14) {
                 Button { session.undo() } label: {
-                    Image(systemName: "arrow.uturn.backward.circle.fill").font(.system(size: 30))
+                    Image(systemName: "arrow.uturn.backward").font(.title3).frame(minWidth: 44, minHeight: 44)
                 }
                 .disabled(session.draftPoints.isEmpty && session.measurements.isEmpty)
                 .accessibilityLabel("Undo")
@@ -315,7 +324,8 @@ struct ModelViewerView: View {
                         Image(systemName: "scope").font(.system(size: 22))
                         Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.system(size: 9))
                     }
-                    .opacity(session.snappingEnabled ? 1 : 0.45)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .opacity(session.snappingEnabled ? 1 : 0.55)
                 }
             }
             .foregroundColor(.white)
@@ -334,7 +344,7 @@ struct ModelViewerView: View {
                                         .font(.caption)
                                         .fontWeight(.medium)
                                         .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
+                                        .frame(minHeight: 44)
                                         .background(selected ? Color.orange : Color.black.opacity(0.7))
                                         .foregroundColor(.white)
                                         .cornerRadius(8)
@@ -358,7 +368,7 @@ struct ModelViewerView: View {
             }
         }
         .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.6)))
+        .fieldPanel()
         .padding(.horizontal, 8)
     }
 
@@ -380,22 +390,30 @@ struct ModelViewerView: View {
 
     private var loadingOverlay: some View {
         VStack(spacing: 16) {
-            ProgressView().scaleEffect(1.5)
-            Text("Loading model...").font(.headline).foregroundColor(.secondary)
+            ProgressView().tint(FieldStyle.mint).controlSize(.large)
+            Text("Opening your scan").font(.headline).foregroundStyle(.white)
+            Text("Preparing geometry and materials").font(.subheadline).foregroundStyle(.white.opacity(0.65))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(FieldStyle.viewport)
     }
 
     private func errorOverlay(_ error: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 40)).foregroundColor(.orange)
-            Text("Failed to Load Model").font(.headline)
-            Text(error).font(.body).foregroundColor(.secondary).multilineTextAlignment(.center)
+            Text("Unable to open this scan").font(.title2.weight(.semibold)).foregroundStyle(.white)
+            Text(error).font(.body).foregroundStyle(.white.opacity(0.75)).multilineTextAlignment(.center)
+            Button {
+                loadError = nil
+                isLoading = true
+                modelNode = nil
+                reloadToken = UUID()
+            } label: { Label("Try again", systemImage: "arrow.clockwise") }
+            .buttonStyle(FieldButtonStyle(prominent: true)).frame(maxWidth: 280)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(FieldStyle.viewport)
     }
 
     // MARK: - Joystick Overlay
@@ -427,112 +445,43 @@ struct ModelViewerView: View {
                 measurePanel
             }
 
-            // Visualization mode selector (hidden while measuring to keep it simple)
             if activeTool != .measure {
-            HStack(spacing: 8) {
-                ForEach(VisualizationMode.allCases, id: \.self) { mode in
-                    Button {
-                        vizMode = mode
-                        applyVisualizationMode(mode)
-                    } label: {
-                        Text(mode.rawValue)
-                            .font(.caption2)
-                            .fontWeight(.medium)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(vizMode == mode ? Color.accentColor : Color.white.opacity(0.15))
-                            .foregroundColor(vizMode == mode ? .white : .gray)
-                            .cornerRadius(8)
-                    }
-                }
-
-                Divider().frame(height: 20)
-
-                // Display toggles
-                Button { showGrid.toggle() } label: {
-                    Image(systemName: "grid")
-                        .foregroundColor(showGrid ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button { showBoundingBox.toggle() } label: {
-                    Image(systemName: "cube.transparent")
-                        .foregroundColor(showBoundingBox ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button {
-                    withAnimation { showJoysticks.toggle() }
-                } label: {
-                    Image(systemName: "gamecontroller.fill")
-                        .foregroundColor(showJoysticks ? .accentColor : .gray)
-                        .font(.system(size: 16))
-                }
-                Button {
-                    NotificationCenter.default.post(name: .resetCameraView, object: nil)
-                } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .foregroundColor(.gray)
-                        .font(.system(size: 16))
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .cornerRadius(10)
-            .padding(.horizontal, 8)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(VisualizationMode.allCases, id: \.self) { mode in
+                            Button {
+                                vizMode = mode
+                                applyVisualizationMode(mode)
+                            } label: {
+                                Text(mode.rawValue).font(.subheadline.weight(.medium))
+                                    .padding(.horizontal, 16).frame(minHeight: 44)
+                                    .foregroundStyle(vizMode == mode ? FieldStyle.ink : .white)
+                                    .background(vizMode == mode ? FieldStyle.mint : Color.clear,
+                                                in: RoundedRectangle(cornerRadius: 13))
+                            }.buttonStyle(.plain)
+                            .accessibilityAddTraits(vizMode == mode ? .isSelected : [])
+                        }
+                    }.padding(6)
+                }.fieldPanel().padding(.horizontal, 12)
             }
 
-            // Main action buttons
-            HStack(spacing: 0) {
-                // More
-                Button {
-                    showingMoreMenu = true
-                } label: {
-                    Text("More")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+            HStack(spacing: 10) {
+                Button { showingMoreMenu = true } label: {
+                    viewerAction("Tools", icon: "slider.horizontal.3")
                 }
-                .foregroundColor(.white)
-                .background(Color(white: 0.25))
-                .cornerRadius(12)
-
-
-                Spacer().frame(width: 8)
-
-                // Measure
-                Button {
-                    activeTool = activeTool == .measure ? .orbit : .measure
-                } label: {
-                    Text("Measure")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                Button { activeTool = activeTool == .measure ? .orbit : .measure } label: {
+                    viewerAction(activeTool == .measure ? "Done" : "Measure", icon: "ruler",
+                                 selected: activeTool == .measure)
                 }
-                .foregroundColor(activeTool == .measure ? .black : .white)
                 .disabled(!scan.hasKnownScale)
-                .background(activeTool == .measure ? Color.yellow : Color(white: 0.25))
-                .cornerRadius(12)
-
-                Spacer().frame(width: 8)
-
-                // Share
-                Button {
-                    exportAndShare()
-                } label: {
-                    Text("Share")
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                .opacity(scan.hasKnownScale ? 1 : 0.45)
+                .accessibilityHint(scan.hasKnownScale ? "Measure distances and areas" : "Requires verified model scale")
+                Button { exportAndShare() } label: {
+                    viewerAction("Share", icon: "square.and.arrow.up", selected: true)
                 }
-                .foregroundColor(.white)
-                .background(Color.accentColor)
-                .cornerRadius(12)
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12).padding(.bottom, 12)
         }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
             Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }.disabled(!scan.hasKnownScale)
@@ -564,6 +513,18 @@ struct ModelViewerView: View {
             #endif
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    private func viewerAction(_ title: String, icon: String, selected: Bool = false) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: icon).font(.body.weight(.medium))
+            Text(title).font(.caption.weight(.semibold))
+        }
+        .frame(maxWidth: .infinity).frame(minHeight: 64)
+        .foregroundStyle(selected ? FieldStyle.ink : .white)
+        .background(selected ? FieldStyle.mint : FieldStyle.panel,
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 1))
     }
 
     /// Re-share the Splat bundle zip that was saved with this scan.
@@ -827,13 +788,13 @@ struct ExportProgressView: View {
             ZStack {
                 Color.black.opacity(0.35).ignoresSafeArea()
                 VStack(spacing: 16) {
-                    ProgressView()
-                    Text(store.exportMessage).multilineTextAlignment(.center)
+                    ProgressView().controlSize(.large).tint(FieldStyle.accent)
+                    Text(store.exportMessage).font(.headline).multilineTextAlignment(.center)
                     Text("Includes units and coordinate metadata. Not a project backup.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Cancel export") { store.cancelExport() }.buttonStyle(.bordered)
+                    Button("Cancel export") { store.cancelExport() }.buttonStyle(FieldButtonStyle())
                 }
-                .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)).padding(24)
+                .padding(24).fieldCard().frame(maxWidth: 420).padding(24)
             }
         }
     }
