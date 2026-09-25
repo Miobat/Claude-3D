@@ -962,7 +962,7 @@ class StorageManager: ObservableObject {
             let m = source.transform
             var positions = [SIMD3<Float>](repeating: .zero, count: vsrc.vectorCount)
             try vsrc.data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
+                guard raw.baseAddress != nil else { return }
                 for i in 0..<vsrc.vectorCount {
                     let start = vsrc.dataOffset + vsrc.dataStride * i
                     guard start <= raw.count - 12 else { throw CoordinateError.incompleteExport }
@@ -979,14 +979,13 @@ class StorageManager: ObservableObject {
                     throw CoordinateError.incompleteExport
                 }
                 try element.data.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress else { return }
+                    guard raw.baseAddress != nil else { return }
                     for i in 0..<(element.primitiveCount * 3) {
-                        let p = base.advanced(by: i * bpi)
                         let index: Int
                         switch bpi {
-                        case 1: index = Int(p.assumingMemoryBound(to: UInt8.self).pointee)
-                        case 2: index = Int(p.assumingMemoryBound(to: UInt16.self).pointee)
-                        default: index = Int(p.assumingMemoryBound(to: UInt32.self).pointee)
+                        case 1: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt8.self))
+                        case 2: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt16.self))
+                        default: index = Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt32.self))
                         }
                         guard index < positions.count else { throw CoordinateError.incompleteExport }
                         result.append(positions[index])

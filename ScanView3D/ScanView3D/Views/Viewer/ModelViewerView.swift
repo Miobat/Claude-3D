@@ -538,10 +538,12 @@ struct ModelViewerView: View {
             Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }.disabled(!scan.hasKnownScale)
             if hasMesh {
                 Button("Export for CAD (OBJ, Z up)") {
-                    storageManager.prepareExport({ try storageManager.exportZUpOBJ(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
+                    let record = scan, destination = project, store = storageManager
+                    store.prepareExport({ try store.exportZUpOBJ(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
                 }
                 Button("Export STL (millimetres, Z up)") {
-                    storageManager.prepareExport({ try storageManager.exportSTL(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
+                    let record = scan, destination = project, store = storageManager
+                    store.prepareExport({ try store.exportSTL(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
                 }
             }
             if scan.hasKnownScale, !session.measurements.isEmpty {
@@ -672,7 +674,8 @@ struct ModelViewerView: View {
     // MARK: - Helpers
 
     private func exportAndShare() {
-        storageManager.prepareExport({ try storageManager.exportScan(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
+        let record = scan, destination = project, store = storageManager
+        store.prepareExport({ try store.exportScan(record, from: destination) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 

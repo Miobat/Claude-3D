@@ -242,13 +242,13 @@ struct ProjectDetailView: View {
     }
 
     private func shareScan(_ scan: Scan) {
-        let project = liveProject
-        storageManager.prepareExport({ try storageManager.exportScan(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
+        let project = liveProject, store = storageManager
+        store.prepareExport({ try store.exportScan(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
     }
 
     private func exportEntireProject() {
-        let project = liveProject
-        storageManager.prepareExport({ try storageManager.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
+        let project = liveProject, store = storageManager
+        store.prepareExport({ try store.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
     }
 
     private func formatCompact(_ value: Int) -> String {

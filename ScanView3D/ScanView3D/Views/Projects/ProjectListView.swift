@@ -198,7 +198,8 @@ struct ProjectListView: View {
     }
 
     private func exportProject(_ project: Project) {
-        storageManager.prepareExport({ try storageManager.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
+        let store = storageManager
+        store.prepareExport({ try store.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 

@@ -80,6 +80,17 @@ final class CoordinateExportTests: XCTestCase {
         XCTAssertThrowsError(try AlignedUSDZ.write(source: source(), to: output, transform: [0]))
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
     }
+    func testCancellationAfterWritingStartsRemovesPartialOutput() throws {
+        let input = try source(), original = try Data(contentsOf: input)
+        let output = directory.appendingPathComponent("partial.usdz")
+        var checks = 0
+        XCTAssertThrowsError(try AlignedUSDZ.write(source: input, to: output, transform: transform, cancelled: {
+            checks += 1
+            return checks >= 3 // checksum, first entry written, then cancellation
+        }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+        XCTAssertEqual(try Data(contentsOf: input), original)
+    }
     func testExistingDestinationIsNotOverwritten() throws {
         let output = directory.appendingPathComponent("existing.usdz"), original = Data("keep".utf8)
         try original.write(to: output)

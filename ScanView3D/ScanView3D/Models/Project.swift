@@ -116,7 +116,9 @@ struct Scan: Identifiable, Codable {
         case .unknown, .legacyUnverified: return "Unverified model scale — not a metric measurement"
         }
     }
-    var hasKnownScale: Bool { scaleStatus != .unknown && scaleStatus != .legacyUnverified }
+    var hasKnownScale: Bool {
+        scaleStatus != .unknown && scaleStatus != .legacyUnverified && (try? validatedModelTransform()) != nil
+    }
 
     func validatedModelTransform() throws -> [Double] {
         if let values = modelTransform { return try CoordinateMath.validated(values.map(Double.init)) }
@@ -151,7 +153,7 @@ struct Scan: Identifiable, Codable {
     /// Transform to apply to the stored model file when showing/measuring it.
     var modelMatrix: simd_float4x4? {
         if let m = Scan.matrix(modelTransform) { return m }
-        if let s = modelScale, s > 0, abs(s - 1) > 0.0001 {
+        if let s = modelScale, s.isFinite, s > 0, s != 1 {
             return simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1))
         }
         return nil
@@ -160,7 +162,7 @@ struct Scan: Identifiable, Codable {
     var sceneFrameMatrix: simd_float4x4? { Scan.matrix(sceneFrame) }
 
     static func matrix(_ t: [Float]?) -> simd_float4x4? {
-        guard let t = t, t.count == 16 else { return nil }
+        guard let t = t, (try? CoordinateMath.validated(t.map(Double.init))) != nil else { return nil }
         return simd_float4x4(SIMD4<Float>(t[0], t[1], t[2], t[3]), SIMD4<Float>(t[4], t[5], t[6], t[7]),
                              SIMD4<Float>(t[8], t[9], t[10], t[11]), SIMD4<Float>(t[12], t[13], t[14], t[15]))
     }
@@ -187,13 +189,14 @@ struct Scan: Identifiable, Codable {
     var dimensions: String? {
         guard let min = boundingBoxMin, let max = boundingBoxMax else { return nil }
         let size = max - min
-        return String(format: "%.2f × %.2f × %.2f m", size.x, size.y, size.z)
+        let suffix = hasKnownScale ? " m" : " units (unverified)"
+        return String(format: "%.2f × %.2f × %.2f", size.x, size.y, size.z) + suffix
     }
 
     var shortDimensions: String? {
         guard let min = boundingBoxMin, let max = boundingBoxMax else { return nil }
         let size = max - min
-        return String(format: "%.1f×%.1f×%.1fm", size.x, size.y, size.z)
+        return String(format: "%.1f×%.1f×%.1f", size.x, size.y, size.z) + (hasKnownScale ? "m" : " units?")
     }
 
     /// Generate a descriptive auto-name based on date/time
