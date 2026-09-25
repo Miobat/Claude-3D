@@ -25,6 +25,11 @@ struct ScannerView: View {
     @State private var checkpointInFlight = false
     @State private var preparationToken = UUID()
     @State private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    // Created once (a Timer publisher built inside `body` would restart on every
+    // redraw — several times a second while scanning — and never fire).
+    @State private var checkpointTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    @State private var lastCheckpointStart = Date.distantPast
+    @State private var lastCheckpointDuration: TimeInterval = 0
 
     @EnvironmentObject var storageManager: StorageManager
     @State private var settings = ScanSettings.load()
@@ -110,7 +115,7 @@ struct ScannerView: View {
         .onChange(of: scanner.needsRecoveryCheckpoint) { _, needed in
             if needed { suspendCapture() }
         }
-        .onReceive(Timer.publish(every: 30, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(checkpointTimer) { _ in
             checkpointWhileCapturing()
         }
         .onChange(of: settings) { _, newValue in
@@ -817,9 +822,17 @@ struct ScannerView: View {
     private func checkpointWhileCapturing() {
         guard scanner.isScanning, !scanner.isPaused, !scanner.isFinalizing,
               !checkpointInFlight, !isPreparingMesh, let current = activeDraft else { return }
+        // Big scans take longer to checkpoint: keep that under ~20 % of the time.
+        guard Date().timeIntervalSince(lastCheckpointStart) >= max(30, lastCheckpointDuration * 5) - 2 else { return }
+        // Never let a safety copy be what runs the phone out of memory.
+        #if !targetEnvironment(simulator)
+        guard LiDARScanner.availableMemoryMB() > 700 else { return }
+        #endif
         checkpointInFlight = true
+        let started = Date()
+        lastCheckpointStart = started
         let token = preparationToken
-        scanner.buildCombinedMesh { mesh in
+        scanner.buildCombinedMesh(lightweight: true) { mesh in
             guard preparationToken == token, activeDraft?.id == current.id, scanner.isScanning else {
                 checkpointInFlight = false
                 return
@@ -832,6 +845,7 @@ struct ScannerView: View {
             activeDraft = draft
             recovery.checkpoint(draft, mesh: mesh) { result in
                 checkpointInFlight = false
+                lastCheckpointDuration = Date().timeIntervalSince(started)
                 if case .failure(let error) = result {
                     scanner.scanError = "Automatic checkpoint failed. Stop and save soon. \(error.localizedDescription)"
                 }
@@ -948,11 +962,12 @@ struct ScannerView: View {
         }
         var updated = scan
         change(&updated)
+        // The model itself is already safely in the library at this point. If only
+        // the extra details (location / alignment) fail to save, finish normally and
+        // say so — treating it as a failure would invite a duplicate save.
+        var detailsWarning: String?
         do { try storageManager.updateScan(scan.id, in: project, change) }
-        catch {
-            failSave("The model was saved, but its details could not be saved. Capture data is still available. \(error.localizedDescription)")
-            return
-        }
+        catch { detailsWarning = "The scan was saved, but its location/alignment details could not be stored. \(error.localizedDescription)" }
 
         isSaving = false
         savingProgress = ""
@@ -961,6 +976,13 @@ struct ScannerView: View {
         completeRecovery()
         scanner.resetScanning()
         scanner.startPreview()
+        if let detailsWarning {
+            // Stay on the scanner and explain; the scan is in the project library.
+            DebugLogger.shared.warn(detailsWarning, category: "Storage")
+            errorMessage = detailsWarning
+            showingError = true
+            return
+        }
         savedScan = updated
         savedProject = project
         showingSavedScan = true
@@ -1047,8 +1069,10 @@ struct ScannerView: View {
                     throw CocoaError(.fileWriteUnknown)
                 }
                 let levelled = cloud.transformed(by: SceneFrame.compute(from: cloud, keepHeading: north))
-                let record = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project, splatBundle: zipURL)
-                try storageManager.updateScan(record.id, in: project) { $0.recordLocation(fix, compassRequested: north) }
+                // One library write for the scan, its bundle and its location, so a
+                // failure can't leave a saved scan that the user is told failed.
+                _ = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project,
+                                                      splatBundle: zipURL) { $0.recordLocation(fix, compassRequested: north) }
 
                 DispatchQueue.main.async {
                     isSaving = false

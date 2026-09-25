@@ -130,7 +130,7 @@ class MockLiDARScanner: ObservableObject {
         scanProgress = "Ready to scan (Simulator Mode)"
     }
 
-    func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
+    func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
         let mesh = meshData ?? Self.generateSampleRoomMesh(range: rangeMeters)
         DispatchQueue.main.async { completion(mesh) }
     }

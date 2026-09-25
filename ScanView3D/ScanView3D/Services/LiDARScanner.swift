@@ -697,14 +697,17 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Combine the scan into one mesh on a background queue.
     /// Copy the Metal buffer bytes on the delegate/main queue before dispatching.
     /// Retaining an ARMeshAnchor alone does not give a worker owned geometry.
-    func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
-        let anchors = meshAnchors.map(MeshAnchorSnapshot.init)
+    /// - lightweight: for periodic recovery checkpoints — skips the (expensive)
+    ///   camera colouring; the final save always colours properly.
+    func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
+        let cloud = (captureMode == .pointCloud || captureMode == .splatExport) ? depthCloud : nil
+        // Point modes return the depth cloud, so don't copy all mesh buffers for nothing.
+        let anchors = cloud != nil && cloud!.pointCount > 0 ? [] : meshAnchors.map(MeshAnchorSnapshot.init)
         let path = cameraPath.isEmpty ? [scanOrigin] : cameraPath
         let range = rangeMeters
         let mode = meshMode
-        let wantCameraColors = captureTexture && captureMode == .fast
+        let wantCameraColors = captureTexture && captureMode == .fast && !lightweight
         let mapper = textureMapper
-        let cloud = (captureMode == .pointCloud || captureMode == .splatExport) ? depthCloud : nil
 
         DispatchQueue.global(qos: .userInitiated).async {
             // Point modes: the depth-sensor cloud is far denser than mesh vertices.
@@ -1323,6 +1326,112 @@ struct MeshData: Codable {
             maxB = simd_max(maxB, p)
         }
         return (minB, maxB)
+    }
+
+    init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>],
+         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>) {
+        self.vertices = vertices
+        self.normals = normals
+        self.faces = faces
+        self.colors = colors
+        self.boundingBoxMin = boundingBoxMin
+        self.boundingBoxMax = boundingBoxMax
+    }
+
+    // MARK: Compact encoding
+    // Recovery checkpoints encode whole scans. The synthesized Codable form stores
+    // every number as its own object (millions for a big scan → gigabytes of
+    // memory while encoding). Instead each array is one packed binary blob.
+
+    private enum CodingKeys: String, CodingKey {
+        case packedVertices, packedNormals, packedFaces, packedColors, boundsMin, boundsMax
+        case vertices, normals, faces, colors, boundingBoxMin, boundingBoxMax   // older format
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(MeshData.pack(vertices), forKey: .packedVertices)
+        try c.encode(MeshData.pack(normals), forKey: .packedNormals)
+        var faceData = Data(capacity: faces.count * 12)
+        for f in faces where f.count == 3 {
+            for i in f { withUnsafeBytes(of: i.littleEndian) { faceData.append(contentsOf: $0) } }
+        }
+        try c.encode(faceData, forKey: .packedFaces)
+        var colorData = Data(capacity: colors.count * 4)
+        for col in colors {
+            colorData.append(contentsOf: [col.x, col.y, col.z, col.w].map { UInt8(max(0, min(255, ($0 * 255).rounded()))) })
+        }
+        try c.encode(colorData, forKey: .packedColors)
+        try c.encode([boundingBoxMin.x, boundingBoxMin.y, boundingBoxMin.z], forKey: .boundsMin)
+        try c.encode([boundingBoxMax.x, boundingBoxMax.y, boundingBoxMax.z], forKey: .boundsMax)
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if c.contains(.packedVertices) {
+            vertices = try MeshData.unpack(c.decode(Data.self, forKey: .packedVertices))
+            normals = try MeshData.unpack(c.decode(Data.self, forKey: .packedNormals))
+            let faceData = try c.decode(Data.self, forKey: .packedFaces)
+            let indexCount = faceData.count / 4
+            var decodedFaces: [[UInt32]] = []
+            decodedFaces.reserveCapacity(indexCount / 3)
+            faceData.withUnsafeBytes { raw in
+                var i = 0
+                while i + 2 < indexCount {
+                    decodedFaces.append([
+                        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: i * 4, as: UInt32.self)),
+                        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: (i + 1) * 4, as: UInt32.self)),
+                        UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: (i + 2) * 4, as: UInt32.self))
+                    ])
+                    i += 3
+                }
+            }
+            faces = decodedFaces
+            let colorData = try c.decode(Data.self, forKey: .packedColors)
+            var decodedColors: [SIMD4<Float>] = []
+            decodedColors.reserveCapacity(colorData.count / 4)
+            var j = colorData.startIndex
+            while j + 3 < colorData.endIndex {
+                decodedColors.append(SIMD4<Float>(Float(colorData[j]), Float(colorData[j + 1]),
+                                                  Float(colorData[j + 2]), Float(colorData[j + 3])) / 255)
+                j += 4
+            }
+            colors = decodedColors
+            let lo = try c.decode([Float].self, forKey: .boundsMin)
+            let hi = try c.decode([Float].self, forKey: .boundsMax)
+            guard lo.count == 3, hi.count == 3 else { throw CocoaError(.fileReadCorruptFile) }
+            boundingBoxMin = SIMD3<Float>(lo[0], lo[1], lo[2])
+            boundingBoxMax = SIMD3<Float>(hi[0], hi[1], hi[2])
+        } else {
+            vertices = try c.decode([SIMD3<Float>].self, forKey: .vertices)
+            normals = try c.decode([SIMD3<Float>].self, forKey: .normals)
+            faces = try c.decode([[UInt32]].self, forKey: .faces)
+            colors = try c.decode([SIMD4<Float>].self, forKey: .colors)
+            boundingBoxMin = try c.decode(SIMD3<Float>.self, forKey: .boundingBoxMin)
+            boundingBoxMax = try c.decode(SIMD3<Float>.self, forKey: .boundingBoxMax)
+        }
+    }
+
+    private static func pack(_ values: [SIMD3<Float>]) -> Data {
+        var data = Data(capacity: values.count * 12)
+        for v in values {
+            for f in [v.x, v.y, v.z] { withUnsafeBytes(of: f.bitPattern.littleEndian) { data.append(contentsOf: $0) } }
+        }
+        return data
+    }
+
+    private static func unpack(_ data: Data) -> [SIMD3<Float>] {
+        let count = data.count / 12
+        var result = [SIMD3<Float>](repeating: .zero, count: count)
+        data.withUnsafeBytes { raw in
+            for i in 0..<count {
+                func f(_ k: Int) -> Float {
+                    Float(bitPattern: UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: i * 12 + k * 4, as: UInt32.self)))
+                }
+                result[i] = SIMD3<Float>(f(0), f(1), f(2))
+            }
+        }
+        return result
     }
 }
 

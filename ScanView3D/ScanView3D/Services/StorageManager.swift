@@ -402,7 +402,8 @@ class StorageManager: ObservableObject {
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
-    func savePointCloud(meshData: MeshData, name: String, toProject project: Project, splatBundle: URL? = nil) throws -> Scan {
+    func savePointCloud(meshData: MeshData, name: String, toProject project: Project, splatBundle: URL? = nil,
+                        metadata: ((inout Scan) -> Void)? = nil) throws -> Scan {
         let scanId = UUID()
         let fileName = "\(scanId.uuidString).ply"
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
@@ -434,6 +435,7 @@ class StorageManager: ObservableObject {
             try fileManager.copyItem(at: bundle, to: destination)
             scan.splatBundleName = destination.lastPathComponent
         }
+        metadata?(&scan)   // stored in the same index write as the scan itself
         try addScan(scan, to: project)
         return scan
     }
@@ -527,6 +529,9 @@ class StorageManager: ObservableObject {
             try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
             let files = companionFiles(of: current).filter { fileManager.fileExists(atPath: sourceDir.appendingPathComponent($0).path) }
             let copies = files.map { (source: sourceDir.appendingPathComponent($0), destination: destDir.appendingPathComponent($0)) }
+            // Scan file names are unique per scan and the scan is not in the destination
+            // index, so anything already there is an orphan from an interrupted move.
+            try removeExistingItems(copies.map { $0.destination })
             candidate[srcIndex].scans.removeAll { $0.id == scan.id }
             candidate[srcIndex].modifiedAt = Date()
             candidate[dstIndex].addScan(current)
