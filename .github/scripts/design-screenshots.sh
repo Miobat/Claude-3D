@@ -29,7 +29,14 @@ capture projects projects-large-text
 capture scanner scanner-large-text
 capture viewer viewer-large-text
 xcrun simctl ui "$DEVICE" content_size large
+capture joysticks viewer-joysticks
+capture walk viewer-walk-selection
+capture navigation-tests navigation-tests
+CONTAINER=$(xcrun simctl get_app_container "$DEVICE" com.michael.scanview3d data)
+cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 8 and not r["failures"], "Native navigation checks failed"' "$OUT/navigation-checks.json"
 capture scanner scanner-landscape --landscape
 capture viewer viewer-landscape --landscape
 capture measure measure-landscape --landscape
+capture joysticks viewer-joysticks-landscape --landscape
 xcrun simctl shutdown "$DEVICE"

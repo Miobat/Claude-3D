@@ -274,6 +274,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                         DispatchQueue.main.async { context.coordinator.geometryIndex = index }
                     }
                     self.isLoading = false
+                    #if DEBUG && targetEnvironment(simulator)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        DesignPreview.navigationChecks(view: sceneView, coordinator: context.coordinator)
+                    }
+                    #endif
                 } else {
                     self.loadError = "Failed to load model file"
                     self.isLoading = false
@@ -432,7 +437,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         /// Front-most point-cloud point near a screen location.
         private func pickPoint(at location: CGPoint, in view: SCNView) -> SCNVector3? {
             guard let picker = pointPicker, let camera = view.pointOfView, let lens = camera.camera else { return nil }
-            let projection = SCNMatrix4ToMat4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.simdWorldTransform.inverse
+            let projection = simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.simdWorldTransform.inverse
             return picker.pick(at: SIMD2(Float(location.x), Float(location.y)),
                 viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: projection)
                 .map { SCNVector3($0.x, $0.y, $0.z) }

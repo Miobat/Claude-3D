@@ -218,6 +218,8 @@ struct ModelViewerView: View {
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
+            if DesignPreview.screen == "joysticks" { showJoysticks = true }
+            if DesignPreview.screen == "walk" { navigation.enabled = true }
             #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))

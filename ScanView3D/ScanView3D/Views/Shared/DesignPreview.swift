@@ -1,6 +1,8 @@
 #if DEBUG && targetEnvironment(simulator)
 import SwiftUI
 import simd
+import SceneKit
+import CoreVideo
 
 /// CI-only visual fixtures. Never compiled into the device/TestFlight app.
 /// Uses a new temporary library, never the user's Documents library.
@@ -44,6 +46,65 @@ enum DesignPreview {
         return MeshData(vertices: points, normals: Array(repeating: SIMD3(0, 1, 0), count: points.count),
                         faces: faces, colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
     }
+
+    /// Runs against the real SceneKit camera / hit tester, not just the pure
+    /// maths helpers. The CI script requires this report and rejects failures.
+    static func navigationChecks(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator) {
+        guard screen == "navigation-tests", let rig = coordinator.cameraController,
+              let camera = view.pointOfView, let lens = camera.camera else { return }
+        var failures: [String] = []
+        var count = 0
+        func check(_ condition: Bool, _ name: String) { count += 1; if !condition { failures.append(name) } }
+        let old = camera.simdTransform
+        let extent: Float = 6
+        rig.frame(center: .zero, extent: extent)
+        for orthographic in [false, true] {
+            lens.usesOrthographicProjection = orthographic
+            lens.orthographicScale = 4
+            let world = SIMD3<Float>(0.7, 0.3, -0.4)
+            let screen = view.projectPoint(SCNVector3(world.x, world.y, world.z))
+            let matrix = simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.simdWorldTransform.inverse
+            let picker = PointCloudPicker(points: [world, world + SIMD3(0.7, 0, 2)])
+            let picked = picker.pick(at: SIMD2(screen.x, screen.y),
+                viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: matrix, radius: 2)
+            check(picked == world, "SceneKit projection / pick round-trip \(orthographic ? "ortho" : "perspective")")
+        }
+        lens.usesOrthographicProjection = false
+        let floor = SCNNode(geometry: SCNBox(width: 10, height: 0.02, length: 10, chamferRadius: 0))
+        floor.position.y = -0.01
+        view.scene?.rootNode.addChildNode(floor)
+        check(coordinator.ground(at: .zero) != nil, "Pick horizontal ground")
+        check(coordinator.ground(at: SIMD3(20, 0, 0)) == nil, "Do not invent ground outside scan")
+        rig.beginWalk(at: .zero)
+        rig.move(right: 0.1, forward: 0.1, elevation: 5)
+        check(abs(camera.simdPosition.y - WalkGeometry.eyeHeight) < 0.001, "Walk ignores vertical elevation")
+        check(simd_length(SIMD2(camera.simdPosition.x, camera.simdPosition.z)) > 0.01, "Walk moves on floor")
+        let walkPosition = camera.simdPosition
+        rig.look(dx: 0.4, dy: 0.2)
+        check(simd_distance(camera.simdPosition, walkPosition) < 0.0001, "Look does not orbit while walking")
+        rig.endWalk()
+        floor.removeFromParentNode()
+        camera.simdTransform = old; rig.syncFromCamera()
+
+        do {
+            let mask = PhotoRangeMask(width: 2, height: 2, pixels: Data([255, 0, 0, 255]), rangeMetres: 1)
+            let buffer = try RangePhotoInput.maskBuffer(mask, width: 8, height: 8)
+            CVPixelBufferLockBaseAddress(buffer, .readOnly)
+            if let base = CVPixelBufferGetBaseAddress(buffer) {
+                let row = CVPixelBufferGetBytesPerRow(buffer)
+                func pixel(_ x: Int, _ y: Int) -> UInt8 { base.load(fromByteOffset: y * row + x, as: UInt8.self) }
+                check(pixel(0, 0) == 255 && pixel(7, 0) == 0 && pixel(0, 7) == 0 && pixel(7, 7) == 255,
+                      "Photo-mask resize preserves image orientation and hard boundary")
+            } else { check(false, "Photo-mask buffer readable") }
+            CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+        } catch { check(false, "Photo-mask resize: \(error)") }
+
+        let report: [String: Any] = ["checks": count, "failures": failures]
+        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("navigation-checks.json")
+        do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
+        catch { assertionFailure("Could not write navigation test report: \(error)") }
+    }
 }
 
 struct DesignPreviewRoot: View {
@@ -55,7 +116,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "walk", "joysticks", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
