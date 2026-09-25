@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10036 /* ExportText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10036; };
+		A10033 /* CoordinateContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10033; };
+		A10034 /* AlignedUSDZ.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10034; };
+		A10035 /* SceneCoordinateValidation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10035; };
 		A10031 /* CaptureSafety.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10031; };
 		A10032 /* CaptureRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10032; };
 		A10030 /* LibraryPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10030; };
@@ -40,6 +44,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10036 /* ExportText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ExportText.swift; sourceTree = "<group>"; };
+		B10033 /* CoordinateContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/CoordinateContract.swift; sourceTree = "<group>"; };
+		B10034 /* AlignedUSDZ.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/AlignedUSDZ.swift; sourceTree = "<group>"; };
+		B10035 /* SceneCoordinateValidation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/SceneCoordinateValidation.swift; sourceTree = "<group>"; };
 		B10031 /* CaptureSafety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/CaptureSafety.swift; sourceTree = "<group>"; };
 		B10032 /* CaptureRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureRecovery.swift; sourceTree = "<group>"; };
 		B10030 /* LibraryPersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/LibraryPersistence.swift; sourceTree = "<group>"; };
@@ -91,6 +99,10 @@
 				G10002 /* ScanView3D */,
 				B10030 /* LibraryPersistence.swift */,
 				B10031 /* CaptureSafety.swift */,
+				B10033 /* CoordinateContract.swift */,
+				B10034 /* AlignedUSDZ.swift */,
+				B10035 /* SceneCoordinateValidation.swift */,
+				B10036 /* ExportText.swift */,
 				G10010 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -274,6 +286,10 @@
 			files = (
 				A10030 /* LibraryPersistence.swift in Sources */,
 				A10031 /* CaptureSafety.swift in Sources */,
+				A10033 /* CoordinateContract.swift in Sources */,
+				A10034 /* AlignedUSDZ.swift in Sources */,
+				A10035 /* SceneCoordinateValidation.swift in Sources */,
+				A10036 /* ExportText.swift in Sources */,
 				A10032 /* CaptureRecovery.swift in Sources */,
 				A10001 /* ScanView3DApp.swift in Sources */,
 				A10002 /* ContentView.swift in Sources */,

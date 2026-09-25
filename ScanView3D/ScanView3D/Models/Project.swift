@@ -103,6 +103,38 @@ struct Scan: Identifiable, Codable {
     /// Previous reconstruction models, measurements and metadata retained for recovery.
     /// Optional for compatibility with every existing projects.json file.
     var retainedReconstructionFiles: [String]?
+    var coordinateProvenance: CoordinateProvenance?
+
+    var scaleStatus: CoordinateProvenance.ScaleStatus {
+        coordinateProvenance?.scaleStatus ?? ((vertexCount > 0 && modelTransform == nil && modelScale == nil) ? .lidarMetric : .legacyUnverified)
+    }
+    var scaleDescription: String {
+        switch scaleStatus {
+        case .lidarMetric: return "LiDAR local metres — field accuracy not verified"
+        case .cameraPoseAligned: return "Camera-pose aligned — field accuracy not verified"
+        case .estimatedFromBounds: return "Estimated scale from bounds — orientation not verified"
+        case .unknown, .legacyUnverified: return "Unverified model scale — not a metric measurement"
+        }
+    }
+    var hasKnownScale: Bool { scaleStatus != .unknown && scaleStatus != .legacyUnverified }
+
+    func validatedModelTransform() throws -> [Double] {
+        if let values = modelTransform { return try CoordinateMath.validated(values.map(Double.init)) }
+        if let scale = modelScale {
+            guard scale.isFinite, scale > 0 else { throw CoordinateError.invalidTransform }
+            var m = CoordinateMath.identity
+            m[0] = Double(scale); m[5] = Double(scale); m[10] = Double(scale)
+            return try CoordinateMath.validated(m)
+        }
+        return CoordinateMath.identity
+    }
+
+    mutating func recordCaptureFrame(_ frame: simd_float4x4) {
+        sceneFrame = StorageManager.array(of: frame)
+        coordinateProvenance = CoordinateProvenance(sourceKind: "lidar", scaleStatus: .lidarMetric,
+            alignmentMethod: "gravity level / local recenter", captureToLocal: sceneFrame?.map(Double.init),
+            localDatum: "Local levelled low surface; zero is not a surveyed elevation datum")
+    }
 
     mutating func recordLocation(_ fix: CaptureLocation?, compassRequested: Bool) {
         northAligned = compassRequested

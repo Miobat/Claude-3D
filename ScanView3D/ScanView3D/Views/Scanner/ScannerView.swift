@@ -1009,12 +1009,13 @@ struct ScannerView: View {
                 }
 
                 // Level and square up AFTER baking (baking needs the camera-space positions).
-                meshData = meshData.transformed(by: SceneFrame.compute(from: meshData, keepHeading: north))
+                let frame = SceneFrame.compute(from: meshData, keepHeading: north)
+                meshData = meshData.transformed(by: frame)
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
                 let scan = try storageManager.saveScan(meshData: meshData, name: name, toProject: project,
                                                        format: format, baked: baked)
-                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) { $0.recordCaptureFrame(frame) } }
             } catch {
                 DispatchQueue.main.async { failSave("Failed to save: \(error.localizedDescription)") }
             }
@@ -1046,9 +1047,13 @@ struct ScannerView: View {
                 guard let zipURL = SplatExporter.zip(folder: folder) else {
                     throw CocoaError(.fileWriteUnknown)
                 }
-                let levelled = cloud.transformed(by: SceneFrame.compute(from: cloud, keepHeading: north))
+                let frame = SceneFrame.compute(from: cloud, keepHeading: north)
+                let levelled = cloud.transformed(by: frame)
                 let record = try storageManager.savePointCloud(meshData: levelled, name: name, toProject: project, splatBundle: zipURL)
-                try storageManager.updateScan(record.id, in: project) { $0.recordLocation(fix, compassRequested: north) }
+                try storageManager.updateScan(record.id, in: project) {
+                    $0.recordLocation(fix, compassRequested: north)
+                    $0.recordCaptureFrame(frame)
+                }
 
                 DispatchQueue.main.async {
                     isSaving = false
@@ -1094,9 +1099,10 @@ struct ScannerView: View {
             do {
                 var points = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
-                points = points.transformed(by: SceneFrame.compute(from: points, keepHeading: north))
+                let frame = SceneFrame.compute(from: points, keepHeading: north)
+                points = points.transformed(by: frame)
                 let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project)
-                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) { $0.recordCaptureFrame(frame) } }
             } catch {
                 DispatchQueue.main.async { failSave("Failed to save point cloud: \(error.localizedDescription)") }
             }
@@ -1151,7 +1157,10 @@ struct ScannerView: View {
                 try? FileManager.default.removeItem(at: outputURL)
                 let sceneFrame = frame.map(StorageManager.array(of:))
                 DispatchQueue.main.async {
-                    finishSave(scan: scan, project: project) { s in s.sceneFrame = sceneFrame }
+                    finishSave(scan: scan, project: project) { s in
+                        s.sceneFrame = sceneFrame
+                        s.coordinateProvenance = ScannerView.photoProvenance(alignment, frame: frame)
+                    }
                 }
             } catch {
                 DispatchQueue.main.async { failSave(PhotogrammetryProcessor.friendlyMessage(for: error)) }
@@ -1164,6 +1173,22 @@ struct ScannerView: View {
 // MARK: - Photogrammetry Metric Scale
 
 extension ScannerView {
+    struct PhotoAlignment {
+        let transform: simd_float4x4
+        let poseBased: Bool
+        let rms: Float?
+        let cameraCount: Int
+    }
+
+    static func photoProvenance(_ alignment: PhotoAlignment?, frame: simd_float4x4?) -> CoordinateProvenance {
+        let poseBased = alignment?.poseBased == true
+        return CoordinateProvenance(sourceKind: "photogrammetry",
+            scaleStatus: poseBased ? .cameraPoseAligned : (alignment == nil ? .unknown : .estimatedFromBounds),
+            alignmentMethod: poseBased ? "camera similarity fit" : (alignment == nil ? "none" : "bounding-box size estimate"),
+            alignmentRMSErrorMetres: alignment?.rms.map(Double.init), matchedCameraCount: alignment?.cameraCount,
+            captureToLocal: poseBased ? StorageManager.array(of: frame ?? matrix_identity_float4x4).map(Double.init) : nil,
+            localDatum: poseBased && frame != nil ? "Local levelled low surface; not a surveyed elevation datum" : "Capture/model-local origin; not a surveyed elevation datum")
+    }
     /// Diagonal length (metres) of a LiDAR mesh's bounding box, or nil if unusable.
     static func metricExtent(of mesh: MeshData?) -> Float? {
         guard let mesh = mesh, mesh.vertexCount > 0 else { return nil }
@@ -1194,7 +1219,7 @@ extension ScannerView {
     /// true metric scale, gravity-up and the same placement as the LiDAR scan.
     /// Falls back to a size-only correction if that isn't reliable.
     static func alignmentTransform(photoPositions: [Int: SIMD3<Float>], arkitPositions: [Int: SIMD3<Float>],
-                                   modelURL: URL, lidarExtent: Float?) -> (transform: simd_float4x4, poseBased: Bool)? {
+                                   modelURL: URL, lidarExtent: Float?) -> PhotoAlignment? {
         let ids = photoPositions.keys.filter { arkitPositions[$0] != nil }.sorted()
         if ids.count >= 6 {
             var src = ids.compactMap { photoPositions[$0] }
@@ -1222,13 +1247,13 @@ extension ScannerView {
                 }
                 if sane {
                     DebugLogger.shared.info("HQ model aligned by \(src.count) cameras, scale \(f.scale), rms \(f.rms) m", category: "Photogrammetry")
-                    return (f.transform, true)
+                    return PhotoAlignment(transform: f.transform, poseBased: true, rms: f.rms, cameraCount: src.count)
                 }
                 DebugLogger.shared.warn("Pose alignment rejected (spread \(spread), rms \(f.rms)); using size match", category: "Photogrammetry")
             }
         }
         if let s = metricScale(forModel: modelURL, lidarExtent: lidarExtent) {
-            return (simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1)), false)
+            return PhotoAlignment(transform: simd_float4x4(diagonal: SIMD4<Float>(s, s, s, 1)), poseBased: false, rms: nil, cameraCount: 0)
         }
         return nil
     }

@@ -93,9 +93,13 @@ struct ModelViewerView: View {
 
             if !isLoading && loadError == nil && !isProcessing {
                 VStack {
+                    if !scan.hasKnownScale || scan.scaleStatus == .estimatedFromBounds {
+                        Text(scan.scaleDescription).font(.callout).padding(8)
+                            .background(.regularMaterial).accessibilityIdentifier("scaleWarning")
+                    }
                     // Top row: height legend (left), view buttons (right)
                     HStack(alignment: .top) {
-                        if vizMode == .height, let node = modelNode {
+                        if scan.hasKnownScale, vizMode == .height, let node = modelNode {
                             heightLegend(for: node)
                         }
                         Spacer()
@@ -147,11 +151,12 @@ struct ModelViewerView: View {
             }
         }
         .navigationTitle(scan.name)
+        .overlay { ExportProgressView(store: storageManager) }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Menu {
-                    if let node = modelNode {
+                    if scan.hasKnownScale, let node = modelNode {
                         // boundingBox is in the node's own space; include its scale
                         // (High-Quality models carry a metric scale correction).
                         let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
@@ -162,6 +167,13 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        Text(scan.scaleDescription)
+                        if let provenance = scan.coordinateProvenance {
+                            Text(provenance.localDatum)
+                            if let rms = provenance.alignmentRMSErrorMetres {
+                                Text(String(format: "Camera fit RMS: %.3f m (not field accuracy)", rms))
+                            }
+                        }
                         Text("Vertices: \(scan.vertexCount.formatted())")
                         Text("Faces: \(scan.faceCount.formatted())")
                         Text("Size: \(scan.formattedFileSize)")
@@ -499,6 +511,7 @@ struct ModelViewerView: View {
                         .padding(.vertical, 12)
                 }
                 .foregroundColor(activeTool == .measure ? .black : .white)
+                .disabled(!scan.hasKnownScale)
                 .background(activeTool == .measure ? Color.yellow : Color(white: 0.25))
                 .cornerRadius(12)
 
@@ -522,16 +535,16 @@ struct ModelViewerView: View {
             .padding(.bottom, 8)
         }
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
-            Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }
+            Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }.disabled(!scan.hasKnownScale)
             if hasMesh {
                 Button("Export for CAD (OBJ, Z up)") {
-                    if let url = storageManager.exportZUpOBJ(scan, from: project) { ShareSheetPresenter.present([url]) }
+                    storageManager.prepareExport({ try storageManager.exportZUpOBJ(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
                 }
                 Button("Export STL (millimetres, Z up)") {
-                    if let url = storageManager.exportSTL(scan, from: project) { ShareSheetPresenter.present([url]) }
+                    storageManager.prepareExport({ try storageManager.exportSTL(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
                 }
             }
-            if !session.measurements.isEmpty {
+            if scan.hasKnownScale, !session.measurements.isEmpty {
                 Button("Export Measurements (CSV)") {
                     if let url = storageManager.exportMeasurementsCSV(session.measurements, scanName: scan.name,
                                                                       unit: measurementUnit) {
@@ -586,7 +599,8 @@ struct ModelViewerView: View {
                     transform = frame * a.transform
                 }
                 try storageManager.replacePhotogrammetryModel(
-                    scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform
+                    scanID: scan.id, in: project, newModelURL: outputURL, modelTransform: transform,
+                    provenance: ScannerView.photoProvenance(alignment, frame: scan.sceneFrameMatrix)
                 )
                 try? FileManager.default.removeItem(at: outputURL)
                 DispatchQueue.main.async {
@@ -658,9 +672,7 @@ struct ModelViewerView: View {
     // MARK: - Helpers
 
     private func exportAndShare() {
-        // Textured OBJs come back as one .zip (obj + mtl + texture), others as the file itself.
-        guard let url = storageManager.exportScan(scan, from: project) else { return }
-        ShareSheetPresenter.present([url])
+        storageManager.prepareExport({ try storageManager.exportScan(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 
@@ -802,6 +814,25 @@ enum ShareSheetPresenter {
         activity.popoverPresentationController?.sourceView = top.view
         activity.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 0, height: 0)
         top.present(activity, animated: true)
+    }
+}
+
+struct ExportProgressView: View {
+    @ObservedObject var store: StorageManager
+    var body: some View {
+        if store.isExporting {
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                VStack(spacing: 16) {
+                    ProgressView()
+                    Text(store.exportMessage).multilineTextAlignment(.center)
+                    Text("Includes units and coordinate metadata. Not a project backup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Cancel export") { store.cancelExport() }.buttonStyle(.bordered)
+                }
+                .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)).padding(24)
+            }
+        }
     }
 }
 
