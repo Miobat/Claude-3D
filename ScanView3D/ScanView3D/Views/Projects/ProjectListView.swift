@@ -234,29 +234,25 @@ struct ProjectListView: View {
 
 struct ProjectRow: View {
     let project: Project
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         HStack(spacing: 12) {
             // Thumbnail or icon
+            if !typeSize.isAccessibilitySize {
             FieldThumbnail(data: project.thumbnailData, icon: "square.stack.3d.up")
                 .frame(width: 68, height: 76)
+            }
 
             // Project info
             VStack(alignment: .leading, spacing: 7) {
                 Text(project.name)
                     .font(.headline)
-                    .lineLimit(2)
+                    .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
 
-                HStack(spacing: 8) {
-                    Label("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")", systemImage: "viewfinder")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    if project.totalFileSize > 0 {
-                        Text(project.formattedTotalSize)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { projectMetadata }
+                    VStack(alignment: .leading, spacing: 4) { projectMetadata }
                 }
 
                 Text(project.modifiedAt.relativeString)
@@ -264,9 +260,26 @@ struct ProjectRow: View {
                     .foregroundColor(.secondary)
             }
 
-            Spacer()
+            Spacer(minLength: 0)
 
         }
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder private var projectMetadata: some View {
+                    if typeSize.isAccessibilitySize {
+                        Text("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                    Label("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")", systemImage: "viewfinder")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+
+                    if project.totalFileSize > 0 {
+                        Text(project.formattedTotalSize)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
     }
 }

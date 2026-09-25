@@ -1301,6 +1301,7 @@ struct SimulatorScanView: View {
     @ObservedObject var scanner: MockLiDARScanner
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.verticalSizeClass) private var heightClass
     @State private var animationPhase: Double = 0
 
     var body: some View {
@@ -1311,7 +1312,7 @@ struct SimulatorScanView: View {
                 scanningAnimation
             } else if scanner.vertexCount > 0 {
                 completionView
-            } else if !typeSize.isAccessibilitySize {
+            } else if !typeSize.isAccessibilitySize && heightClass != .compact {
                 idleView
             }
         }

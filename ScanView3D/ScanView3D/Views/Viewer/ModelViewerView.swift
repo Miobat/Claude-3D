@@ -2,6 +2,11 @@ import SwiftUI
 import SceneKit
 import simd
 
+private struct MeasurePanelHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 200
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
 /// Full-screen 3D model viewer with measurement, processing, and visualization tools
 struct ModelViewerView: View {
     @State var scan: Scan
@@ -28,6 +33,7 @@ struct ModelViewerView: View {
     @StateObject private var session = MeasurementSession()
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
     @State private var showingClearMeasurements = false
+    @State private var measurePanelHeight: CGFloat = 200
 
     // Long-running work (re-reconstruction)
     @State private var isProcessing = false
@@ -132,6 +138,7 @@ struct ModelViewerView: View {
                         }
                     } else {
                         bottomToolbar(compact: compact)
+                            .frame(width: geometry.size.width)
                     }
                 }
                 .environment(\.colorScheme, .dark)
@@ -272,7 +279,7 @@ struct ModelViewerView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-            }
+            }.fixedSize(horizontal: false, vertical: true)
 
             Text(session.status)
                 .font(.caption)
@@ -306,11 +313,13 @@ struct ModelViewerView: View {
                 Button { session.snappingEnabled.toggle() } label: {
                     VStack(spacing: 2) {
                         Image(systemName: "scope").font(.system(size: 22))
-                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.system(size: 9))
+                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
                     }
                     .frame(minWidth: 44, minHeight: 44)
                     .opacity(session.snappingEnabled ? 1 : 0.55)
                 }
+                .accessibilityLabel("Snap to geometry")
+                .accessibilityValue(session.snappingEnabled ? "On" : "Off")
             }
             .foregroundColor(.white)
 
@@ -335,15 +344,15 @@ struct ModelViewerView: View {
                                 }
                             }
                         }
-                    }
+                    }.fixedSize(horizontal: false, vertical: true)
                     if session.selectedID != nil {
                         Button { session.deleteSelected() } label: {
-                            Image(systemName: "trash.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                            Image(systemName: "trash.circle.fill").font(.system(size: 26)).foregroundColor(.red).frame(width: 44, height: 44)
                         }
                         .accessibilityLabel("Delete selected measurement")
                     } else {
                         Button { showingClearMeasurements = true } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 26)).foregroundColor(.red)
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 26)).foregroundColor(.red).frame(width: 44, height: 44)
                         }
                         .accessibilityLabel("Delete all measurements")
                     }
@@ -464,7 +473,15 @@ struct ModelViewerView: View {
     private func bottomToolbar(compact: Bool) -> some View {
         VStack(spacing: 8) {
             if activeTool == .measure {
-                ScrollView { measurePanel }.frame(maxHeight: compact ? 130 : 320)
+                ScrollView {
+                    measurePanel.background {
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: MeasurePanelHeightKey.self, value: proxy.size.height)
+                        }
+                    }
+                }
+                .frame(height: min(measurePanelHeight, compact ? 200 : 260))
+                .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 
             if activeTool != .measure && !compact {
@@ -541,11 +558,10 @@ struct ModelViewerView: View {
                 .accessibilityLabel("Rendering style")
             }
             mainViewerActions
-        }
+        }.buttonStyle(.plain)
     }
 
-    private var mainViewerActions: some View {
-        HStack(spacing: 10) {
+    @ViewBuilder private var mainViewerActions: some View {
                 Button { showingMoreMenu = true } label: {
                     viewerAction("Tools", icon: "slider.horizontal.3")
                 }
@@ -563,9 +579,6 @@ struct ModelViewerView: View {
                 Button { exportAndShare() } label: {
                     viewerAction("Share", icon: "square.and.arrow.up", selected: true)
                 }
-            }
-            .buttonStyle(.plain)
-
     }
 
     private func viewerAction(_ title: String, icon: String, selected: Bool = false) -> some View {
