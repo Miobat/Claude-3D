@@ -4,12 +4,15 @@ import SwiftUI
 struct ProjectDetailView: View {
     let project: Project
     @EnvironmentObject var storageManager: StorageManager
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.horizontalSizeClass) private var widthClass
     @State private var showingImporter = false
     @State private var renamingScan: Scan?
     @State private var renameName = ""
     @State private var movingScan: Scan?
     @State private var showingExportProject = false
     @State private var sortOrder: SortOrder = .dateNewest
+    @State private var scansToDelete: [Scan] = []
 
     enum SortOrder: String, CaseIterable {
         case dateNewest = "Newest First"
@@ -48,6 +51,8 @@ struct ProjectDetailView: View {
             }
         }
         .navigationTitle(liveProject.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .fieldScreen()
         .overlay { ExportProgressView(store: storageManager) }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -55,7 +60,7 @@ struct ProjectDetailView: View {
                     Button {
                         showingImporter = true
                     } label: {
-                        Label("Import OBJ File", systemImage: "square.and.arrow.down")
+                        Label("Import OBJ or PLY", systemImage: "square.and.arrow.down")
                     }
 
                     if !liveProject.scans.isEmpty {
@@ -87,6 +92,7 @@ struct ProjectDetailView: View {
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
+                .accessibilityLabel("Project actions and sorting")
             }
         }
         .alert("Rename Scan", isPresented: Binding(
@@ -126,33 +132,28 @@ struct ProjectDetailView: View {
         ) { result in
             handleImport(result)
         }
+        .confirmationDialog("Delete \(scansToDelete.count) scan(s)?", isPresented: Binding(
+            get: { !scansToDelete.isEmpty }, set: { if !$0 { scansToDelete = [] } }
+        ), titleVisibility: .visible) {
+            Button("Delete Scans", role: .destructive) {
+                for scan in scansToDelete { storageManager.deleteScan(scan, from: liveProject) }
+                scansToDelete = []
+            }
+        } message: { Text("This permanently removes the selected scan files. This cannot be undone.") }
     }
 
     // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "viewfinder")
-                .font(.system(size: 50))
-                .foregroundColor(.gray)
-
-            Text("No Scans Yet")
-                .font(.title3)
-                .fontWeight(.bold)
-
-            Text("Go to the Scanner tab to create a new scan,\nor import existing OBJ/PLY files.")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-
-            Button {
-                showingImporter = true
-            } label: {
-                Label("Import File", systemImage: "square.and.arrow.down")
-            }
-            .buttonStyle(.bordered)
+        ScrollView {
+            VStack(spacing: 20) {
+                FieldEmptyState(icon: "viewfinder", title: "Ready for your first scan",
+                                message: "Capture from the Scan tab, then choose this project when saving. Already have a model? Import it below.")
+                Button { showingImporter = true } label: {
+                    Label("Import OBJ or PLY", systemImage: "square.and.arrow.down")
+                }.buttonStyle(FieldButtonStyle(prominent: true))
+            }.padding(20).frame(maxWidth: 760).frame(maxWidth: .infinity)
         }
-        .padding()
     }
 
     // MARK: - Scan List
@@ -161,14 +162,17 @@ struct ProjectDetailView: View {
         List {
             // Project stats
             Section {
-                HStack(spacing: 16) {
+                FieldHero(eyebrow: "Project", title: liveProject.name,
+                          subtitle: "Updated \(liveProject.modifiedAt.relativeString)", icon: "folder")
+                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: typeSize.isAccessibilitySize ? 1 : (widthClass == .regular ? 4 : 2)), spacing: 20) {
                     StatItem(label: "Scans", value: "\(liveProject.scanCount)", icon: "viewfinder")
                     StatItem(label: "Vertices", value: formatCompact(liveProject.totalVertices), icon: "circle.fill")
                     StatItem(label: "Faces", value: formatCompact(liveProject.totalFaces), icon: "triangle.fill")
                     StatItem(label: "Size", value: liveProject.formattedTotalSize, icon: "internaldrive")
                 }
-                .padding(.vertical, 4)
-            }
+                .padding(.vertical, 10)
+            }.listRowSeparator(.hidden)
 
             // Scans
             Section("Scans (\(liveProject.scanCount))") {
@@ -191,12 +195,11 @@ struct ProjectDetailView: View {
                                 Label("Move to Project...", systemImage: "folder")
                             }
 
-                            Button {
-                                let _ = storageManager.duplicateScan(scan, from: liveProject, to: liveProject)
-                            } label: {
-                                Label("Duplicate", systemImage: "plus.square.on.square")
-                            }
                         }
+
+                        Button {
+                            let _ = storageManager.duplicateScan(scan, from: liveProject, to: liveProject)
+                        } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
 
                         Button {
                             shareScan(scan)
@@ -207,17 +210,14 @@ struct ProjectDetailView: View {
                         Divider()
 
                         Button(role: .destructive) {
-                            storageManager.deleteScan(scan, from: liveProject)
+                            scansToDelete = [scan]
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
                     }
                 }
                 .onDelete { indexSet in
-                    let selected = indexSet.map { sortedScans[$0] }
-                    for scan in selected {
-                        storageManager.deleteScan(scan, from: liveProject)
-                    }
+                    scansToDelete = indexSet.map { sortedScans[$0] }
                 }
             }
         }
@@ -233,7 +233,7 @@ struct ProjectDetailView: View {
                 do {
                     let _ = try storageManager.importOBJFile(from: url, name: name, toProject: liveProject)
                 } catch {
-                    DebugLogger.shared.error("Import error: \(error)", category: "Import")
+                    storageManager.report(error, action: "Import \(name)")
                 }
             }
         case .failure(let error):
@@ -268,32 +268,14 @@ struct ScanRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            // Thumbnail or icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.blue.opacity(0.15))
-                    .frame(width: 56, height: 56)
-
-                if let thumbData = scan.thumbnailData,
-                   let uiImage = UIImage(data: thumbData) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 56, height: 56)
-                        .cornerRadius(8)
-                } else {
-                    Image(systemName: scan.hasColor ? "paintpalette.fill" : "cube.fill")
-                        .font(.system(size: 22))
-                        .foregroundColor(.blue)
-                }
-            }
+            FieldThumbnail(data: scan.thumbnailData)
+                .frame(width: 64, height: 76)
 
             // Info
             VStack(alignment: .leading, spacing: 4) {
                 Text(scan.name)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
+                    .font(.headline)
+                    .lineLimit(2)
 
                 HStack(spacing: 6) {
                     if let dims = scan.shortDimensions {
@@ -327,20 +309,8 @@ struct ScanRow: View {
 
             Spacer()
 
-            // Date
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(scan.createdAt.relativeString)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-
-                if scan.hasColor {
-                    Image(systemName: "paintpalette")
-                        .font(.caption2)
-                        .foregroundColor(.orange)
-                }
-            }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 8)
     }
 
     private func formatCompactInline(_ value: Int) -> String {
@@ -361,20 +331,21 @@ struct StatItem: View {
     var icon: String = ""
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 8) {
             if !icon.isEmpty {
                 Image(systemName: icon)
                     .font(.caption2)
                     .foregroundColor(.accentColor)
             }
             Text(value)
-                .font(.subheadline)
-                .fontWeight(.bold)
+                .font(.headline)
+                .monospacedDigit()
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -387,7 +358,7 @@ struct MoveToProjectSheet: View {
     let onDismiss: () -> Void
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             List {
                 Section("Move \"\(scan.name)\" to:") {
                     ForEach(storageManager.projects.filter { $0.id != sourceProject.id }) { project in
@@ -412,6 +383,7 @@ struct MoveToProjectSheet: View {
                 }
             }
             .navigationTitle("Move Scan")
+            .fieldScreen()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

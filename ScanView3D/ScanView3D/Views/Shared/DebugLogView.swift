@@ -32,6 +32,7 @@ struct DebugLogView: View {
         }
         .searchable(text: $searchText, prompt: "Search logs...")
         .navigationTitle("Debug Log")
+        .fieldScreen()
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -57,7 +58,7 @@ struct DebugLogView: View {
                         Text(level)
                             .font(.caption.bold())
                             .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
+                            .frame(minHeight: 44)
                             .background(filterLevel == level ? colorForLevel(level) : Color.gray.opacity(0.2))
                             .foregroundColor(filterLevel == level ? .white : .primary)
                             .cornerRadius(8)
@@ -105,6 +106,7 @@ struct DebugLogView: View {
         } label: {
             Image(systemName: "ellipsis.circle")
         }
+        .accessibilityLabel("Log actions")
     }
 
     private func colorForLevel(_ level: String) -> Color {

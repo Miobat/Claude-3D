@@ -5,6 +5,12 @@ struct SettingsView: View {
     // Scan options (mode, range, detail, colour) live on the scan screen itself.
     @AppStorage(ScanSettings.MeasurementUnit.storageKey) private var measurementUnit = ScanSettings.MeasurementUnit.meters.rawValue
     @AppStorage("showGridByDefault") private var showGridByDefault = true
+    @AppStorage("appAppearance") private var appearance = "system"
+
+    private var versionLabel: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return "\(info["CFBundleShortVersionString"] as? String ?? "—") (\(info["CFBundleVersion"] as? String ?? "—"))"
+    }
 
     @EnvironmentObject var storageManager: StorageManager
 
@@ -12,8 +18,20 @@ struct SettingsView: View {
     @State private var storageUsed: String = "Calculating..."
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
+                Section {
+                    FieldHero(eyebrow: "ScanView 3D", title: "Make it yours.",
+                              subtitle: "Your workspace. Your preferences.", icon: "slider.horizontal.3")
+                        .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                }
+                Section("Appearance") {
+                    Picker("Color scheme", selection: $appearance) {
+                        Text("System").tag("system")
+                        Text("Light").tag("light")
+                        Text("Dark").tag("dark")
+                    }
+                }
                 // Viewer settings
                 Section("Viewer") {
                     Picker("Measurement Unit", selection: $measurementUnit) {
@@ -31,15 +49,10 @@ struct SettingsView: View {
                     LabeledContent("Total Scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })")
                     LabeledContent("Storage Used", value: storageUsed)
 
-                    Button(role: .destructive) {
-                        showingClearConfirm = true
-                    } label: {
-                        Text("Delete All Data")
-                    }
                 }
 
                 // Debug
-                Section("Developer") {
+                Section("Support & diagnostics") {
                     NavigationLink {
                         DebugLogView()
                     } label: {
@@ -58,7 +71,7 @@ struct SettingsView: View {
                 // About
                 Section("About") {
                     LabeledContent("App", value: AppConstants.appName)
-                    LabeledContent("Version", value: "1.0.0")
+                    LabeledContent("Version", value: versionLabel)
 
                     HStack {
                         Text("LiDAR")
@@ -80,8 +93,18 @@ struct SettingsView: View {
                         #endif
                     }
                 }
+                Section {
+                    Label("Stored on this device", systemImage: "internaldrive")
+                    Text("Model exports are not full backups: source photos and measurements are not included. Keep the app installed to preserve your library.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } header: { Text("Your files") }
+                Section {
+                    Button("Delete all projects and scans", role: .destructive) { showingClearConfirm = true }
+                } footer: { Text("Permanent removal. This action cannot be undone.") }
             }
+            .fieldScreen()
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
             .onAppear {
                 calculateStorageUsage()
             }

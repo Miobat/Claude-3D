@@ -2,8 +2,13 @@ import SwiftUI
 
 /// Main app view with tab navigation
 struct ContentView: View {
-    @StateObject private var storageManager = StorageManager()
+    @StateObject private var storageManager: StorageManager
     @State private var selectedTab = 0
+
+    init(storageManager: StorageManager? = nil, initialTab: Int = 0) {
+        _storageManager = StateObject(wrappedValue: storageManager ?? StorageManager())
+        _selectedTab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -36,7 +41,7 @@ struct ContentView: View {
                 .tag(3)
         }
         .environmentObject(storageManager)
-        .tint(.blue)
+        .tint(FieldStyle.accent)
         .safeAreaInset(edge: .top) {
             if storageManager.isLibraryReadOnly {
                 Label("Library needs recovery — saving is disabled. Existing files are preserved.", systemImage: "exclamationmark.shield")

@@ -50,6 +50,16 @@ jobs:
               'SUPPORTED_PLATFORMS=iphoneos iphonesimulator' build \
               2>&1 | tee -a "$RUNNER_TEMP/validation.log"
           done
+      - name: Capture native design previews
+        if: github.ref == 'refs/heads/codex/design-system-upgrade' || github.head_ref == 'codex/design-system-upgrade'
+        run: bash .github/scripts/design-screenshots.sh
+      - name: Keep native design previews
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-design-previews
+          path: ${{ runner.temp }}/design-screenshots
+          if-no-files-found: ignore
       - name: Report compiler errors
         if: failure()
         shell: bash

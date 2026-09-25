@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10038 /* DesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10038; };
+		A10037 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10037; };
 		A10036 /* ExportText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10036; };
 		A10033 /* CoordinateContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10033; };
 		A10034 /* AlignedUSDZ.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10034; };
@@ -44,6 +46,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10038 /* DesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignPreview.swift; sourceTree = "<group>"; };
+		B10037 /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		B10036 /* ExportText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ExportText.swift; sourceTree = "<group>"; };
 		B10033 /* CoordinateContract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/CoordinateContract.swift; sourceTree = "<group>"; };
 		B10034 /* AlignedUSDZ.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/AlignedUSDZ.swift; sourceTree = "<group>"; };
@@ -210,6 +214,8 @@
 			isa = PBXGroup;
 			children = (
 				B10016 /* SettingsView.swift */,
+				B10037 /* DesignSystem.swift */,
+				B10038 /* DesignPreview.swift */,
 				B10022 /* DebugLogView.swift */,
 			);
 			path = Shared;
@@ -307,6 +313,8 @@
 				A10014 /* ProjectListView.swift in Sources */,
 				A10015 /* ProjectDetailView.swift in Sources */,
 				A10016 /* SettingsView.swift in Sources */,
+				A10037 /* DesignSystem.swift in Sources */,
+				A10038 /* DesignPreview.swift in Sources */,
 				A10018 /* MockLiDARScanner.swift in Sources */,
 				A10020 /* AllScansView.swift in Sources */,
 			A10021 /* DebugLogger.swift in Sources */,
