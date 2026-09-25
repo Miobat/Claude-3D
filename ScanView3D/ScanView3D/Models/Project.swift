@@ -9,6 +9,7 @@ struct CapturedPose {
     let intrinsics: simd_float3x3  // for the full-res captured image
     let width: Int
     let height: Int
+    var rangeMask: PhotoRangeMask? = nil
 }
 
 /// Represents a scanning project containing multiple scans

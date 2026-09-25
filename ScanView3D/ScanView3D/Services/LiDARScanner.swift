@@ -52,6 +52,7 @@ class LiDARScanner: NSObject, ObservableObject {
     // Anchors change several times a second, so they are deliberately not
     // @Published: SwiftUI only needs the counts, not a re-render per update.
     private var meshAnchorsByID: [UUID: ARMeshAnchor] = [:]
+    private var retiredMeshSnapshots: [UUID: MeshAnchorSnapshot] = [:]
     private var planeAnchorsByID: [UUID: ARPlaneAnchor] = [:]
     var meshAnchors: [ARMeshAnchor] { Array(meshAnchorsByID.values) }
     var planeAnchors: [ARPlaneAnchor] { Array(planeAnchorsByID.values) }
@@ -97,6 +98,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
     /// Dense coloured points straight from the LiDAR depth sensor.
     private let depthCloud = DepthPointAccumulator()
+    var acceptedDepthFrame: AcceptedDepthFrame? { depthCloud.acceptedFrame }
 
     // Memory limits (MB). "Available" is the app's real remaining budget.
     private let maxTextureMemoryMB: Double = 800
@@ -129,6 +131,11 @@ class LiDARScanner: NSObject, ObservableObject {
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.planeDetection = [.horizontal, .vertical]
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics.insert(.sceneDepth)
+        }
         arSession.run(configuration)
         isPreviewing = true
         scanProgress = "Point camera at area to scan"
@@ -182,11 +189,12 @@ class LiDARScanner: NSObject, ObservableObject {
 
         textureMapper.configure(quality: scanQuality)
 
-        if captureMode == .pointCloud || captureMode == .splatExport {
-            // Budget the point cloud by the memory we can afford (~80 bytes/point).
-            let budget = Int(max(200, Self.availableMemoryMB() - 600) * 1_048_576 * 0.35 / 80)
-            depthCloud.configure(voxelSize: max(0.004, detailMM / 1000), maxPoints: min(4_000_000, budget))
-        }
+        // All modes retain capture-time depth evidence. Raw ARKit anchor extents
+        // and the camera's walked path must never expand the accepted range.
+        let dense = captureMode == .pointCloud || captureMode == .splatExport
+        let budget = Int(max(200, Self.availableMemoryMB() - 600) * 1_048_576 * 0.35 / 100)
+        depthCloud.configure(voxelSize: dense ? max(0.004, detailMM / 1000) : 0.025,
+                             maxPoints: min(dense ? 4_000_000 : 600_000, budget))
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
@@ -301,6 +309,7 @@ class LiDARScanner: NSObject, ObservableObject {
         pendingHighResSaves = 0
         needsRecoveryCheckpoint = false
         meshAnchorsByID.removeAll()
+        retiredMeshSnapshots.removeAll()
         planeAnchorsByID.removeAll()
         vertexCount = 0
         faceCount = 0
@@ -341,7 +350,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
     private func startFrameCapture() {
         stopFrameCapture()
-        frameCaptureTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        frameCaptureTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.captureCurrentFrame()
         }
     }
@@ -401,14 +410,14 @@ class LiDARScanner: NSObject, ObservableObject {
             }
         }
 
-        // Point Cloud / Splat: dense coloured points from the depth sensor.
-        if captureMode == .pointCloud || captureMode == .splatExport {
+        // Commit depth before showing coverage; one worker is in flight at most.
+        do {
             depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5)) { [weak self] count, full in
                 guard let self = self, self.epoch.isCurrent(token) else { return }
                 self.depthPointCount = count
                 if full && !self.pointBudgetReached {
                     self.pointBudgetReached = true
-                    self.scanProgress = "Point budget reached — tap Stop to save (or raise Detail)"
+                    self.scanProgress = "Capture budget reached — tap Stop to save"
                 }
             }
         }
@@ -497,7 +506,8 @@ class LiDARScanner: NSObject, ObservableObject {
         }
         highResCaptureInFlight = true
         let token = epoch.current
-        let request = PhotoRequest(PhotoSample(frame))
+        let request = PhotoRequest(PhotoSample(frame, range: rangeMeters))
+        let photoRange = rangeMeters
         photoWork.enter()
         let finishRequest: (PhotoSample?) -> Void = { [weak self] supplied in
             guard let self, !request.completed else { return }
@@ -514,13 +524,13 @@ class LiDARScanner: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { finishRequest(nil) }
         arSession.captureHighResolutionFrame { [weak self] hiRes, _ in
             guard self != nil else { return }
-            let sample = hiRes.map(PhotoSample.init)
-            DispatchQueue.main.async { finishRequest(sample) }
+            let sample = hiRes.map { PhotoSample($0, range: photoRange) }
+            DispatchQueue.main.async { finishRequest(sample?.rangeMask == nil ? nil : sample) }
         }
     }
 
     private func savePhoto(_ frame: ARFrame) {
-        savePhoto(PhotoSample(frame))
+        savePhoto(PhotoSample(frame, range: rangeMeters))
     }
 
     private struct PhotoSample {
@@ -528,11 +538,13 @@ class LiDARScanner: NSObject, ObservableObject {
         let transform: simd_float4x4
         let intrinsics: simd_float3x3
         let resolution: CGSize
-        init(_ frame: ARFrame) {
+        let rangeMask: PhotoRangeMask?
+        init(_ frame: ARFrame, range: Float) {
             image = frame.capturedImage
             transform = frame.camera.transform
             intrinsics = frame.camera.intrinsics
             resolution = frame.camera.imageResolution
+            rangeMask = CaptureDepthFrame(frame)?.photoMask(range: range)
         }
     }
 
@@ -544,6 +556,10 @@ class LiDARScanner: NSObject, ObservableObject {
 
     private func savePhoto(_ sample: PhotoSample) {
         guard let folder = captureFolderURL, highResFrameCount + pendingHighResSaves < maxHighResFrames else { return }
+        guard let mask = sample.rangeMask, mask.isValid, mask.pixels.contains(255) else {
+            captureHint = "Aim at a surface within range — no reliable in-range depth for this photo"
+            return
+        }
         let index = nextPhotoIndex
         nextPhotoIndex += 1
         let token = epoch.current
@@ -561,7 +577,7 @@ class LiDARScanner: NSObject, ObservableObject {
             intrinsics[0][0] *= sx; intrinsics[2][0] *= sx
             intrinsics[1][1] *= sy; intrinsics[2][1] *= sy
         }
-        let pose = CapturedPose(index: index, transform: sample.transform, intrinsics: intrinsics, width: w, height: h)
+        let pose = CapturedPose(index: index, transform: sample.transform, intrinsics: intrinsics, width: w, height: h, rangeMask: mask)
 
         // JPEG with EXIF focal length — PhotogrammetrySession needs it.
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
@@ -698,9 +714,8 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Copy the Metal buffer bytes on the delegate/main queue before dispatching.
     /// Retaining an ARMeshAnchor alone does not give a worker owned geometry.
     func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
-        let anchors = meshAnchors.map(MeshAnchorSnapshot.init)
-        let path = cameraPath.isEmpty ? [scanOrigin] : cameraPath
-        let range = rangeMeters
+        let anchors = meshAnchors.map(MeshAnchorSnapshot.init) + Array(retiredMeshSnapshots.values)
+        let evidence = depthCloud.surfaceEvidence
         let mode = meshMode
         let wantCameraColors = captureTexture && captureMode == .fast
         let mapper = textureMapper
@@ -712,7 +727,7 @@ class LiDARScanner: NSObject, ObservableObject {
                 DispatchQueue.main.async { completion(cloudMesh) }
                 return
             }
-            var mesh = LiDARScanner.combine(anchors: anchors, path: path, range: range, meshMode: mode)
+            var mesh = LiDARScanner.combine(anchors: anchors, evidence: evidence, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
                 let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals)
                 mesh = MeshData(vertices: m.vertices, normals: m.normals, faces: m.faces, colors: colors,
@@ -724,11 +739,9 @@ class LiDARScanner: NSObject, ObservableObject {
 
     /// Merge anchors into world space, keeping triangles within `range` of the
     /// walked path whose ARKit classification passes the mesh mode.
-    private static func combine(anchors: [MeshAnchorSnapshot], path: [SIMD3<Float>], range: Float,
+    private static func combine(anchors: [MeshAnchorSnapshot], evidence: CapturedSurfaceIndex,
                                 meshMode: ScanSettings.MeshMode) -> MeshData? {
         guard !anchors.isEmpty else { return nil }
-        let vertexIndex = PathRangeIndex(points: path, radius: range)
-        let anchorIndex = PathRangeIndex(points: path, radius: range + 4)
 
         var allVertices: [SIMD3<Float>] = []
         var allNormals: [SIMD3<Float>] = []
@@ -737,8 +750,6 @@ class LiDARScanner: NSObject, ObservableObject {
 
         for anchor in anchors {
             let transform = anchor.transform
-            // Anchor blocks span a few metres; skip ones the camera never came near.
-            guard anchorIndex.contains(transform.position) else { continue }
 
             let geometry = anchor.geometry
             let vertexCount = geometry.vertices.count
@@ -754,7 +765,7 @@ class LiDARScanner: NSObject, ObservableObject {
                 let v = geometry.vertex(at: UInt32(i))
                 let w = transform * SIMD4<Float>(v.x, v.y, v.z, 1)
                 world[i] = SIMD3<Float>(w.x, w.y, w.z)
-                inRange[i] = vertexIndex.contains(world[i])
+                inRange[i] = evidence.contains(world[i])
             }
 
             // ARKit classifies FACES (one UInt8 per triangle), not vertices.
@@ -764,6 +775,10 @@ class LiDARScanner: NSObject, ObservableObject {
                 let indices = geometry.vertexIndicesOf(face: f)
                 guard indices.count == 3,
                       indices.allSatisfy({ Int($0) < vertexCount && inRange[Int($0)] }) else { continue }
+                // Do not bridge a hole / unseen background with a large triangle.
+                let a = world[Int(indices[0])], b = world[Int(indices[1])], c = world[Int(indices[2])]
+                guard evidence.contains((a + b + c) / 3), evidence.contains((a + b) / 2),
+                      evidence.contains((b + c) / 2), evidence.contains((c + a) / 2) else { continue }
 
                 let faceClass = geometry.classificationOf(face: f)
                 guard meshMode.includes(classification: faceClass) else { continue }
@@ -924,11 +939,12 @@ extension LiDARScanner: ARSessionDelegate {
     }
 
     private func handle(anchors: [ARAnchor]) {
-        guard isScanning else { return }
+        guard isScanning, !isPaused else { return }
         var meshChanged = false
         var planesChanged = false
         for anchor in anchors {
             if let mesh = anchor as? ARMeshAnchor {
+                retiredMeshSnapshots.removeValue(forKey: mesh.identifier)
                 meshAnchorsByID[mesh.identifier] = mesh
                 meshChanged = true
             } else if let plane = anchor as? ARPlaneAnchor {
@@ -946,7 +962,10 @@ extension LiDARScanner: ARSessionDelegate {
         guard session === arSession, isScanning else { return }
         var meshChanged = false
         for anchor in anchors {
-            if meshAnchorsByID.removeValue(forKey: anchor.identifier) != nil { meshChanged = true }
+            if let removed = meshAnchorsByID.removeValue(forKey: anchor.identifier) {
+                retiredMeshSnapshots[anchor.identifier] = MeshAnchorSnapshot(removed)
+                meshChanged = true
+            }
             planeAnchorsByID.removeValue(forKey: anchor.identifier)
         }
         if meshChanged { updateMeshCounts() }
@@ -1076,6 +1095,15 @@ final class DepthPointAccumulator {
     private var maxPoints = 2_000_000
     private var full = false
     private var inFlight = false          // main thread
+    private var evidence = CapturedSurfaceIndex()
+    private var coverage: AcceptedDepthFrame?
+
+    var acceptedFrame: AcceptedDepthFrame? {
+        lock.lock(); defer { lock.unlock() }; return coverage
+    }
+    var surfaceEvidence: CapturedSurfaceIndex {
+        lock.lock(); defer { lock.unlock() }; return evidence
+    }
 
     var pointCount: Int {
         lock.lock(); defer { lock.unlock() }
@@ -1094,6 +1122,8 @@ final class DepthPointAccumulator {
         inFlight = false
         lock.lock()
         cells.removeAll()
+        evidence = CapturedSurfaceIndex()
+        coverage = nil
         full = false
         lock.unlock()
     }
@@ -1105,7 +1135,8 @@ final class DepthPointAccumulator {
     /// Main thread. Converts one frame in the background (one at a time, so
     /// ARKit's camera buffers are never held for long).
     func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool) -> Void) {
-        guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return }
+        guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
+              let sensor = CaptureDepthFrame(frame) else { return }
         inFlight = true
         let token = epoch.current
         let depthMap = depthData.depthMap
@@ -1126,18 +1157,26 @@ final class DepthPointAccumulator {
                 self.lock.lock()
                 defer { self.lock.unlock() }
                 let inv = 1 / self.voxelSize
-                for (p, c) in batch {
+                var acceptedDepth = [Float](repeating: 0, count: sensor.depth.count)
+                for (p, c, pixel) in batch {
                     let s = p * inv
                     let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
                     if var cell = self.cells[key] {
-                        cell.position += p; cell.color += c; cell.count += 1
+                        // Keep a real accepted point (not an average that can
+                        // move beyond the range boundary); average only colour.
+                        if cell.count < 1000 { cell.color += c; cell.count += 1 }
                         self.cells[key] = cell
                     } else if self.cells.count < self.maxPoints {
                         self.cells[key] = Cell(position: p, color: c, count: 1)
                     } else {
                         self.full = true
+                        continue
                     }
+                    if self.evidence.insert(p, camera: transform.position, range: maxDistance) {
+                        acceptedDepth[pixel] = sensor.depth[pixel]
+                    } else { self.full = true }
                 }
+                self.coverage = AcceptedDepthFrame(frame: sensor, depth: acceptedDepth)
                 count = self.cells.count
                 isFull = self.full
             }
@@ -1152,7 +1191,7 @@ final class DepthPointAccumulator {
     /// World-space points with camera colours from one frame.
     private static func points(depth: CVPixelBuffer, confidence: CVPixelBuffer?, image: CVPixelBuffer,
                                transform: simd_float4x4, intrinsics: simd_float3x3,
-                               imageSize: SIMD2<Float>, maxDistance: Float) -> [(SIMD3<Float>, SIMD3<Float>)] {
+                               imageSize: SIMD2<Float>, maxDistance: Float) -> [(SIMD3<Float>, SIMD3<Float>, Int)] {
         guard CVPixelBufferGetPixelFormatType(depth) == kCVPixelFormatType_DepthFloat32 else { return [] }
         CVPixelBufferLockBaseAddress(depth, .readOnly)
         CVPixelBufferLockBaseAddress(image, .readOnly)
@@ -1182,11 +1221,11 @@ final class DepthPointAccumulator {
         let fx = intrinsics[0][0] * sx, fy = intrinsics[1][1] * sy
         let cx = intrinsics[2][0] * sx, cy = intrinsics[2][1] * sy
 
-        var out: [(SIMD3<Float>, SIMD3<Float>)] = []
-        out.reserveCapacity(dw * dh / 4)
-        for y in stride(from: 0, to: dh, by: 2) {
+        var out: [(SIMD3<Float>, SIMD3<Float>, Int)] = []
+        out.reserveCapacity(dw * dh)
+        for y in 0..<dh {
             let depthRowPtr = depthBase.advanced(by: y * depthRow).assumingMemoryBound(to: Float32.self)
-            for x in stride(from: 0, to: dw, by: 2) {
+            for x in 0..<dw {
                 let d = depthRowPtr[x]
                 guard d.isFinite, d > 0.1, d <= maxDistance else { continue }
                 if let cb = confBase {
@@ -1198,6 +1237,7 @@ final class DepthPointAccumulator {
                 let u = Float(x) + 0.5, v = Float(y) + 0.5
                 let xc = (u - cx) / fx * d
                 let yc = (v - cy) / fy * d
+                guard CaptureRange.accepts(SIMD3(xc, -yc, -d), metres: maxDistance) else { continue }
                 let w = transform * SIMD4<Float>(xc, -yc, -d, 1)
 
                 var color = SIMD3<Float>(0.7, 0.7, 0.7)
@@ -1209,7 +1249,7 @@ final class DepthPointAccumulator {
                     color = SIMD3<Float>(yy + 1.402 * crv, yy - 0.344136 * cbv - 0.714136 * crv, yy + 1.772 * cbv) / 255
                     color = simd_clamp(color, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
                 }
-                out.append((SIMD3<Float>(w.x, w.y, w.z), color))
+                out.append((SIMD3<Float>(w.x, w.y, w.z), color, y * dw + x))
             }
         }
         return out
@@ -1226,7 +1266,7 @@ final class DepthPointAccumulator {
         vertices.reserveCapacity(snapshot.count)
         colors.reserveCapacity(snapshot.count)
         for cell in snapshot.values {
-            vertices.append(cell.position / cell.count)
+            vertices.append(cell.position)
             let c = cell.color / cell.count
             colors.append(SIMD4<Float>(c.x, c.y, c.z, 1))
         }
@@ -1251,6 +1291,7 @@ enum PoseFile {
         let height: Int
         let transform: [Float]
         let intrinsics: [Float]
+        let rangeMask: PhotoRangeMask?
     }
 
     static func write(_ poses: [CapturedPose], forPhotoFolder folder: URL) throws {
@@ -1259,7 +1300,7 @@ enum PoseFile {
             let k = pose.intrinsics
             return Entry(index: pose.index, width: pose.width, height: pose.height,
                          transform: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
-                         intrinsics: [k.columns.0, k.columns.1, k.columns.2].flatMap { [$0.x, $0.y, $0.z] })
+                         intrinsics: [k.columns.0, k.columns.1, k.columns.2].flatMap { [$0.x, $0.y, $0.z] }, rangeMask: pose.rangeMask)
         }
         try JSONEncoder().encode(entries).write(to: url(forPhotoFolder: folder), options: .atomic)
     }
@@ -1274,10 +1315,10 @@ enum PoseFile {
             guard entry.index >= 0, seen.insert(entry.index).inserted, entry.width > 0, entry.height > 0,
                   entry.transform.count == 16, entry.transform.allSatisfy({ $0.isFinite }),
                   k.count == 9, k.allSatisfy({ $0.isFinite }), k[0] > 0, k[4] > 0,
-                  let transform = Scan.matrix(entry.transform) else { throw CocoaError(.fileReadCorruptFile) }
+                  let transform = Scan.matrix(entry.transform), entry.rangeMask?.isValid != false else { throw CocoaError(.fileReadCorruptFile) }
             return CapturedPose(index: entry.index, transform: transform,
                 intrinsics: simd_float3x3(SIMD3(k[0], k[1], k[2]), SIMD3(k[3], k[4], k[5]), SIMD3(k[6], k[7], k[8])),
-                width: entry.width, height: entry.height)
+                width: entry.width, height: entry.height, rangeMask: entry.rangeMask)
         }
     }
 

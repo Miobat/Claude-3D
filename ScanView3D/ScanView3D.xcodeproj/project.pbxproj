@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10043 /* RangePhotoInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10043; };
+		A10042 /* CaptureFeedback.metal in Sources */ = {isa = PBXBuildFile; fileRef = B10042; };
+		A10041 /* LiveCaptureFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10041; };
+		A10040 /* InteractionGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10040; };
+		A10039 /* CaptureGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10039; };
 		A10038 /* DesignPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10038; };
 		A10037 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10037; };
 		A10036 /* ExportText.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10036; };
@@ -46,6 +51,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10043 /* RangePhotoInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RangePhotoInput.swift; sourceTree = "<group>"; };
+		B10042 /* CaptureFeedback.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = CaptureFeedback.metal; sourceTree = "<group>"; };
+		B10041 /* LiveCaptureFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCaptureFeedback.swift; sourceTree = "<group>"; };
+		B10040 /* InteractionGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/InteractionGeometry.swift; sourceTree = "<group>"; };
+		B10039 /* CaptureGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/CaptureGeometry.swift; sourceTree = "<group>"; };
 		B10038 /* DesignPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignPreview.swift; sourceTree = "<group>"; };
 		B10037 /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		B10036 /* ExportText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ExportText.swift; sourceTree = "<group>"; };
@@ -102,6 +112,8 @@
 			children = (
 				G10002 /* ScanView3D */,
 				B10030 /* LibraryPersistence.swift */,
+				B10040 /* InteractionGeometry.swift */,
+				B10039 /* CaptureGeometry.swift */,
 				B10031 /* CaptureSafety.swift */,
 				B10033 /* CoordinateContract.swift */,
 				B10034 /* AlignedUSDZ.swift */,
@@ -180,6 +192,9 @@
 			isa = PBXGroup;
 			children = (
 				B10006 /* LiDARScanner.swift */,
+				B10043 /* RangePhotoInput.swift */,
+				B10042 /* CaptureFeedback.metal */,
+				B10041 /* LiveCaptureFeedback.swift */,
 				B10019 /* MockLiDARScanner.swift */,
 				B10007 /* MeshProcessor.swift */,
 				B10008 /* OBJExporter.swift */,
@@ -291,6 +306,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10030 /* LibraryPersistence.swift in Sources */,
+				A10043 /* RangePhotoInput.swift in Sources */,
+				A10042 /* CaptureFeedback.metal in Sources */,
+				A10041 /* LiveCaptureFeedback.swift in Sources */,
+				A10040 /* InteractionGeometry.swift in Sources */,
+				A10039 /* CaptureGeometry.swift in Sources */,
 				A10031 /* CaptureSafety.swift in Sources */,
 				A10033 /* CoordinateContract.swift in Sources */,
 				A10034 /* AlignedUSDZ.swift in Sources */,
