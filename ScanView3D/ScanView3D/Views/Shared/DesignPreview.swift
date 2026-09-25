@@ -186,10 +186,29 @@ enum DesignPreview {
         check(command.status == .completed, "Capture feedback GPU command")
         var result = [SIMD4<Float>](repeating: .zero, count: 256)
         result.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+        // Compare against the SAME GPU sampler's no-effect output. UNorm texture
+        // filtering precision differs from a CPU float conversion across GPUs.
+        guard let baseline = texture(.rgba32Float), let referenceCommand = queue.makeCommandBuffer(),
+              let referenceEncoder = referenceCommand.makeComputeCommandEncoder() else {
+            check(false, "Capture feedback reference command"); return
+        }
+        uniforms.parameters.x = -1
+        referenceEncoder.setComputePipelineState(pipeline)
+        referenceEncoder.setTexture(source, index: 0); referenceEncoder.setTexture(baseline, index: 1)
+        referenceEncoder.setTexture(depth, index: 2); referenceEncoder.setTexture(accepted, index: 3)
+        referenceEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        referenceEncoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        referenceEncoder.endEncoding(); referenceCommand.commit(); referenceCommand.waitUntilCompleted()
+        check(referenceCommand.status == .completed, "Capture feedback reference GPU command")
+        var reference = [SIMD4<Float>](repeating: .zero, count: 256)
+        reference.withUnsafeMutableBytes { baseline.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+        func unchanged(_ i: Int) -> Bool {
+            simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
+        }
         check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
         check(result[8 * 16 + 5].y < 0.4 && result[8 * 16 + 5].z < 0.7, "Out-of-range surface is muted without mint coverage")
-        check(simd_distance(result[8 * 16 + 9], colors[0]) < 0.001, "Unknown depth does not invent coverage")
-        check(simd_distance(result[8 * 16 + 13], colors[0]) < 0.001, "Uncommitted depth does not invent coverage")
+        check(unchanged(8 * 16 + 9), "Unknown depth does not invent coverage: actual \(result[8 * 16 + 9]), baseline \(reference[8 * 16 + 9])")
+        check(unchanged(8 * 16 + 13), "Uncommitted depth does not invent coverage: actual \(result[8 * 16 + 13]), baseline \(reference[8 * 16 + 13])")
     }
 }
 
