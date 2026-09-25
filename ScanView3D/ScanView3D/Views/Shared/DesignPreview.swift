@@ -4,6 +4,7 @@ import simd
 import SceneKit
 import CoreVideo
 import Metal
+import ImageIO
 
 /// CI-only visual fixtures. Never compiled into the device/TestFlight app.
 /// Uses a new temporary library, never the user's Documents library.
@@ -116,6 +117,18 @@ enum DesignPreview {
             CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pose-check-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let maskURL = directory.appendingPathComponent("mask.png")
+            try RangePhotoInput.writeMask(mask, width: 8, height: 8, to: maskURL)
+            if let source = CGImageSourceCreateWithURL(maskURL as CFURL, nil),
+               let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+               let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) {
+                check(image.width == 8 && image.height == 8 && image.bitsPerPixel == 8 &&
+                      image.colorSpace?.model == .monochrome, "Exported range PNG is full-resolution single-channel grayscale")
+                let stride = image.bytesPerRow
+                check(bytes[0] == 255 && bytes[7] == 0 && bytes[7 * stride] == 0 && bytes[7 * stride + 7] == 255 &&
+                      (0..<8).allSatisfy { y in (0..<8).allSatisfy { x in bytes[y * stride + x] == 0 || bytes[y * stride + x] == 255 } },
+                      "Exported range PNG preserves binary values and orientation")
+            } else { check(false, "Exported range PNG can be decoded") }
             let folder = directory.appendingPathComponent("photos")
             try PoseFile.write([], forPhotoFolder: folder, requireRangeMasks: true)
             check(try PoseFile.requiresRangeMasks(forPhotoFolder: folder), "Empty capture still requires masks")

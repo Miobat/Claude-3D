@@ -30,9 +30,18 @@ enum RangePhotoInput {
 
     static func writeMask(_ mask: PhotoRangeMask, width: Int, height: Int, to url: URL) throws {
         let buffer = try maskBuffer(mask, width: width, height: height)
-        let image = CIImage(cvPixelBuffer: buffer)
-        let context = CIContext()
-        guard let cg = context.createCGImage(image, from: image.extent),
+        // External trainers require a single-channel PNG. A default CIContext
+        // can expand the mask to RGB, so preserve the original grayscale bytes.
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw CocoaError(.coderInvalidValue) }
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        let pixels = Data(bytes: base, count: stride * height)
+        guard let provider = CGDataProvider(data: pixels as CFData),
+              let cg = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8,
+                bytesPerRow: stride, space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
               let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
