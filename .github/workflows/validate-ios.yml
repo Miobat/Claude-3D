@@ -51,7 +51,7 @@ jobs:
               2>&1 | tee -a "$RUNNER_TEMP/validation.log"
           done
       - name: Capture native design previews
-        if: github.ref == 'refs/heads/codex/design-system-upgrade' || github.head_ref == 'codex/design-system-upgrade'
+        if: contains(fromJSON('["refs/heads/codex/design-system-upgrade", "refs/heads/codex/live-capture-navigation"]'), github.ref) || contains(fromJSON('["codex/design-system-upgrade", "codex/live-capture-navigation"]'), github.head_ref)
         run: bash .github/scripts/design-screenshots.sh
       - name: Keep native design previews
         if: always()
@@ -64,7 +64,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null | head -20 | while IFS= read -r line; do
+          { grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null || true; } | head -20 | while IFS= read -r line; do
             echo "::error::$line"
           done
       - name: Keep compiler log

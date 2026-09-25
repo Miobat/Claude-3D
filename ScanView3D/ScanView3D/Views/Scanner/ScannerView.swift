@@ -60,7 +60,7 @@ struct ScannerView: View {
             SimulatorScanView(scanner: scanner)
                 .ignoresSafeArea()
             #else
-            ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay)
+            ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay, previewRange: settings.rangeValue)
                 .ignoresSafeArea()
             #endif
 
@@ -374,7 +374,7 @@ struct ScannerView: View {
                     Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
                         .accessibilityLabel("Capture range in metres")
                 } header: { Text("Range") } footer: {
-                    Text("Keeps surfaces within this distance of your walking path.")
+                    Text("Distance from the phone. Blurred areas are out of range; mint shows committed LiDAR coverage. Unknown depth is not captured.")
                 }
                 if settings.captureMode.usesDetail {
                     Section {
@@ -1008,8 +1008,9 @@ struct ScannerView: View {
     }
 
     private func saveMeshFlow(project: Project) {
-        // Room Shell mode prefers clean detected planes; otherwise use the mesh.
-        guard let rawMesh = (settings.meshMode == .area ? scanner.getPlaneBasedMeshData() : nil) ?? pendingMesh else {
+        // Detected planes extend beyond observed surfaces and bypass the range
+        // boundary. Room Shell now uses the same accepted, classified mesh.
+        guard let rawMesh = pendingMesh else {
             failSave("No scan data available")
             return
         }
@@ -1025,12 +1026,12 @@ struct ScannerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                var meshData = MeshProcessor.postProcess(rawMesh, level: level)
+                var meshData = MeshProcessor.postProcess(rawMesh, level: level, preservePositions: true)
 
                 // DETAIL slider: simplify to about one vertex per chosen spacing, so
                 // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if detailMeters > 0.005 {
-                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters)
+                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters, preservePositions: true)
                 }
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)

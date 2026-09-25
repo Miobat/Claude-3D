@@ -31,6 +31,8 @@ struct ModelViewerView: View {
 
     // Measuring
     @StateObject private var session = MeasurementSession()
+    @StateObject private var navigation = WalkNavigation()
+    @Environment(\.scenePhase) private var scenePhase
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
     @State private var showingClearMeasurements = false
     @State private var measurePanelHeight: CGFloat = 200
@@ -87,7 +89,8 @@ struct ModelViewerView: View {
                 showBoundingBox: $showBoundingBox,
                 vizMode: $vizMode,
                 activeTool: $activeTool,
-                session: session
+                session: session,
+                navigation: navigation
             )
             .id(reloadToken)
             .ignoresSafeArea(edges: .bottom)
@@ -127,7 +130,18 @@ struct ModelViewerView: View {
 
                     Spacer(minLength: 0)
 
-                    if showJoysticks { joystickOverlay }
+                    if navigation.enabled {
+                        HStack(spacing: 10) {
+                            Image(systemName: "figure.walk")
+                            Text(navigation.message).font(.caption).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Button("Exit") { navigation.enabled = false }
+                                .font(.caption.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+                        }
+                        .padding(.horizontal, 12).fieldPanel().padding(.horizontal, 12)
+                        .accessibilityIdentifier("walkStatus")
+                    }
+                    if showJoysticks || navigation.isWalking { joystickOverlay }
 
                     // Bottom toolbar: More | Process | Measure | Share
                     if compact && activeTool == .measure {
@@ -204,6 +218,8 @@ struct ModelViewerView: View {
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
+            if DesignPreview.screen == "joysticks" { showJoysticks = true }
+            if DesignPreview.screen == "walk" { navigation.enabled = true }
             #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
@@ -212,6 +228,24 @@ struct ModelViewerView: View {
         }
         .onChange(of: activeTool) { _, tool in
             session.isActive = (tool == .measure)
+            if tool == .measure { navigation.enabled = false }
+        }
+        .onChange(of: navigation.enabled) { _, enabled in
+            stopNavigationInputs()
+            navigation.isWalking = false
+            if enabled {
+                activeTool = .orbit
+                cameraProjection = .perspective
+                navigation.message = "Tap the scanned ground to start · Eye height 1.8 m"
+            }
+        }
+        .onChange(of: showJoysticks) { _, _ in stopNavigationInputs() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { stopNavigationInputs() }
+        }
+        .onDisappear {
+            stopNavigationInputs()
+            navigation.enabled = false
         }
         .confirmationDialog("Delete all measurements on this scan?", isPresented: $showingClearMeasurements,
                             titleVisibility: .visible) {
@@ -421,6 +455,17 @@ struct ModelViewerView: View {
 
             Spacer()
 
+            if !navigation.enabled {
+                VerticalPanSlider { value in
+                    NotificationCenter.default.post(name: .joystickElevate, object: nil, userInfo: ["dy": value])
+                }
+            } else {
+                Image(systemName: "figure.walk").foregroundStyle(FieldStyle.mint)
+                    .frame(width: 44, height: 100).accessibilityLabel("Height locked to 1.8 metres")
+            }
+
+            Spacer()
+
             VirtualJoystick(label: "Look") { dx, dy in
                 NotificationCenter.default.post(name: .joystickLook, object: nil, userInfo: ["dx": dx, "dy": dy])
             }
@@ -565,6 +610,11 @@ struct ModelViewerView: View {
                 Button { showingMoreMenu = true } label: {
                     viewerAction("Tools", icon: "slider.horizontal.3")
                 }
+                Button { navigation.enabled.toggle() } label: {
+                    viewerAction(navigation.enabled ? "Exit Walk" : "Walk", icon: "figure.walk", selected: navigation.enabled)
+                }
+                .disabled(!scan.hasKnownScale)
+                .accessibilityHint("Choose a ground point, then explore at 1.8 metres eye height")
                 Button {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
                         activeTool = activeTool == .measure ? .orbit : .measure
@@ -596,6 +646,10 @@ struct ModelViewerView: View {
         .background(selected ? FieldStyle.mint : FieldStyle.panel,
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 1))
+    }
+
+    private func stopNavigationInputs() {
+        NotificationCenter.default.post(name: .stopViewerNavigation, object: nil)
     }
 
     /// Re-share the Splat bundle zip that was saved with this scan.
@@ -764,9 +818,15 @@ struct VirtualJoystick: View {
                         .onEnded { _ in isDragging = false; knobOffset = .zero; onMove(0, 0) }
                 )
 
-            Text(label).font(.system(size: 8, weight: .medium)).foregroundColor(.white.opacity(0.4))
+            Text(label).font(.caption2.weight(.medium)).foregroundColor(.white.opacity(0.7))
                 .offset(y: joystickRadius + 10)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label) joystick")
+        .onChange(of: dragOffset) { _, offset in
+            if offset == .zero { isDragging = false; onMove(0, 0) }
+        }
+        .onDisappear { isDragging = false; onMove(0, 0) }
     }
 
     private var effectiveOffset: CGSize { isDragging ? clampToRadius(dragOffset) : .zero }
@@ -784,10 +844,41 @@ struct VirtualJoystick: View {
 
 // MARK: - Supporting Types
 
+/// Spring-centred rate control: drag up/down to elevate, release to stop.
+/// Small visual track, but a full 44-point-wide touch target.
+private struct VerticalPanSlider: View {
+    var onMove: (CGFloat) -> Void
+    @GestureState private var offset: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 5) {
+            Image(systemName: "chevron.up").font(.caption2)
+            ZStack {
+                Capsule().fill(.white.opacity(0.18)).frame(width: 5, height: 62)
+                Capsule().fill(FieldStyle.mint).frame(width: 26, height: 16).offset(y: offset)
+            }.frame(width: 44, height: 70).contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .updating($offset) { value, state, _ in state = min(26, max(-26, value.translation.height)) }
+                    .onChanged { value in onMove(-min(26, max(-26, value.translation.height)) / 26) }
+                    .onEnded { _ in onMove(0) })
+            Image(systemName: "chevron.down").font(.caption2)
+        }
+        .foregroundStyle(.white.opacity(0.8))
+        .frame(width: 44, height: 100)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Pan vertically")
+        .accessibilityHint("Slide up or down; release to stop. Two-finger pan is also available.")
+        .onChange(of: offset) { _, value in if value == 0 { onMove(0) } }
+        .onDisappear { onMove(0) }
+    }
+}
+
 extension Notification.Name {
     static let resetCameraView = Notification.Name("resetCameraView")
     static let joystickMove = Notification.Name("joystickMove")
     static let joystickLook = Notification.Name("joystickLook")
+    static let joystickElevate = Notification.Name("joystickElevate")
+    static let stopViewerNavigation = Notification.Name("stopViewerNavigation")
     static let setCameraView = Notification.Name("setCameraView")
     static let setCameraProjection = Notification.Name("setCameraProjection")
     static let setVisualizationMode = Notification.Name("setVisualizationMode")

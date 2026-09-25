@@ -3,194 +3,75 @@ import SwiftUI
 import ARKit
 import RealityKit
 
-/// UIViewRepresentable wrapper for ARView used in scanning
 struct ARScannerViewRepresentable: UIViewRepresentable {
     @ObservedObject var scanner: LiDARScanner
     @Binding var showMeshOverlay: Bool
+    var previewRange: Float
 
     func makeUIView(context: Context) -> ARView {
-        let arView = ARView(frame: .zero)
-        arView.session = scanner.arSession
-        arView.automaticallyConfigureSession = false
-
-        arView.debugOptions = []
-        arView.environment.sceneUnderstanding.options = [.occlusion, .receivesLighting]
-        arView.renderOptions = [.disableMotionBlur]
-
-        context.coordinator.arView = arView
-        context.coordinator.scanner = scanner
-        context.coordinator.startUpdateLoop()
-
-        // Apple's standard "move your iPhone" guidance while tracking starts up
-        // or is lost; hides itself once tracking is good.
+        let view = ARView(frame: .zero)
+        view.session = scanner.arSession
+        view.automaticallyConfigureSession = false
+        view.environment.sceneUnderstanding.options = []
+        view.renderOptions = [.disableMotionBlur]
+        let coordinator = context.coordinator
+        coordinator.view = view; coordinator.scanner = scanner
+        if let feedback = coordinator.feedback {
+            view.renderCallbacks.postProcess = { [weak feedback] context in feedback?.render(context) }
+        } else {
+            DispatchQueue.main.async {
+                scanner.scanError = "Live coverage preview could not start. Capture range filtering still applies. Reopen the scanner to retry."
+            }
+        }
+        coordinator.start()
         let coaching = ARCoachingOverlayView()
         coaching.session = scanner.arSession
         coaching.goal = .tracking
         coaching.activatesAutomatically = true
-        coaching.translatesAutoresizingMaskIntoConstraints = false
-        arView.addSubview(coaching)
-        NSLayoutConstraint.activate([
-            coaching.topAnchor.constraint(equalTo: arView.topAnchor),
-            coaching.bottomAnchor.constraint(equalTo: arView.bottomAnchor),
-            coaching.leadingAnchor.constraint(equalTo: arView.leadingAnchor),
-            coaching.trailingAnchor.constraint(equalTo: arView.trailingAnchor)
-        ])
-
-        return arView
+        coaching.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        coaching.frame = view.bounds
+        view.addSubview(coaching)
+        return view
     }
 
-    func updateUIView(_ arView: ARView, context: Context) {
-        if arView.session !== scanner.arSession {
-            context.coordinator.clearAllMesh()
-            arView.session = scanner.arSession
-            for case let coaching as ARCoachingOverlayView in arView.subviews { coaching.session = scanner.arSession }
+    func updateUIView(_ view: ARView, context: Context) {
+        if view.session !== scanner.arSession {
+            context.coordinator.feedback?.reset()
+            view.session = scanner.arSession
+            for case let coaching as ARCoachingOverlayView in view.subviews { coaching.session = scanner.arSession }
         }
-        context.coordinator.showMeshOverlay = showMeshOverlay
-        if !showMeshOverlay {
-            context.coordinator.clearAllMesh()
-        }
+        context.coordinator.showCoverage = showMeshOverlay
+        context.coordinator.previewRange = previewRange
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    static func dismantleUIView(_ view: ARView, coordinator: Coordinator) {
+        coordinator.link?.invalidate(); coordinator.link = nil
+        view.renderCallbacks.postProcess = nil
+        coordinator.feedback?.reset()
     }
 
-    static func dismantleUIView(_ uiView: ARView, coordinator: Coordinator) {
-        coordinator.stopUpdateLoop()
-        coordinator.clearAllMesh()
-        coordinator.arView = nil
-        coordinator.scanner = nil
-    }
+    final class Coordinator: NSObject {
+        weak var view: ARView?
+        weak var scanner: LiDARScanner?
+        let feedback = LiveCaptureFeedback()
+        var showCoverage = true
+        var previewRange: Float = 3
+        var link: CADisplayLink?
 
-    class Coordinator {
-        var arView: ARView?
-        var scanner: LiDARScanner?
-        var showMeshOverlay = true
-
-        // Track mesh entities and their geometry version (vertex count as proxy)
-        private var meshEntities: [UUID: AnchorEntity] = [:]
-        private var meshVersions: [UUID: Int] = [:]
-        private var displayLink: CADisplayLink?
-        private var frameCount = 0
-
-        func startUpdateLoop() {
-            displayLink?.invalidate()
-            displayLink = CADisplayLink(target: self, selector: #selector(updateFrame))
-            displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 4, maximum: 10, preferred: 6)
-            displayLink?.add(to: .main, forMode: .common)
+        func start() {
+            link = CADisplayLink(target: self, selector: #selector(update))
+            link?.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+            link?.add(to: .main, forMode: .common)
         }
 
-        func stopUpdateLoop() {
-            displayLink?.invalidate()
-            displayLink = nil
-        }
-
-        deinit {
-            displayLink?.invalidate()
-        }
-
-        @objc private func updateFrame() {
-            guard showMeshOverlay, let arView = arView, let scanner = scanner,
-                  scanner.isScanning else { return }
-
-            frameCount += 1
-            guard frameCount % 2 == 0 else { return }
-
-            let anchors = scanner.meshAnchors
-            var activeIDs = Set<UUID>()
-            // Building meshes is main-thread work; spread it over frames so the
-            // camera feed stays smooth when many anchors change at once.
-            var rebuildBudget = 3
-
-            for anchor in anchors {
-                let id = anchor.identifier
-                activeIDs.insert(id)
-
-                let currentVertexCount = anchor.geometry.vertices.count
-
-                // Check if this anchor needs a new mesh entity:
-                // - Never created before, OR
-                // - Geometry changed (vertex count differs from last build)
-                let needsRebuild: Bool
-                if meshEntities[id] == nil {
-                    needsRebuild = true
-                } else if let lastVersion = meshVersions[id], lastVersion != currentVertexCount {
-                    needsRebuild = true
-                } else {
-                    needsRebuild = false
-                }
-
-                if needsRebuild && rebuildBudget > 0 {
-                    rebuildBudget -= 1
-                    // Remove old entity if exists
-                    if let old = meshEntities[id] {
-                        old.removeFromParent()
-                    }
-
-                    // Build fresh mesh entity with current geometry
-                    if let entity = buildMeshEntity(from: anchor) {
-                        let anchorEntity = AnchorEntity(world: anchor.transform)
-                        anchorEntity.addChild(entity)
-                        arView.scene.addAnchor(anchorEntity)
-                        meshEntities[id] = anchorEntity
-                        meshVersions[id] = currentVertexCount
-                    }
-                } else if let existing = meshEntities[id] {
-                    // ARKit refines anchor positions over time; keep the overlay aligned.
-                    existing.transform = Transform(matrix: anchor.transform)
-                }
-            }
-
-            // Remove anchors that no longer exist
-            let stale = meshEntities.keys.filter { !activeIDs.contains($0) }
-            for id in stale {
-                meshEntities[id]?.removeFromParent()
-                meshEntities.removeValue(forKey: id)
-                meshVersions.removeValue(forKey: id)
-            }
-        }
-
-        func clearAllMesh() {
-            for (_, entity) in meshEntities {
-                entity.removeFromParent()
-            }
-            meshEntities.removeAll()
-            meshVersions.removeAll()
-        }
-
-        private func buildMeshEntity(from anchor: ARMeshAnchor) -> ModelEntity? {
-            let geometry = anchor.geometry
-            var descriptor = MeshDescriptor(name: "live_\(anchor.identifier.uuidString.prefix(8))")
-
-            var positions: [SIMD3<Float>] = []
-            for i in 0..<geometry.vertices.count {
-                positions.append(geometry.vertex(at: UInt32(i)))
-            }
-            descriptor.positions = MeshBuffers.Positions(positions)
-
-            var normals: [SIMD3<Float>] = []
-            for i in 0..<geometry.normals.count {
-                normals.append(geometry.normal(at: UInt32(i)))
-            }
-            descriptor.normals = MeshBuffers.Normals(normals)
-
-            var indices: [UInt32] = []
-            for f in 0..<geometry.faces.count {
-                let faceIndices = geometry.vertexIndicesOf(face: f)
-                indices.append(contentsOf: faceIndices)
-            }
-            descriptor.primitives = .triangles(indices)
-
-            do {
-                let meshResource = try MeshResource.generate(from: [descriptor])
-                var material = SimpleMaterial()
-                material.color = .init(tint: UIColor(red: 0.1, green: 0.9, blue: 0.3, alpha: 0.4))
-                material.metallic = .float(0.0)
-                material.roughness = .float(0.9)
-                return ModelEntity(mesh: meshResource, materials: [material])
-            } catch {
-                return nil
-            }
+        @objc private func update() {
+            guard let view, let scanner, let frame = view.session.currentFrame,
+                  view.bounds.width > 0, view.bounds.height > 0 else { return }
+            feedback?.update(frame: frame, accepted: scanner.acceptedDepthFrame, viewport: view.bounds.size,
+                orientation: view.window?.windowScene?.interfaceOrientation ?? .portrait,
+                range: scanner.isScanning ? scanner.rangeMeters : previewRange,
+                showCoverage: showCoverage && scanner.isScanning)
         }
     }
 }

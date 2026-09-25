@@ -9,6 +9,7 @@ struct CapturedPose {
     let intrinsics: simd_float3x3  // for the full-res captured image
     let width: Int
     let height: Int
+    var rangeMask: PhotoRangeMask? = nil
 }
 
 /// Represents a scanning project containing multiple scans
@@ -326,7 +327,7 @@ struct ScanSettings: Codable, Equatable {
             switch self {
             case .free: return "Everything the LiDAR sees."
             case .structure: return "Walls, floor, ceiling, doors, windows and furniture. Drops clutter."
-            case .area: return "Only floor, walls and ceiling, as clean flat surfaces."
+            case .area: return "Structural surfaces only, clipped to the scanned range."
             }
         }
 
