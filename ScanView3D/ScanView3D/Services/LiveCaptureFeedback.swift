@@ -146,13 +146,12 @@ final class LiveCaptureFeedback {
 
     func render(_ context: ARView.PostProcessContext) {
         lock.lock(); let currentState = state; lock.unlock()
-        guard let state = currentState else {
-            if let encoder = context.commandBuffer.makeBlitCommandEncoder() {
-                encoder.copy(from: context.sourceColorTexture, to: context.targetColorTexture)
-                encoder.endEncoding()
-            }
-            return
-        }
+        // Source and destination may have different pixel formats; a blit-copy
+        // is not a valid passthrough. Let the shader do the conversion instead.
+        let state = currentState ?? State(current: context.sourceColorTexture, accepted: context.sourceColorTexture,
+            uniforms: Uniforms(cameraToWorld: matrix_identity_float4x4, worldToAcceptedCamera: matrix_identity_float4x4,
+                displayToImage: matrix_identity_float3x3, intrinsics: .zero, acceptedIntrinsics: .zero,
+                parameters: SIMD4(-1, 0, 1, 1)))
         guard let encoder = context.commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(context.sourceColorTexture, index: 0)

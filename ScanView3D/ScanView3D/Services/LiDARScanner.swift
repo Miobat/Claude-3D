@@ -1097,9 +1097,10 @@ final class DepthPointAccumulator {
     private var inFlight = false          // main thread
     private var evidence = CapturedSurfaceIndex()
     private var coverage: AcceptedDepthFrame?
+    private let coverageLock = NSLock()
 
     var acceptedFrame: AcceptedDepthFrame? {
-        lock.lock(); defer { lock.unlock() }; return coverage
+        coverageLock.lock(); defer { coverageLock.unlock() }; return coverage
     }
     var surfaceEvidence: CapturedSurfaceIndex {
         lock.lock(); defer { lock.unlock() }; return evidence
@@ -1123,7 +1124,7 @@ final class DepthPointAccumulator {
         lock.lock()
         cells.removeAll()
         evidence = CapturedSurfaceIndex()
-        coverage = nil
+        coverageLock.lock(); coverage = nil; coverageLock.unlock()
         full = false
         lock.unlock()
     }
@@ -1176,7 +1177,9 @@ final class DepthPointAccumulator {
                         acceptedDepth[pixel] = sensor.depth[pixel]
                     } else { self.full = true }
                 }
+                self.coverageLock.lock()
                 self.coverage = AcceptedDepthFrame(frame: sensor, depth: acceptedDepth)
+                self.coverageLock.unlock()
                 count = self.cells.count
                 isFull = self.full
             }

@@ -83,7 +83,7 @@ struct CapturedSurfaceIndex {
         for dx in -reach...reach {
             for dy in -reach...reach {
                 for dz in -reach...reach {
-                    guard let s = cells[k + SIMD3(dx, dy, dz)],
+                    guard let s = cells[k &+ SIMD3(dx, dy, dz)],
                           simd_distance_squared(s.point, p) <= tolerance * tolerance,
                           simd_distance_squared(s.camera, p) <= s.range * s.range else { continue }
                     return true

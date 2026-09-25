@@ -19,6 +19,7 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
     float2 size = float2(output.get_width(), output.get_height());
     float2 uv = (float2(gid) + 0.5) / size;
     float4 color = source.sample(linearSampler, uv);
+    if (u.parameters.x <= 0) { output.write(color, gid); return; }
     float2 imageUV = (u.displayToImage * float3(uv, 1)).xy;
     float d = depth.sample(nearestSampler, imageUV).r;
     if (!isfinite(d) || d <= 0.1 || any(imageUV < 0) || any(imageUV > 1)) {
