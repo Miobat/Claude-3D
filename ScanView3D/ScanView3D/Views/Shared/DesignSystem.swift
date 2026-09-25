@@ -57,6 +57,7 @@ struct FieldButtonStyle: ButtonStyle {
 }
 
 struct FieldHero: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
     let eyebrow: String
     let title: String
     let subtitle: String
@@ -64,6 +65,7 @@ struct FieldHero: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if !typeSize.isAccessibilitySize {
             HStack {
                 Label(eyebrow.uppercased(), systemImage: icon)
                     .font(.caption.weight(.bold)).tracking(1.6)
@@ -72,10 +74,13 @@ struct FieldHero: View {
                 Image(systemName: "circle.hexagongrid")
                     .font(.title2).foregroundStyle(FieldStyle.mint.opacity(0.65))
             }
-            Text(title).font(.title.weight(.semibold)).tracking(-0.7)
+            }
+            Text(title).font(typeSize.isAccessibilitySize ? .headline : .title.weight(.semibold)).tracking(-0.7)
                 .fixedSize(horizontal: false, vertical: true)
+            if !typeSize.isAccessibilitySize {
             Text(subtitle).font(.subheadline).foregroundStyle(.white.opacity(0.75))
                 .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -172,7 +177,7 @@ struct FieldIcon: View {
     let symbol: String
     var selected = false
     var body: some View {
-        Image(systemName: symbol).font(.body.weight(.medium))
+        Image(systemName: symbol).font(.system(size: 18, weight: .medium))
             .frame(minWidth: 46, minHeight: 46)
             .foregroundStyle(selected ? FieldStyle.ink : .white)
             .background(selected ? FieldStyle.mint : FieldStyle.panel,

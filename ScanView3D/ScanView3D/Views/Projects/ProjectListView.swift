@@ -3,6 +3,7 @@ import SwiftUI
 /// Main project list view showing all scanning projects
 struct ProjectListView: View {
     @EnvironmentObject var storageManager: StorageManager
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingNewProject = false
     @State private var newProjectName = ""
     @State private var showingImporter = false
@@ -121,7 +122,7 @@ struct ProjectListView: View {
     }
 
     private var libraryHero: some View {
-        FieldHero(eyebrow: "Workspace", title: "Your world.\nIn three dimensions.",
+        FieldHero(eyebrow: "Workspace", title: typeSize.isAccessibilitySize ? "Your projects" : "Your world.\nIn three dimensions.",
                   subtitle: "Capture, organize, and explore your spaces.", icon: "square.stack.3d.up")
     }
 
@@ -131,11 +132,17 @@ struct ProjectListView: View {
         List {
             Section {
                 libraryHero.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                if typeSize.isAccessibilitySize {
+                    Text("\(storageManager.projects.count) projects · \(storageManager.projects.reduce(0) { $0 + $1.scanCount }) scans · On device")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
+                } else {
                 HStack(spacing: 16) {
                     StatItem(label: "Projects", value: "\(storageManager.projects.count)", icon: "folder")
                     StatItem(label: "Scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })", icon: "cube")
                     StatItem(label: "Storage", value: "On device", icon: "iphone")
                 }.padding(.vertical, 8)
+                }
             }.listRowSeparator(.hidden)
             Section("Recently updated") {
             if sortedProjects.isEmpty {

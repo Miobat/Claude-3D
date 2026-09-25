@@ -46,6 +46,7 @@ struct ScannerView: View {
 
     @State private var showingCaptureSettings = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingError = false
     @State private var errorMessage = ""
     @State private var showMeshOverlay = true
@@ -64,35 +65,46 @@ struct ScannerView: View {
             #endif
 
             GeometryReader { geometry in
-            VStack(spacing: 10) {
-                topStatusBar
-                if settings.alignToNorth, scanner.isScanning {
-                    Text(location.status).font(.caption).foregroundStyle(.white).padding(10).fieldPanel()
-                }
-                if !scanner.isScanning, !recovery.drafts.isEmpty {
-                    Button("Unfinished captures (\(recovery.drafts.count))") { showingRecovery = true }
-                        .buttonStyle(.bordered).tint(FieldStyle.mint).padding(.horizontal, 20)
-                        .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
-                }
-                if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
-                    trackingBanner(warning)
-                }
-                Spacer(minLength: 8)
-                if scanner.isScanning {
-                    scanCapacityGauge
-                    scanningInfoBar
-                } else {
-                    ScrollView {
-                        prescanControls
-                            .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
+                Group {
+                    if geometry.size.width > geometry.size.height {
+                        HStack(alignment: .top, spacing: 0) {
+                            VStack(spacing: 8) {
+                                topStatusBar
+                                statusMessages
+                                Spacer(minLength: 0)
+                            }
+                            VStack(spacing: 8) {
+                                if scanner.isScanning {
+                                    Spacer(minLength: 0)
+                                    captureDashboard
+                                } else {
+                                    ScrollView { prescanControls }
+                                        .scrollIndicators(.hidden)
+                                        .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
+                                }
+                                bottomControls
+                            }
+                            .frame(width: min(400, geometry.size.width * 0.48))
+                        }
+                    } else {
+                        VStack(spacing: 10) {
+                            topStatusBar
+                            statusMessages
+                            Spacer(minLength: 8)
+                            if scanner.isScanning {
+                                captureDashboard
+                            } else {
+                                ScrollView { prescanControls }
+                                    .scrollIndicators(.hidden)
+                                    .frame(maxHeight: min(370, geometry.size.height * 0.62))
+                                    .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
+                            }
+                            bottomControls
+                        }
+                        .frame(maxWidth: 600).frame(maxWidth: .infinity)
                     }
-                    .scrollIndicators(.hidden)
-                    .frame(maxHeight: min(370, geometry.size.height * 0.62))
                 }
-                bottomControls
-            }
-            .frame(maxWidth: 600).frame(maxWidth: .infinity)
-            .environment(\.colorScheme, .dark)
+                .environment(\.colorScheme, .dark)
             }
 
             #if !targetEnvironment(simulator)
@@ -107,6 +119,9 @@ struct ScannerView: View {
             }
             scanner.startPreview()
             recovery.refresh()
+            #if DEBUG && targetEnvironment(simulator)
+            if DesignPreview.screen == "capture-settings" { showingCaptureSettings = true }
+            #endif
             if activeDraft != nil, !scanner.isScanning { showingSaveDialog = true }
         }
         .onDisappear {
@@ -162,19 +177,43 @@ struct ScannerView: View {
         }
     }
 
+    @ViewBuilder private var statusMessages: some View {
+        if settings.alignToNorth, scanner.isScanning {
+            Text(location.status).font(.caption).foregroundStyle(.white).padding(10).fieldPanel()
+        }
+        if !scanner.isScanning, !recovery.drafts.isEmpty {
+            Button("Unfinished captures (\(recovery.drafts.count))") { showingRecovery = true }
+                .buttonStyle(.bordered).tint(FieldStyle.mint).padding(.horizontal, 20)
+                .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
+        }
+        if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
+            trackingBanner(warning)
+        }
+    }
+
+    private var captureDashboard: some View {
+        VStack(spacing: 8) {
+            scanCapacityGauge
+            scanningInfoBar
+        }
+        .padding(.top, 12).fieldPanel().padding(.horizontal, 16)
+    }
+
     // MARK: - Top Status Bar
 
     private var topStatusBar: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 7) {
+                if scanner.isScanning || !typeSize.isAccessibilitySize {
                 HStack(spacing: 8) {
                     Circle().fill(scanner.isScanning ? (scanner.isPaused ? Color.orange : FieldStyle.mint) : Color.white.opacity(0.5))
                         .frame(width: 7, height: 7)
                     Text(scanner.isScanning ? (scanner.isPaused ? "PAUSED" : "CAPTURING") : "SCANVIEW 3D")
                         .font(.caption.weight(.bold)).tracking(2)
                 }.foregroundStyle(FieldStyle.mint)
-                Text(scanner.isScanning ? scanner.scanProgress : "Capture your world")
-                    .font(scanner.isScanning ? .subheadline.weight(.medium) : .title2.weight(.semibold))
+                }
+                Text(scanner.isScanning ? scanner.scanProgress : (typeSize.isAccessibilitySize ? "Ready to scan" : "Capture your world"))
+                    .font(scanner.isScanning ? .subheadline.weight(.medium) : (typeSize.isAccessibilitySize ? .headline : .title2.weight(.semibold)))
                     .foregroundStyle(.white)
                 if scanner.isScanning {
                     ViewThatFits(in: .horizontal) {
@@ -185,8 +224,10 @@ struct ScannerView: View {
             }
             Spacer(minLength: 0)
             #if targetEnvironment(simulator)
+            if !typeSize.isAccessibilitySize {
             Text("SIM").font(.caption2.weight(.bold))
                 .padding(8).background(.white.opacity(0.12), in: Capsule()).foregroundStyle(.white)
+            }
             #else
             if scanner.isScanning {
                 Button { showMeshOverlay.toggle() } label: {
@@ -279,7 +320,7 @@ struct ScannerView: View {
                 Spacer()
                 Image(systemName: settings.captureMode.icon).foregroundStyle(FieldStyle.mint)
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+            LazyVGrid(columns: typeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
                 ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
                     let unavailable = mode == .highQuality && !highQualitySupported
                     let selected = settings.captureMode == mode
@@ -287,7 +328,7 @@ struct ScannerView: View {
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { settings.captureMode = mode }
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: mode.icon)
+                            Image(systemName: mode.icon).font(.system(size: 18))
                             Text(mode.shortName).font(.subheadline.weight(.semibold))
                             Spacer(minLength: 0)
                             if selected { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
@@ -378,21 +419,6 @@ struct ScannerView: View {
         .presentationDragIndicator(.visible)
     }
 
-    private func sliderRow<S: View>(title: String, value: String, hint: String,
-                                    @ViewBuilder slider: () -> S) -> some View {
-        VStack(spacing: 2) {
-            HStack {
-                Text(title).font(.caption).fontWeight(.semibold).foregroundColor(.white)
-                Spacer()
-                Text(value).font(.system(size: 14, weight: .bold, design: .rounded)).foregroundColor(.white)
-            }
-            slider()
-            Text(hint)
-                .font(.caption2).foregroundColor(.gray)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
     // MARK: - Scanning Info Bar
 
     private var scanningInfoBar: some View {
@@ -409,7 +435,7 @@ struct ScannerView: View {
             }
         }
         .padding(.horizontal, 20)
-        }.padding(.bottom, 8)
+        }.fixedSize(horizontal: false, vertical: true).padding(.bottom, 8)
     }
 
     private func chip(_ text: String, icon: String, color: Color) -> some View {
@@ -426,7 +452,7 @@ struct ScannerView: View {
     // MARK: - Bottom Controls
 
     private var bottomControls: some View {
-        HStack(spacing: 28) {
+        HStack(spacing: typeSize.isAccessibilitySize ? 8 : 28) {
             if scanner.isScanning {
                 Button {
                     if scanner.isPaused { scanner.resumeScanning() } else { scanner.pauseScanning() }
@@ -480,11 +506,16 @@ struct ScannerView: View {
                     }
                 } label: {
                     HStack(spacing: 12) {
+                        if !typeSize.isAccessibilitySize {
                         Image(systemName: activeDraft == nil ? "viewfinder" : "square.and.arrow.down")
                             .font(.title2)
+                        }
                         Text(activeDraft == nil ? "Start scan" : "Review capture").font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !typeSize.isAccessibilitySize {
                         Spacer()
                         Image(systemName: "arrow.right").font(.body.weight(.semibold))
+                        }
                     }
                     .foregroundStyle(FieldStyle.ink).padding(.horizontal, 22)
                     .frame(minHeight: 58).frame(maxWidth: .infinity)
@@ -1269,6 +1300,7 @@ extension ScannerView {
 struct SimulatorScanView: View {
     @ObservedObject var scanner: MockLiDARScanner
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var animationPhase: Double = 0
 
     var body: some View {
@@ -1279,7 +1311,7 @@ struct SimulatorScanView: View {
                 scanningAnimation
             } else if scanner.vertexCount > 0 {
                 completionView
-            } else {
+            } else if !typeSize.isAccessibilitySize {
                 idleView
             }
         }

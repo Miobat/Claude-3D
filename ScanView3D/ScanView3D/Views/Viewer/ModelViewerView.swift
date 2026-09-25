@@ -40,6 +40,7 @@ struct ModelViewerView: View {
     // More menu
     @State private var showingMoreMenu = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     enum ViewerTool: String, CaseIterable {
         case orbit = "Orbit"
@@ -93,6 +94,8 @@ struct ModelViewerView: View {
             }
 
             if !isLoading && loadError == nil && !isProcessing {
+                GeometryReader { geometry in
+                let compact = geometry.size.width > geometry.size.height
                 VStack {
                     if !scan.hasKnownScale || scan.scaleStatus == .estimatedFromBounds {
                         Label(scan.scaleDescription, systemImage: "exclamationmark.circle")
@@ -101,60 +104,38 @@ struct ModelViewerView: View {
                             .accessibilityIdentifier("scaleWarning")
                     }
                     // Top row: height legend (left), view buttons (right)
+                    if !(compact && activeTool == .measure) {
                     HStack(alignment: .top) {
                         if scan.hasKnownScale, vizMode == .height, let node = modelNode {
                             heightLegend(for: node)
                         }
                         Spacer()
-                        VStack(spacing: 12) {
-                            // Camera view presets
-                            Menu {
-                                Button { setCameraView(.top) } label: { Label("Top", systemImage: "arrow.down.to.line") }
-                                Button { setCameraView(.front) } label: { Label("Front", systemImage: "arrow.right.to.line") }
-                                Button { setCameraView(.side) } label: { Label("Side", systemImage: "arrow.left.to.line") }
-                            } label: {
-                                FieldIcon(symbol: "camera.viewfinder")
-                            }
-
-                            .accessibilityLabel("Camera view: top, front, or side")
-
-                            // Projection toggle
-                            Menu {
-                                ForEach(CameraProjection.allCases, id: \.self) { proj in
-                                    Button {
-                                        cameraProjection = proj
-                                        applyCameraProjection(proj)
-                                    } label: {
-                                        Label(proj.rawValue, systemImage: proj.icon)
-                                    }
-                                }
-                            } label: {
-                                FieldIcon(symbol: cameraProjection.icon)
-                            }
-                            .accessibilityLabel("Projection: \(cameraProjection.rawValue)")
-                            Menu {
-                                Toggle("Ground grid", isOn: $showGrid)
-                                Toggle("Bounding box", isOn: $showBoundingBox)
-                                Toggle("Navigation joysticks", isOn: $showJoysticks)
-                            } label: { FieldIcon(symbol: "square.3.layers.3d") }
-                            .accessibilityLabel("Visible layers and controls")
-                            Button {
-                                NotificationCenter.default.post(name: .resetCameraView, object: nil)
-                            } label: { FieldIcon(symbol: "arrow.counterclockwise") }
-                            .accessibilityLabel("Fit model in view")
+                        Group {
+                            if compact { HStack(spacing: 8) { cameraControls } }
+                            else { VStack(spacing: 12) { cameraControls } }
                         }
                         .padding(.trailing, 12)
                         .padding(.top, 8)
                     }
+                    }
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
                     if showJoysticks { joystickOverlay }
 
                     // Bottom toolbar: More | Process | Measure | Share
-                    bottomToolbar
+                    if compact && activeTool == .measure {
+                        HStack {
+                            Spacer(minLength: 0)
+                            bottomToolbar(compact: true)
+                                .frame(width: min(360, geometry.size.width * 0.46))
+                        }
+                    } else {
+                        bottomToolbar(compact: compact)
+                    }
                 }
                 .environment(\.colorScheme, .dark)
+                }
             }
         }
         .navigationTitle(scan.name)
@@ -214,6 +195,9 @@ struct ModelViewerView: View {
             }
         }
         .onAppear {
+            #if DEBUG && targetEnvironment(simulator)
+            if DesignPreview.screen == "measure" { activeTool = .measure }
+            #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
@@ -437,15 +421,53 @@ struct ModelViewerView: View {
         .padding(.bottom, 8)
     }
 
-    // MARK: - Bottom Toolbar (More | Process | Measure | Share)
+    @ViewBuilder private var cameraControls: some View {
+                            // Camera view presets
+                            Menu {
+                                Button { setCameraView(.top) } label: { Label("Top", systemImage: "arrow.down.to.line") }
+                                Button { setCameraView(.front) } label: { Label("Front", systemImage: "arrow.right.to.line") }
+                                Button { setCameraView(.side) } label: { Label("Side", systemImage: "arrow.left.to.line") }
+                            } label: {
+                                FieldIcon(symbol: "camera.viewfinder")
+                            }
 
-    private var bottomToolbar: some View {
+                            .accessibilityLabel("Camera view: top, front, or side")
+
+                            // Projection toggle
+                            Menu {
+                                ForEach(CameraProjection.allCases, id: \.self) { proj in
+                                    Button {
+                                        cameraProjection = proj
+                                        applyCameraProjection(proj)
+                                    } label: {
+                                        Label(proj.rawValue, systemImage: proj.icon)
+                                    }
+                                }
+                            } label: {
+                                FieldIcon(symbol: cameraProjection.icon)
+                            }
+                            .accessibilityLabel("Projection: \(cameraProjection.rawValue)")
+                            Menu {
+                                Toggle("Ground grid", isOn: $showGrid)
+                                Toggle("Bounding box", isOn: $showBoundingBox)
+                                Toggle("Navigation joysticks", isOn: $showJoysticks)
+                            } label: { FieldIcon(symbol: "square.3.layers.3d") }
+                            .accessibilityLabel("Visible layers and controls")
+                            Button {
+                                NotificationCenter.default.post(name: .resetCameraView, object: nil)
+                            } label: { FieldIcon(symbol: "arrow.counterclockwise") }
+                            .accessibilityLabel("Fit model in view")
+    }
+
+    // MARK: - Bottom Toolbar
+
+    private func bottomToolbar(compact: Bool) -> some View {
         VStack(spacing: 8) {
             if activeTool == .measure {
-                measurePanel
+                ScrollView { measurePanel }.frame(maxHeight: compact ? 130 : 320)
             }
 
-            if activeTool != .measure {
+            if activeTool != .measure && !compact {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(VisualizationMode.allCases, id: \.self) { mode in
@@ -462,27 +484,20 @@ struct ModelViewerView: View {
                             .accessibilityAddTraits(vizMode == mode ? .isSelected : [])
                         }
                     }.padding(6)
-                }.fieldPanel().padding(.horizontal, 12)
+                }.fixedSize(horizontal: false, vertical: true).fieldPanel().padding(.horizontal, 12)
             }
 
-            HStack(spacing: 10) {
-                Button { showingMoreMenu = true } label: {
-                    viewerAction("Tools", icon: "slider.horizontal.3")
-                }
-                Button { activeTool = activeTool == .measure ? .orbit : .measure } label: {
-                    viewerAction(activeTool == .measure ? "Done" : "Measure", icon: "ruler",
-                                 selected: activeTool == .measure)
-                }
-                .disabled(!scan.hasKnownScale)
-                .opacity(scan.hasKnownScale ? 1 : 0.45)
-                .accessibilityHint(scan.hasKnownScale ? "Measure distances and areas" : "Requires verified model scale")
-                Button { exportAndShare() } label: {
-                    viewerAction("Share", icon: "square.and.arrow.up", selected: true)
+            Group {
+                if typeSize.isAccessibilitySize {
+                    ScrollView(.horizontal) { actionDock(compact: compact) }
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    actionDock(compact: compact)
                 }
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 12).padding(.bottom, 12)
         }
+        .frame(maxWidth: 660).frame(maxWidth: .infinity)
         .confirmationDialog("More Options", isPresented: $showingMoreMenu) {
             Button("Share Top-Down Image (with scale)") { captureFloorplanImage() }.disabled(!scan.hasKnownScale)
             if hasMesh {
@@ -515,12 +530,55 @@ struct ModelViewerView: View {
         }
     }
 
+    private func actionDock(compact: Bool) -> some View {
+        HStack(spacing: 8) {
+            if compact && activeTool != .measure {
+                Menu {
+                    ForEach(VisualizationMode.allCases, id: \.self) { mode in
+                        Button(mode.rawValue) { vizMode = mode; applyVisualizationMode(mode) }
+                    }
+                } label: { viewerAction(vizMode.rawValue, icon: "cube") }
+                .accessibilityLabel("Rendering style")
+            }
+            mainViewerActions
+        }
+    }
+
+    private var mainViewerActions: some View {
+        HStack(spacing: 10) {
+                Button { showingMoreMenu = true } label: {
+                    viewerAction("Tools", icon: "slider.horizontal.3")
+                }
+                Button {
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                        activeTool = activeTool == .measure ? .orbit : .measure
+                    }
+                } label: {
+                    viewerAction(activeTool == .measure ? "Done" : "Measure", icon: "ruler",
+                                 selected: activeTool == .measure)
+                }
+                .disabled(!scan.hasKnownScale)
+                .opacity(scan.hasKnownScale ? 1 : 0.45)
+                .accessibilityHint(scan.hasKnownScale ? "Measure distances and areas" : "Requires verified model scale")
+                Button { exportAndShare() } label: {
+                    viewerAction("Share", icon: "square.and.arrow.up", selected: true)
+                }
+            }
+            .buttonStyle(.plain)
+
+    }
+
     private func viewerAction(_ title: String, icon: String, selected: Bool = false) -> some View {
         VStack(spacing: 6) {
-            Image(systemName: icon).font(.body.weight(.medium))
+            if !typeSize.isAccessibilitySize {
+                Image(systemName: icon).font(.system(size: 18, weight: .medium))
+            }
             Text(title).font(.caption.weight(.semibold))
+                .fixedSize(horizontal: typeSize.isAccessibilitySize, vertical: true)
         }
-        .frame(maxWidth: .infinity).frame(minHeight: 64)
+        .padding(.horizontal, typeSize.isAccessibilitySize ? 18 : 4)
+        .frame(minWidth: typeSize.isAccessibilitySize ? 150 : 0, maxWidth: .infinity)
+        .frame(minHeight: 64)
         .foregroundStyle(selected ? FieldStyle.ink : .white)
         .background(selected ? FieldStyle.mint : FieldStyle.panel,
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))

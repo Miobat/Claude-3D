@@ -4,6 +4,8 @@ import SwiftUI
 struct ProjectDetailView: View {
     let project: Project
     @EnvironmentObject var storageManager: StorageManager
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.horizontalSizeClass) private var widthClass
     @State private var showingImporter = false
     @State private var renamingScan: Scan?
     @State private var renameName = ""
@@ -163,7 +165,7 @@ struct ProjectDetailView: View {
                 FieldHero(eyebrow: "Project", title: liveProject.name,
                           subtitle: "Updated \(liveProject.modifiedAt.relativeString)", icon: "folder")
                     .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100))], spacing: 20) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: typeSize.isAccessibilitySize ? 1 : (widthClass == .regular ? 4 : 2)), spacing: 20) {
                     StatItem(label: "Scans", value: "\(liveProject.scanCount)", icon: "viewfinder")
                     StatItem(label: "Vertices", value: formatCompact(liveProject.totalVertices), icon: "circle.fill")
                     StatItem(label: "Faces", value: formatCompact(liveProject.totalFaces), icon: "triangle.fill")

@@ -12,14 +12,15 @@ xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wi
 xcrun simctl install "$DEVICE" "$APP"
 capture() {
   local SCREEN="$1" NAME="$2"
+  shift 2
   xcrun simctl terminate "$DEVICE" com.michael.scanview3d || true
-  xcrun simctl launch "$DEVICE" com.michael.scanview3d --design-preview "$SCREEN"
+  xcrun simctl launch "$DEVICE" com.michael.scanview3d --design-preview "$SCREEN" "$@"
   sleep 6
   xcrun simctl io "$DEVICE" screenshot "$OUT/$NAME.png"
 }
 for APPEARANCE in light dark; do
   xcrun simctl ui "$DEVICE" appearance "$APPEARANCE"
-  for SCREEN in projects library project settings scanner viewer empty; do
+  for SCREEN in projects library project settings scanner capture-settings viewer measure empty; do
     capture "$SCREEN" "$SCREEN-$APPEARANCE"
   done
 done
@@ -28,4 +29,7 @@ capture projects projects-large-text
 capture scanner scanner-large-text
 capture viewer viewer-large-text
 xcrun simctl ui "$DEVICE" content_size large
+capture scanner scanner-landscape --landscape
+capture viewer viewer-landscape --landscape
+capture measure measure-landscape --landscape
 xcrun simctl shutdown "$DEVICE"

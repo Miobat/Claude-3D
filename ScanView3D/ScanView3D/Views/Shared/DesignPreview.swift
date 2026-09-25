@@ -55,14 +55,21 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if screen == "viewer", let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: screen == "scanner" ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+                let landscape = ProcessInfo.processInfo.arguments.contains("--landscape")
+                scene.requestGeometryUpdate(.iOS(interfaceOrientations: landscape ? .landscapeRight : .portrait))
+            }
+        }
     }
 }
 #endif
