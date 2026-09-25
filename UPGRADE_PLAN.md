@@ -233,6 +233,13 @@ Each milestone gets a small TestFlight release, a changelog naming what changed,
 
 ## First implementation branches
 
+Progress as of 25 September 2026: storage-integrity and capture-recovery slices
+are implemented; the coordinate-export-consistency slice is now implemented for
+review/validation. See their `ScanView3D/*INTEGRITY.md`, `CAPTURE_RECOVERY.md` and
+`COORDINATE_EXPORTS.md` notes for exact scope and remaining release gates. This does
+not mark entire milestones complete: device/field checks, calibration/import
+repair, backup/trash and the terrain workflow remain outstanding. Publishing is held.
+
 Suggested order, each based on the latest integrated result:
 
 1. `codex/validation-baseline` — test target/schemes, fixtures, validation workflow, current failure cases.

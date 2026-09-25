@@ -20,6 +20,7 @@ struct ProjectListView: View {
                 }
             }
             .navigationTitle("Projects")
+            .overlay { ExportProgressView(store: storageManager) }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -197,13 +198,8 @@ struct ProjectListView: View {
     }
 
     private func exportProject(_ project: Project) {
-        if let url = storageManager.exportProject(project) {
-            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(activityVC, animated: true)
-            }
-        }
+        let store = storageManager
+        store.prepareExport({ try store.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
     }
 }
 

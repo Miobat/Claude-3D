@@ -48,6 +48,7 @@ struct ProjectDetailView: View {
             }
         }
         .navigationTitle(liveProject.name)
+        .overlay { ExportProgressView(store: storageManager) }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -241,23 +242,13 @@ struct ProjectDetailView: View {
     }
 
     private func shareScan(_ scan: Scan) {
-        if let url = storageManager.exportScan(scan, from: liveProject) {
-            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(activityVC, animated: true)
-            }
-        }
+        let project = liveProject, store = storageManager
+        store.prepareExport({ try store.exportScan(scan, from: project) }) { ShareSheetPresenter.present([$0]) }
     }
 
     private func exportEntireProject() {
-        if let url = storageManager.exportProject(liveProject) {
-            let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController {
-                rootVC.present(activityVC, animated: true)
-            }
-        }
+        let project = liveProject, store = storageManager
+        store.prepareExport({ try store.exportProject(project) }) { ShareSheetPresenter.present([$0]) }
     }
 
     private func formatCompact(_ value: Int) -> String {
