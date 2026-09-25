@@ -88,7 +88,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        if gestureRecognizer === orbitPan { touchDown = touch.location(in: view) }
+        if gestureRecognizer === orbitPan, gestureRecognizer.numberOfTouches == 0 { touchDown = touch.location(in: view) }
         return true
     }
 

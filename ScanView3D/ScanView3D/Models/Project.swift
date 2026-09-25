@@ -327,7 +327,7 @@ struct ScanSettings: Codable, Equatable {
             switch self {
             case .free: return "Everything the LiDAR sees."
             case .structure: return "Walls, floor, ceiling, doors, windows and furniture. Drops clutter."
-            case .area: return "Only floor, walls and ceiling, as clean flat surfaces."
+            case .area: return "Structural surfaces only, clipped to the scanned range."
             }
         }
 

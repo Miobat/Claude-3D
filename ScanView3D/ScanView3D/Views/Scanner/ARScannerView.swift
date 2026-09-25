@@ -18,6 +18,10 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         coordinator.view = view; coordinator.scanner = scanner
         if let feedback = coordinator.feedback {
             view.renderCallbacks.postProcess = { [weak feedback] context in feedback?.render(context) }
+        } else {
+            DispatchQueue.main.async {
+                scanner.scanError = "Live coverage preview could not start. Capture range filtering still applies. Reopen the scanner to retry."
+            }
         }
         coordinator.start()
         let coaching = ARCoachingOverlayView()

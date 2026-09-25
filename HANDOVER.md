@@ -153,3 +153,13 @@ HQ USDZ correction is embedded in a nested-asset transform and checked by reimpo
 New capture transforms and HQ alignment quality are retained; no CRS is inferred.
 Shared coordinate/export sources occupy A10033–A10036. CI includes an independent
 OpenUSD reader. TestFlight remains on hold until explicitly authorized.
+
+## 10. Live capture / navigation
+
+See `ScanView3D/CAPTURE_NAVIGATION.md`. Capture now uses observation-time radial
+range evidence, a depth-aware Metal preview, and per-photo range masks. PoseFile
+reads legacy arrays and version-2 envelopes; do not parse sidecars as bare arrays.
+New sources occupy A10039–A10043 (A10037–38 are design sources). Next free is 44.
+Viewer navigation includes surface-anchored orbit, exact point-cloud picking,
+rate-adjusted joysticks, vertical control and ground-locked walk. Real LiDAR and
+photogrammetry behaviour still require the documented phone acceptance tests.

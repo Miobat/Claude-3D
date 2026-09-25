@@ -822,7 +822,7 @@ enum PhotogrammetryProcessor {
         configuration.featureSensitivity = (quality == .best) ? .high : .normal
 
         let capturedPoses = try PoseFile.read(forPhotoFolder: inputFolder)
-        let hasRangeMasks = capturedPoses.contains { $0.rangeMask != nil }
+        let hasRangeMasks = try PoseFile.requiresRangeMasks(forPhotoFolder: inputFolder) || capturedPoses.contains { $0.rangeMask != nil }
         configuration.isObjectMaskingEnabled = hasRangeMasks
         let maskedSamples = try hasRangeMasks ? RangePhotoInput.Samples(folder: inputFolder, poses: capturedPoses) : nil
         let session: PhotogrammetrySession
@@ -889,6 +889,9 @@ enum SplatExporter {
     /// and a README into the folder that already holds the captured frames.
     static func writeBundle(imageFolder: URL, poses: [CapturedPose], pointCloud: MeshData?) throws {
         guard !poses.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        if try PoseFile.requiresRangeMasks(forPhotoFolder: imageFolder) {
+            guard poses.allSatisfy({ $0.rangeMask?.isValid == true }) else { throw CocoaError(.fileReadCorruptFile) }
+        }
         // Do not claim a complete bundle when a pending/failed photo write is missing.
         for pose in poses {
             let image = imageFolder.appendingPathComponent(String(format: "frame_%04d.jpg", pose.index))

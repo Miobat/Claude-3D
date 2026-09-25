@@ -3,6 +3,7 @@ import SwiftUI
 import simd
 import SceneKit
 import CoreVideo
+import Metal
 
 /// CI-only visual fixtures. Never compiled into the device/TestFlight app.
 /// Uses a new temporary library, never the user's Documents library.
@@ -61,9 +62,11 @@ enum DesignPreview {
         for orthographic in [false, true] {
             lens.usesOrthographicProjection = orthographic
             lens.orthographicScale = 4
+            SCNTransaction.flush()
+            _ = view.snapshot()
             let world = SIMD3<Float>(0.7, 0.3, -0.4)
             let screen = view.projectPoint(SCNVector3(world.x, world.y, world.z))
-            let matrix = simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.simdWorldTransform.inverse
+            guard let matrix = coordinator.pickingProjection(in: view) else { check(false, "Picking projection exists"); continue }
             let picker = PointCloudPicker(points: [world, world + SIMD3(0.7, 0, 2)])
             let picked = picker.pick(at: SIMD2(screen.x, screen.y),
                 viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: matrix, radius: 2)
@@ -73,6 +76,8 @@ enum DesignPreview {
         let floor = SCNNode(geometry: SCNBox(width: 10, height: 0.02, length: 10, chamferRadius: 0))
         floor.position.y = -0.01
         view.scene?.rootNode.addChildNode(floor)
+        SCNTransaction.flush()
+        _ = view.snapshot()
         check(coordinator.ground(at: .zero) != nil, "Pick horizontal ground")
         check(coordinator.ground(at: SIMD3(20, 0, 0)) == nil, "Do not invent ground outside scan")
         rig.beginWalk(at: .zero)
@@ -97,13 +102,79 @@ enum DesignPreview {
                       "Photo-mask resize preserves image orientation and hard boundary")
             } else { check(false, "Photo-mask buffer readable") }
             CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pose-check-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let folder = directory.appendingPathComponent("photos")
+            try PoseFile.write([], forPhotoFolder: folder, requireRangeMasks: true)
+            check(try PoseFile.requiresRangeMasks(forPhotoFolder: folder), "Empty capture still requires masks")
+            let pose = CapturedPose(index: 7, transform: matrix_identity_float4x4,
+                intrinsics: matrix_identity_float3x3, width: 8, height: 8, rangeMask: mask)
+            try PoseFile.write([pose], forPhotoFolder: folder)
+            let restored = try PoseFile.read(forPhotoFolder: folder)
+            check(restored.count == 1 && restored[0].rangeMask == mask, "Pose / range mask recovery round-trip")
+            check(PoseFile.cameraPositions(forPhotoFolder: folder)[7] == .zero, "Masked pose alignment retains photo IDs")
+            do {
+                let unmasked = CapturedPose(index: 8, transform: matrix_identity_float4x4,
+                    intrinsics: matrix_identity_float3x3, width: 8, height: 8)
+                try PoseFile.write([unmasked], forPhotoFolder: folder)
+                check(false, "Cannot downgrade masked capture after a missing mask")
+            } catch { check(true, "Cannot downgrade masked capture after a missing mask") }
+            try FileManager.default.removeItem(at: directory)
         } catch { check(false, "Photo-mask resize: \(error)") }
 
+        checkFeedbackShader(check)
         let report: [String: Any] = ["checks": count, "failures": failures]
         let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("navigation-checks.json")
         do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
         catch { assertionFailure("Could not write navigation test report: \(error)") }
+    }
+
+    private static func checkFeedbackShader(_ check: (Bool, String) -> Void) {
+        guard let device = MTLCreateSystemDefaultDevice(), let library = device.makeDefaultLibrary(),
+              let function = library.makeFunction(name: "captureFeedback"),
+              let pipeline = try? device.makeComputePipelineState(function: function),
+              let queue = device.makeCommandQueue(), let command = queue.makeCommandBuffer() else {
+            check(false, "Capture feedback shader available"); return
+        }
+        struct Uniforms {
+            var cameraToWorld = matrix_identity_float4x4
+            var worldToAcceptedCamera = matrix_identity_float4x4
+            var displayToImage = matrix_identity_float3x3
+            var intrinsics = SIMD4<Float>(100, 100, 8, 8)
+            var acceptedIntrinsics = SIMD4<Float>(6.25, 6.25, 0.5, 0.5)
+            var parameters = SIMD4<Float>(1.5, 1, 16, 16)
+        }
+        func texture(_ format: MTLPixelFormat) -> MTLTexture? {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: 16, height: 16, mipmapped: false)
+            d.storageMode = .shared; d.usage = [.shaderRead, .shaderWrite]
+            return device.makeTexture(descriptor: d)
+        }
+        guard let source = texture(.rgba32Float), let output = texture(.rgba32Float),
+              let depth = texture(.r32Float), let accepted = texture(.r32Float) else {
+            check(false, "Capture feedback test textures"); return
+        }
+        let colors = [SIMD4<Float>](repeating: SIMD4(0.1, 0.2, 0.8, 1), count: 256)
+        let depths: [Float] = (0..<256).map { i in i % 16 < 4 ? 1 : i % 16 < 8 ? 2 : i % 16 < 12 ? 0 : 1 }
+        let committed: [Float] = (0..<256).map { $0 % 16 < 8 ? 1 : 0 }
+        colors.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256) }
+        depths.withUnsafeBytes { depth.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
+        committed.withUnsafeBytes { accepted.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
+        guard let encoder = command.makeComputeCommandEncoder() else { check(false, "Capture feedback command"); return }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(source, index: 0); encoder.setTexture(output, index: 1)
+        encoder.setTexture(depth, index: 2); encoder.setTexture(accepted, index: 3)
+        var uniforms = Uniforms()
+        encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+        encoder.endEncoding(); command.commit(); command.waitUntilCompleted()
+        check(command.status == .completed, "Capture feedback GPU command")
+        var result = [SIMD4<Float>](repeating: .zero, count: 256)
+        result.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+        check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
+        check(result[8 * 16 + 5].y < 0.4 && result[8 * 16 + 5].z < 0.7, "Out-of-range surface is muted without mint coverage")
+        check(simd_distance(result[8 * 16 + 9], colors[0]) < 0.001, "Unknown depth does not invent coverage")
+        check(simd_distance(result[8 * 16 + 13], colors[0]) < 0.001, "Uncommitted depth does not invent coverage")
     }
 }
 

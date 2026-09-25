@@ -471,6 +471,9 @@ class LiDARScanner: NSObject, ObservableObject {
         let dir = docs.appendingPathComponent("Captures").appendingPathComponent(UUID().uuidString)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            // Mark range-aware captures before the first photo. An interrupted
+            // pose write must never fall back to unmasked folder reconstruction.
+            try PoseFile.write([], forPhotoFolder: dir, requireRangeMasks: true)
             return dir
         } catch {
             return nil
@@ -715,7 +718,7 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Retaining an ARMeshAnchor alone does not give a worker owned geometry.
     func buildCombinedMesh(completion: @escaping (MeshData?) -> Void) {
         let anchors = meshAnchors.map(MeshAnchorSnapshot.init) + Array(retiredMeshSnapshots.values)
-        let evidence = depthCloud.surfaceEvidence
+        let depthSource = depthCloud
         let mode = meshMode
         let wantCameraColors = captureTexture && captureMode == .fast
         let mapper = textureMapper
@@ -727,6 +730,7 @@ class LiDARScanner: NSObject, ObservableObject {
                 DispatchQueue.main.async { completion(cloudMesh) }
                 return
             }
+            let evidence = depthSource.surfaceEvidence
             var mesh = LiDARScanner.combine(anchors: anchors, evidence: evidence, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
                 let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals)
@@ -1177,6 +1181,17 @@ final class DepthPointAccumulator {
                         acceptedDepth[pixel] = sensor.depth[pixel]
                     } else { self.full = true }
                 }
+                // Confidence can fluctuate on a surface already captured. Keep
+                // its coverage if current depth still agrees with stored world
+                // evidence; do not blink or add low-confidence geometry.
+                for pixel in sensor.depth.indices where acceptedDepth[pixel] == 0 {
+                    let cameraPoint = sensor.cameraPoint(at: pixel)
+                    guard CaptureRange.accepts(cameraPoint, metres: maxDistance) else { continue }
+                    let w = sensor.cameraToWorld * SIMD4(cameraPoint, 1)
+                    if self.evidence.contains(SIMD3(w.x, w.y, w.z), tolerance: 0.035) {
+                        acceptedDepth[pixel] = sensor.depth[pixel]
+                    }
+                }
                 self.coverageLock.lock()
                 self.coverage = AcceptedDepthFrame(frame: sensor, depth: acceptedDepth)
                 self.coverageLock.unlock()
@@ -1297,7 +1312,35 @@ enum PoseFile {
         let rangeMask: PhotoRangeMask?
     }
 
-    static func write(_ poses: [CapturedPose], forPhotoFolder folder: URL) throws {
+    private struct Envelope: Codable {
+        let version: Int
+        let requiresRangeMasks: Bool
+        let entries: [Entry]
+    }
+
+    private static func envelope(for folder: URL) throws -> Envelope {
+        let file = url(forPhotoFolder: folder)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            return Envelope(version: 1, requiresRangeMasks: false, entries: [])
+        }
+        let data = try Data(contentsOf: file)
+        // The original sidecar was a bare array. Keep those captures readable.
+        if data.first(where: { ![9, 10, 13, 32].contains($0) }) == 91 {
+            return Envelope(version: 1, requiresRangeMasks: false,
+                            entries: try JSONDecoder().decode([Entry].self, from: data))
+        }
+        let decoded = try JSONDecoder().decode(Envelope.self, from: data)
+        guard decoded.version == 2 else { throw CocoaError(.fileReadCorruptFile) }
+        return decoded
+    }
+
+    static func requiresRangeMasks(forPhotoFolder folder: URL) throws -> Bool {
+        try envelope(for: folder).requiresRangeMasks
+    }
+
+    static func write(_ poses: [CapturedPose], forPhotoFolder folder: URL, requireRangeMasks: Bool = false) throws {
+        let required = try requireRangeMasks || poses.contains { $0.rangeMask != nil } || envelope(for: folder).requiresRangeMasks
+        guard !required || poses.allSatisfy({ $0.rangeMask?.isValid == true }) else { throw CocoaError(.fileReadCorruptFile) }
         let entries = poses.map { pose -> Entry in
             let m = pose.transform
             let k = pose.intrinsics
@@ -1305,13 +1348,16 @@ enum PoseFile {
                          transform: [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] },
                          intrinsics: [k.columns.0, k.columns.1, k.columns.2].flatMap { [$0.x, $0.y, $0.z] }, rangeMask: pose.rangeMask)
         }
-        try JSONEncoder().encode(entries).write(to: url(forPhotoFolder: folder), options: .atomic)
+        try JSONEncoder().encode(Envelope(version: 2, requiresRangeMasks: required, entries: entries))
+            .write(to: url(forPhotoFolder: folder), options: .atomic)
     }
 
     static func read(forPhotoFolder folder: URL) throws -> [CapturedPose] {
-        let file = url(forPhotoFolder: folder)
-        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
-        let entries = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: file))
+        let saved = try envelope(for: folder)
+        let entries = saved.entries
+        guard !saved.requiresRangeMasks || entries.allSatisfy({ $0.rangeMask?.isValid == true }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         var seen = Set<Int>()
         return try entries.map { entry in
             let k = entry.intrinsics
@@ -1331,15 +1377,10 @@ enum PoseFile {
 
     /// Camera positions by photo index (world space, metres).
     static func cameraPositions(forPhotoFolder folder: URL) -> [Int: SIMD3<Float>] {
-        guard let data = try? Data(contentsOf: url(forPhotoFolder: folder)),
-              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [:] }
-        var result: [Int: SIMD3<Float>] = [:]
-        for entry in list {
-            guard let index = entry["index"] as? Int,
-                  let t = entry["transform"] as? [Double], t.count == 16 else { continue }
-            result[index] = SIMD3<Float>(Float(t[12]), Float(t[13]), Float(t[14]))
-        }
-        return result
+        guard let poses = try? read(forPhotoFolder: folder) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: poses.map {
+            ($0.index, SIMD3<Float>($0.transform.columns.3.x, $0.transform.columns.3.y, $0.transform.columns.3.z))
+        })
     }
 }
 

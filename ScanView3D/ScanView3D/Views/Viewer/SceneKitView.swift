@@ -436,11 +436,29 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         /// Front-most point-cloud point near a screen location.
         private func pickPoint(at location: CGPoint, in view: SCNView) -> SCNVector3? {
-            guard let picker = pointPicker, let camera = view.pointOfView, let lens = camera.camera else { return nil }
-            let projection = simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.simdWorldTransform.inverse
+            guard let picker = pointPicker, let projection = pickingProjection(in: view) else { return nil }
             return picker.pick(at: SIMD2(Float(location.x), Float(location.y)),
                 viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: projection)
                 .map { SCNVector3($0.x, $0.y, $0.z) }
+        }
+
+        func pickingProjection(in view: SCNView) -> simd_float4x4? {
+            guard let camera = view.pointOfView, let lens = camera.camera else { return nil }
+            if lens.usesOrthographicProjection {
+                // SceneKit's rendered orthographic bounds can differ from the
+                // camera's standalone projection (aspect / automatic clipping).
+                // Derive the exact affine map from the renderer's own unprojection.
+                let width = Float(view.bounds.width), height = Float(view.bounds.height)
+                func world(_ x: Float, _ y: Float, _ z: Float) -> SIMD3<Float> {
+                    let p = view.unprojectPoint(SCNVector3(x, y, z)); return SIMD3(p.x, p.y, p.z)
+                }
+                let origin = world(0, height, 0)
+                let x = (world(width, height, 0) - origin) * 0.5
+                let y = (world(0, 0, 0) - origin) * 0.5
+                let z = (world(0, height, 1) - origin) * 0.5
+                return simd_float4x4(SIMD4(x, 0), SIMD4(y, 0), SIMD4(z, 0), SIMD4(origin + x + y + z, 1)).inverse
+            }
+            return simd_float4x4(lens.projectionTransform(withViewportSize: view.bounds.size)) * camera.presentation.simdWorldTransform.inverse
         }
 
         // MARK: - Camera View Presets
@@ -637,8 +655,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 .searchMode: SCNHitTestSearchMode.all.rawValue,
                 .ignoreHiddenNodes: true
             ])
-            if let hit = hits.first(where: { !isHelper($0.node) &&
-                $0.node.geometry?.elements.contains(where: { $0.primitiveType == .triangles || $0.primitiveType == .triangleStrip }) == true }) {
+            if let hit = hits.first(where: { !isHelper($0.node) && isSurface($0.node) }) {
                 let p = hit.worldCoordinates, n = hit.worldNormal
                 return (SIMD3<Float>(p.x, p.y, p.z), simd_normalize(SIMD3<Float>(n.x, n.y, n.z)))
             }
@@ -655,8 +672,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 from: SCNVector3(a.x, a.y, a.z), to: SCNVector3(b.x, b.y, b.z),
                 options: [SCNHitTestOption.searchMode.rawValue: SCNHitTestSearchMode.all.rawValue,
                           SCNHitTestOption.backFaceCulling.rawValue: false])
-            return results.filter { !isHelper($0.node) &&
-                $0.node.geometry?.elements.contains(where: { $0.primitiveType == .triangles || $0.primitiveType == .triangleStrip }) == true }.map {
+            return results.filter { !isHelper($0.node) && isSurface($0.node) }.map {
                 SIMD3<Float>($0.worldCoordinates.x, $0.worldCoordinates.y, $0.worldCoordinates.z)
             }
         }
@@ -818,6 +834,13 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             updateNavigationTimer()
         }
 
+        private func isSurface(_ node: SCNNode) -> Bool {
+            guard let geometry = node.geometry else { return false }
+            // Imported polygon meshes and procedural surfaces can have no exposed
+            // triangle elements. Reject points/lines, not genuine SceneKit hits.
+            return !geometry.elements.contains { $0.primitiveType == .point || $0.primitiveType == .line }
+        }
+
         @objc func handleJoystickLook(_ notification: Notification) {
             currentLookDX = (notification.userInfo?["dx"] as? CGFloat) ?? 0
             currentLookDY = (notification.userInfo?["dy"] as? CGFloat) ?? 0
@@ -889,7 +912,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 options: [SCNHitTestOption.searchMode.rawValue: SCNHitTestSearchMode.all.rawValue,
                           SCNHitTestOption.backFaceCulling.rawValue: false])
             let groundHits = results.filter {
-                !isHelper($0.node) && $0.node.geometry?.elements.contains(where: { $0.primitiveType == .triangles || $0.primitiveType == .triangleStrip }) == true &&
+                !isHelper($0.node) && isSurface($0.node) &&
                 WalkGeometry.acceptsGround(previousY: p.y, groundY: $0.worldCoordinates.y, normalY: $0.worldNormal.y)
             }
             if let hit = groundHits.min(by: { abs($0.worldCoordinates.y - p.y) < abs($1.worldCoordinates.y - p.y) }) {

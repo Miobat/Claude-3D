@@ -52,6 +52,16 @@ final class CaptureNavigationTests: XCTestCase {
         let picker = PointCloudPicker(points: [adjacentForeground, touched])
         XCTAssertEqual(picker.pick(at: SIMD2(50, 50), viewport: SIMD2(100, 100), projection: matrix_identity_float4x4), touched)
     }
+    func testMaskCompressionBoundsAndLegacyData() throws {
+        let mask = PhotoRangeMask(width: 256, height: 192, pixels: Data(repeating: 255, count: 256 * 192), rangeMetres: 1)
+        let encoded = try JSONEncoder().encode(mask)
+        XCTAssertLessThan(encoded.count, 150)
+        XCTAssertEqual(try JSONDecoder().decode(PhotoRangeMask.self, from: encoded), mask)
+        let legacy = Data(#"{"width":2,"height":2,"pixels":"/wAA/w==","rangeMetres":1}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(PhotoRangeMask.self, from: legacy).pixels, Data([255, 0, 0, 255]))
+        let invalid = Data(#"{"width":2,"height":2,"runs":"////","rangeMetres":1}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(PhotoRangeMask.self, from: invalid))
+    }
     func testSamePixelUsesFrontSurfaceAndRejectsEmptyOrClippedSpace() {
         let near = SIMD3<Float>(0, 0, -0.5), far = SIMD3<Float>(0, 0, 0.5)
         let picker = PointCloudPicker(points: [far, near, SIMD3(0, 0, -2)])
