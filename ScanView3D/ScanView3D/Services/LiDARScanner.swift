@@ -1141,11 +1141,11 @@ final class DepthPointAccumulator {
     /// ARKit's camera buffers are never held for long).
     func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool) -> Void) {
         guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
+              let confidence = depthData.confidenceMap,
               let sensor = CaptureDepthFrame(frame) else { return }
         inFlight = true
         let token = epoch.current
         let depthMap = depthData.depthMap
-        let confidence = depthData.confidenceMap
         let image = frame.capturedImage
         let transform = frame.camera.transform
         let intrinsics = frame.camera.intrinsics

@@ -73,17 +73,29 @@ enum DesignPreview {
             check(picked == world, "SceneKit projection / pick round-trip \(orthographic ? "ortho" : "perspective")")
         }
         lens.usesOrthographicProjection = false
+        // Isolate the walking floor from the terrain fixture. A floor UNDER the
+        // terrain rightly fails the walker's head-clearance / obstacle checks.
+        let start = SIMD3<Float>(20, 0, 0)
         let floor = SCNNode(geometry: SCNBox(width: 10, height: 0.02, length: 10, chamferRadius: 0))
-        floor.position.y = -0.01
+        floor.simdPosition = start + SIMD3(0, -0.01, 0)
         view.scene?.rootNode.addChildNode(floor)
         SCNTransaction.flush()
         _ = view.snapshot()
-        check(coordinator.ground(at: .zero) != nil, "Pick horizontal ground")
-        check(coordinator.ground(at: SIMD3(20, 0, 0)) == nil, "Do not invent ground outside scan")
-        rig.beginWalk(at: .zero)
+        check(coordinator.ground(at: start) != nil, "Pick horizontal ground")
+        check(coordinator.ground(at: SIMD3(40, 0, 0)) == nil, "Do not invent ground outside scan")
+        rig.beginWalk(at: start)
         rig.move(right: 0.1, forward: 0.1, elevation: 5)
         check(abs(camera.simdPosition.y - WalkGeometry.eyeHeight) < 0.001, "Walk ignores vertical elevation")
-        check(simd_length(SIMD2(camera.simdPosition.x, camera.simdPosition.z)) > 0.01, "Walk moves on floor")
+        check(simd_length(SIMD2(camera.simdPosition.x - start.x, camera.simdPosition.z - start.z)) > 0.01, "Walk moves on floor")
+        let wall = SCNNode(geometry: SCNBox(width: 0.3, height: 2, length: 0.3, chamferRadius: 0))
+        wall.simdPosition = start + SIMD3(0, 1, -0.6)
+        view.scene?.rootNode.addChildNode(wall)
+        SCNTransaction.flush()
+        _ = view.snapshot()
+        let beforeWall = camera.simdPosition
+        rig.move(right: 0, forward: 1, elevation: 0)
+        check(camera.simdPosition.z > -0.46 && camera.simdPosition.z < beforeWall.z, "Walk advances then stops before a scanned wall")
+        wall.removeFromParentNode()
         let walkPosition = camera.simdPosition
         rig.look(dx: 0.4, dy: 0.2)
         check(simd_distance(camera.simdPosition, walkPosition) < 0.0001, "Look does not orbit while walking")
@@ -150,14 +162,17 @@ enum DesignPreview {
             d.storageMode = .shared; d.usage = [.shaderRead, .shaderWrite]
             return device.makeTexture(descriptor: d)
         }
-        guard let source = texture(.rgba32Float), let output = texture(.rgba32Float),
+        // Float32 colour filtering isn't supported on every Metal GPU. Use a
+        // universally filterable input, as the real AR camera compositor does.
+        guard let source = texture(.rgba8Unorm), let output = texture(.rgba32Float),
               let depth = texture(.r32Float), let accepted = texture(.r32Float) else {
             check(false, "Capture feedback test textures"); return
         }
-        let colors = [SIMD4<Float>](repeating: SIMD4(0.1, 0.2, 0.8, 1), count: 256)
+        let colors = [SIMD4<Float>](repeating: SIMD4(26.0 / 255, 0.2, 0.8, 1), count: 256)
+        let colorBytes = (0..<256).flatMap { _ in [UInt8(26), 51, 204, 255] }
         let depths: [Float] = (0..<256).map { i in i % 16 < 4 ? 1 : i % 16 < 8 ? 2 : i % 16 < 12 ? 0 : 1 }
         let committed: [Float] = (0..<256).map { $0 % 16 < 8 ? 1 : 0 }
-        colors.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 256) }
+        colorBytes.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
         depths.withUnsafeBytes { depth.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
         committed.withUnsafeBytes { accepted.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
         guard let encoder = command.makeComputeCommandEncoder() else { check(false, "Capture feedback command"); return }

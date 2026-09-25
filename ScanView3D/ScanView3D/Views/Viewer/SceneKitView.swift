@@ -620,6 +620,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             if walkEnabled {
                 guard let view = sceneView, let hit = surfaceHit(at: gesture.location(in: view), in: view),
+                      (hit.normal.map { abs($0.y) >= 0.75 } ?? true),
                       let start = ground(at: hit.point), abs(start.y - hit.point.y) < 0.12,
                       !walkBlocked(from: start, to: start) else {
                     parent.navigation.message = "Choose a clear, scanned floor or ground surface"

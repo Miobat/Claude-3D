@@ -32,10 +32,11 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
     float outside = smoothstep(u.parameters.x, u.parameters.x + 0.045, distance);
     if (outside > 0) {
         float4 blurred = float4(0);
-        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-            blurred += source.sample(linearSampler, uv + float2(x, y) * 9.0 / size);
+        constexpr float weights[5] = {1, 4, 6, 4, 1};
+        for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+            blurred += source.sample(linearSampler, uv + float2(x, y) * 3.0 / size) * weights[x + 2] * weights[y + 2];
         }
-        blurred /= 9.0;
+        blurred /= 256.0;
         float grey = dot(blurred.rgb, float3(0.2126, 0.7152, 0.0722));
         blurred.rgb = mix(blurred.rgb, float3(grey), 0.45) * 0.78;
         color = mix(color, blurred, outside);
