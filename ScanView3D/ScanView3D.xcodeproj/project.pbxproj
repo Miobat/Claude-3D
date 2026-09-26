@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10044 /* TextureQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10044; };
 		A10043 /* RangePhotoInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10043; };
 		A10042 /* CaptureFeedback.metal in Sources */ = {isa = PBXBuildFile; fileRef = B10042; };
 		A10041 /* LiveCaptureFeedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10041; };
@@ -51,6 +52,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10044 /* TextureQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/TextureQuality.swift; sourceTree = "<group>"; };
 		B10043 /* RangePhotoInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RangePhotoInput.swift; sourceTree = "<group>"; };
 		B10042 /* CaptureFeedback.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = CaptureFeedback.metal; sourceTree = "<group>"; };
 		B10041 /* LiveCaptureFeedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveCaptureFeedback.swift; sourceTree = "<group>"; };
@@ -114,6 +116,7 @@
 				B10030 /* LibraryPersistence.swift */,
 				B10040 /* InteractionGeometry.swift */,
 				B10039 /* CaptureGeometry.swift */,
+				B10044 /* TextureQuality.swift */,
 				B10031 /* CaptureSafety.swift */,
 				B10033 /* CoordinateContract.swift */,
 				B10034 /* AlignedUSDZ.swift */,
@@ -340,6 +343,7 @@
 			A10021 /* DebugLogger.swift in Sources */,
 			A10022 /* DebugLogView.swift in Sources */,
 			A10023 /* TextureMapper.swift in Sources */,
+			A10044 /* TextureQuality.swift in Sources */,
 			A10029 /* LocationProvider.swift in Sources */,
 			A10028 /* OrbitCameraController.swift in Sources */,
 			A10027 /* MeasurementOverlay.swift in Sources */,

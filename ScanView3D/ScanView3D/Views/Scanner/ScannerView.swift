@@ -142,6 +142,7 @@ struct ScannerView: View {
                 settings.captureMode = .fast; settings.captureTexture = true
                 scanner.isScanning = true; scanner.vertexCount = 48_210; scanner.faceCount = 80_450
                 scanner.capturedFrameCount = 28; scanner.scanCapacityPercent = 24
+                scanner.sharpTextureFrameCount = 25
                 scanner.scanProgress = "Scanning"
                 scanner.captureHint = "Move slowly for sharper colour"
                 checkpointWarning = "Checkpoint delayed by memory pressure — stop and save soon."
@@ -223,12 +224,20 @@ struct ScannerView: View {
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 16)
             }
-            Text(settings.captureMode == .fast && settings.captureTexture
-                 ? "Blue: shape · Mint: shape + sharp photo · Blur: out of range"
-                 : "Mint: captured shape · Blur: out of range")
-                .font(.caption2).foregroundStyle(.white.opacity(0.85))
-                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 16)
+            coverageLegend
+            if settings.captureMode == .fast && settings.captureTexture {
+                VStack(spacing: 5) {
+                    Text("\(scanner.sharpTextureFrameCount) sharp · \(max(0, scanner.capturedFrameCount - scanner.sharpTextureFrameCount)) soft photos kept")
+                        .font(.caption.weight(.medium)).foregroundStyle(.white)
+                    if let issue = scanner.textureCaptureIssue {
+                        Text(issue).font(.caption2).foregroundStyle(.orange)
+                    } else if scanner.sharpTextureFrameCount == 0 {
+                        Text("Move slowly to add clear photo detail").font(.caption2).foregroundStyle(.white.opacity(0.75))
+                    }
+                }
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
+                .accessibilityElement(children: .combine)
+            }
             scanCapacityGauge
             scanningInfoBar
             if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
@@ -238,6 +247,24 @@ struct ScannerView: View {
             }
         }
         .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
+    }
+
+    private var coverageLegend: some View {
+        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
+            if settings.captureMode == .fast && settings.captureTexture {
+                Label("Shape", systemImage: "cube.transparent.fill").foregroundStyle(.cyan)
+                Label("Photo", systemImage: "photo.fill").foregroundStyle(FieldStyle.mint)
+            } else {
+                Label("Captured", systemImage: "cube.transparent.fill").foregroundStyle(FieldStyle.mint)
+            }
+            Label("Out of range", systemImage: "aqi.medium").foregroundStyle(.white.opacity(0.7))
+        }
+        .font(.caption2.weight(.medium)).padding(.horizontal, 12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(settings.captureMode == .fast && settings.captureTexture
+            ? "Blue means captured shape. Mint means shape with a saved sharp photo. Blurred areas are out of range."
+            : "Mint means captured shape. Blurred areas are out of range.")
     }
 
     // MARK: - Top Status Bar

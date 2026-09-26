@@ -20,7 +20,12 @@ enum DesignPreview {
         let store = StorageManager(directory: root)
         guard !empty else { return store }
         if let site = store.createProject(name: "Coastal path · Demo") {
-            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site)
+            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site, metadata: {
+                if screen == "quality" {
+                    $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
+                        atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
+                }
+            })
             _ = try? store.saveScan(meshData: terrain(), name: "North slope", toProject: site, format: .ply)
         }
         if let room = store.createProject(name: "Studio · Demo") {
@@ -149,11 +154,96 @@ enum DesignPreview {
 
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
+        checkTextureQuality(check)
         let report: [String: Any] = ["checks": count, "failures": failures]
         let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("navigation-checks.json")
         do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
         catch { assertionFailure("Could not write navigation test report: \(error)") }
+    }
+
+    private static func checkTextureQuality(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("texture-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            func photo(_ name: String, pixels: [UInt8]) throws -> URL {
+                let data = Data(pixels)
+                guard let provider = CGDataProvider(data: data as CFData),
+                      let image = CGImage(width: 8, height: 8, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 32,
+                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+                      let png = UIImage(cgImage: image).pngData() else { throw CocoaError(.fileReadCorruptFile) }
+                let url = root.appendingPathComponent(name + ".png")
+                try png.write(to: url); return url
+            }
+            let red = try photo("red", pixels: (0..<64).flatMap { _ -> [UInt8] in [255, 0, 0, 255] })
+            let blue = try photo("blue", pixels: (0..<64).flatMap { _ -> [UInt8] in [0, 0, 255, 255] })
+            let quads = try photo("quadrants", pixels: (0..<64).flatMap { i -> [UInt8] in
+                i < 32 ? (i % 8 < 4 ? [255, 0, 0, 255] : [0, 255, 0, 255])
+                    : (i % 8 < 4 ? [0, 0, 255, 255] : [255, 255, 255, 255])
+            })
+            guard let image = DecodedImage(url: quads) else { check(false, "Decode texture fixture"); return }
+            check(image.sample(SIMD2(0.2, 0.2), gain: 1).x > 0.99 && image.sample(SIMD2(0.2, 0.8), gain: 1).z > 0.99 &&
+                  image.sample(SIMD2(0.8, 0.2), gain: 1).y > 0.99, "Decoded photos retain sensor quadrant orientation")
+            check(image.sample(SIMD2(-10, -10), gain: 1) == image.sample(.zero, gain: 1) &&
+                  image.sample(SIMD2(10, 10), gain: 1) == image.sample(SIMD2(1, 1), gain: 1), "Texture padding clamps bilinear samples")
+            let intrinsics = simd_float3x3(SIMD3(4, 0, 0), SIMD3(0, 4, 0), SIMD3(4, 4, 1))
+            let depth = [Float](repeating: 1, count: 64)
+            func frame(_ id: Int, _ url: URL, sharp: Bool = true, depth values: [Float]? = nil) -> CapturedFrame {
+                CapturedFrame(id: id, imageURL: url, transform: matrix_identity_float4x4, intrinsics: intrinsics,
+                    imageWidth: 8, imageHeight: 8, timestamp: Double(id), depth: values ?? depth, depthWidth: 8, depthHeight: 8,
+                    gain: 1, sharp: sharp)
+            }
+            let pose = FramePose(view: matrix_identity_float4x4, intrinsics: intrinsics, sensorW: 8, sensorH: 8,
+                position: .zero, forward: SIMD3(0, 0, -1), depth: depth, depthW: 8, depthH: 8)
+            check(pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 1)), "Texture accepts matching depth")
+            check(!pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 0.5)) &&
+                  !pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 2)), "Texture rejects both foreground and background mismatch")
+            check(!pose.isVisible(.init(uv: SIMD2(.nan, 0.5), depth: 1)), "Texture safely rejects invalid projection")
+            let vertices: [SIMD3<Float>] = [SIMD3(-0.4, 0.4, -1), SIMD3(-0.4, -0.4, -1), SIMD3(0.4, -0.4, -1)]
+            let bounds = MeshData.bounds(of: vertices)
+            let mesh = MeshData(vertices: vertices, normals: Array(repeating: SIMD3(0, 0, 1), count: 3), faces: [[0, 1, 2]],
+                colors: Array(repeating: SIMD4(0, 1, 1, 1), count: 3), boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+            var cornerBlocked = depth; cornerBlocked[2 * 8 + 2] = 0.5
+            let cases: [(String, [CapturedFrame], Float, Float, Float)] = [
+                ("Sharp beats soft", [frame(1, red, sharp: false), frame(2, blue)], 1, 0, 0),
+                ("Soft fallback remains available", [frame(1, red, sharp: false)], 0, 1, 0),
+                ("Occluded corner rejects entire photo patch", [frame(1, red, depth: cornerBlocked)], 0, 0, 1),
+                ("Unknown depth cannot authorize a photo", [frame(1, red, depth: [])], 0, 0, 1),
+                ("Missing JPEG retains sampled colour", [frame(1, root.appendingPathComponent("missing.jpg"))], 0, 0, 1)
+            ]
+            for (name, frames, sharp, soft, fallback) in cases {
+                try autoreleasepool {
+                    let mapper = TextureMapper(); mapper.useFixtureFrames(frames)
+                    guard let baked = mapper.bakeTexture(meshData: mesh, atlasSize: 2048), let report = baked.quality else {
+                        check(false, name + " bakes"); return
+                    }
+                    check(abs(report.sharpFraction - Double(sharp)) < 0.001 && abs(report.softFraction - Double(soft)) < 0.001 &&
+                          abs(report.fallbackFraction - Double(fallback)) < 0.001, name + " — area report")
+                    let url = root.appendingPathComponent("atlas.png")
+                    try baked.atlasImage.pngData()!.write(to: url)
+                    guard let atlas = DecodedImage(url: url) else { check(false, "Decode baked atlas"); return }
+                    let uv = baked.cornerUVs.reduce(SIMD2<Float>.zero, +) / 3
+                    let c = atlas.sample(SIMD2(uv.x, 1 - uv.y), gain: 1)
+                    check(fallback > 0 ? c.x < 0.01 && c.y > 0.99 && c.z > 0.99
+                          : sharp > 0 ? c.x < 0.01 && c.z > 0.99 : c.x > 0.99 && c.z < 0.01, name + " — real atlas colour")
+                    if sharp > 0 {
+                        let store = StorageManager(directory: root.appendingPathComponent("library"))
+                        guard let project = store.createProject(name: "Texture metadata") else { check(false, "Texture project fixture"); return }
+                        let scan = try store.saveScan(meshData: mesh, name: name, toProject: project, baked: baked)
+                        let restored = StorageManager(directory: root.appendingPathComponent("library")).projects.first?.scans.first
+                        check(restored?.textureQuality == report && restored?.hasTexture == true, "Texture report persists with baked model")
+                        let duplicate = store.duplicateScan(scan, from: project, to: project)
+                        check(duplicate?.textureQuality == report, "Duplicate retains texture report")
+                        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(scan)) as! [String: Any]
+                        json.removeValue(forKey: "textureQuality")
+                        let legacy = try JSONDecoder().decode(Scan.self, from: JSONSerialization.data(withJSONObject: json))
+                        check(legacy.textureQuality == nil, "Legacy scans without quality report still decode")
+                    }
+                }
+            }
+        } catch { check(false, "Native texture fixtures: \(error)") }
     }
 
     private static func checkFeedbackShader(_ check: (Bool, String) -> Void) {
@@ -345,7 +435,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "walk", "joysticks", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }

@@ -44,7 +44,7 @@ OpenUSD export reader and launches native SceneKit / Metal / packed-checkpoint
 fixtures. `native-design-previews` includes `navigation-checks.json`, active
 capture screenshots and large-text / landscape samples.
 
-## Phone acceptance before publication
+## Phone acceptance on an authorized TestFlight test build
 
 1. At 0.5 m / 1 m / 3 m, scan an object with a wall behind it. Check blur and
    mesh boundaries after saving; slowly orbit the object and revisit old areas.

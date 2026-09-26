@@ -36,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10037`/`B10037`). Deleting a file = remove those 4 lines too.
+(currently `A10045`/`B10045`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -57,6 +57,7 @@ and a line in the Sources build phase. Copy an existing file's lines (e.g.
 | Capture | `Services/LiDARScanner.swift` | ARKit session, anchors, range filter (walked path, `PathRangeIndex`), keyframes, HQ/Splat photos (+12 MP), white-balance lock, memory guard, `DepthPointAccumulator` (LiDAR point cloud), `PoseFile`, `MeshData` |
 | | `Services/MockLiDARScanner.swift` | Simulator stand-in (same API) |
 | | `Services/TextureMapper.swift` | Colour keyframes on disk (+ depth for occlusion), vertex colours, **photo-patch texture baking** |
+| | `StorageCore/Sources/StorageCore/TextureQuality.swift` | Photo quality scoring, bounded overlap-exposure solver, fallback palette and saved area diagnostics; see `ScanView3D/TEXTURE_QUALITY.md` |
 | Processing | `Services/MeshProcessor.swift` | Clean-up (weld, Taubin smoothing, clustering), SceneKit node builders, `PhotogrammetryProcessor` (on-device, `.poses`), `SplatExporter` |
 | | `Services/MeasurementEngine.swift` | `GeometryMath` (plane fit, RANSAC, intersections, Horn similarity), `ModelGeometryIndex` (spatial index, wall axes), `SceneFrame` (level/square-up) |
 | Storage | `Services/StorageManager.swift` | Projects JSON, scan files, companions, export/share (zips textured OBJ), CAD exports (OBJ Z-up, STL mm), measurements files |

@@ -43,6 +43,7 @@ struct ModelViewerView: View {
 
     // Share
     @State private var showingShareSheet = false
+    @State private var showingTextureQuality = false
     @State private var shareURL: URL?
 
     // More menu
@@ -179,6 +180,9 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        Button { showingTextureQuality = true } label: {
+                            Label("Texture quality", systemImage: "photo.badge.checkmark")
+                        }
                         Text(scan.scaleDescription)
                         if let provenance = scan.coordinateProvenance {
                             Text(provenance.localDatum)
@@ -215,11 +219,18 @@ struct ModelViewerView: View {
                 ShareSheet(items: [url])
             }
         }
+        .sheet(isPresented: $showingTextureQuality) {
+            TextureQualitySheet(report: scan.textureQuality, scanName: scan.name)
+        }
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
+            if DesignPreview.screen == "quality" {
+                // Let the simulator fixture apply its requested orientation first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingTextureQuality = true }
+            }
             #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
@@ -959,6 +970,82 @@ struct ExportProgressView: View {
                 .padding(24).fieldCard().frame(maxWidth: 420).padding(24)
             }
         }
+    }
+}
+
+private struct TextureQualitySheet: View {
+    let report: TextureQualityReport?
+    let scanName: String
+    @Environment(\.dismiss) private var dismiss
+    @ScaledMetric(relativeTo: .subheadline) private var iconWidth: CGFloat = 22
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    Label("SURFACE DETAIL", systemImage: "square.stack.3d.up")
+                        .font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(FieldStyle.mint)
+                    Text(scanName).font(.title2.weight(.semibold))
+                    if let report {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(report.sharpFraction, format: .percent.precision(.fractionLength(0)))
+                                .font(.system(.largeTitle, design: .rounded, weight: .semibold)).monospacedDigit()
+                            Text("of saved surface uses sharp photos").font(.subheadline).foregroundStyle(.secondary)
+                            GeometryReader { geometry in
+                                HStack(spacing: 0) {
+                                    FieldStyle.mint.frame(width: geometry.size.width * report.sharpFraction)
+                                    Color.orange.frame(width: geometry.size.width * report.softFraction)
+                                    Color.gray.frame(width: geometry.size.width * report.fallbackFraction)
+                                }
+                            }.frame(height: 10).clipShape(Capsule()).accessibilityHidden(true)
+                            qualityRow("Sharp photos", fraction: report.sharpFraction, color: FieldStyle.mint, icon: "photo.fill")
+                            qualityRow("Soft photos", fraction: report.softFraction, color: .orange, icon: "camera.metering.partial")
+                            qualityRow("Colour only", fraction: report.fallbackFraction, color: .gray, icon: "paintpalette.fill")
+                        }.padding(20).fieldPanel()
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("Texture delivery", systemImage: "square.and.arrow.down").font(.headline)
+                            Text("\(report.photoCount) photos used · \(report.atlasSize) × \(report.atlasSize) atlas")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            Text("Photo-patch scale: \(Int(report.atlasScale * 100))%")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            if report.atlasScale < 0.75 {
+                                Text("Photo patches were reduced to fit this scan. Smaller separate scans can retain more fine detail.")
+                                    .font(.callout)
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("For your next scan", systemImage: "sparkle").font(.headline)
+                            Text(report.fallbackFraction > 0.1
+                                 ? "Revisit blue areas slowly from another angle. A surface needs a saved, depth-matched photo to keep fine detail."
+                                 : "Move steadily with overlap between views. Even lighting helps preserve detail and reduce visible seams.")
+                                .font(.callout).foregroundStyle(.secondary)
+                        }.padding(20).fieldPanel()
+                        Text("Estimated from photo motion, lighting and depth agreement. Percentages are area-weighted over the saved mesh—not scan completeness, focus verification or measurement accuracy. Colour-only regions retain sampled colour when available, without invented detail.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Label("No texture report", systemImage: "info.circle").font(.headline)
+                        Text("Reports are created when saving a new Fast scan with a baked photo texture. Older scans and other capture modes do not have this report; your model is unchanged.")
+                            .font(.body).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: 580, alignment: .leading).padding(24).frame(maxWidth: .infinity)
+            }
+            .background(FieldStyle.viewport)
+            .navigationTitle("Texture quality").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private func qualityRow(_ title: String, fraction: Double, color: Color, icon: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Image(systemName: icon).foregroundStyle(color).frame(width: iconWidth).accessibilityHidden(true)
+            Text(title).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Text(fraction, format: .percent.precision(.fractionLength(0))).monospacedDigit()
+        }
+        .font(.subheadline).accessibilityElement(children: .combine)
     }
 }
 
