@@ -72,7 +72,18 @@ struct ScannerView: View {
 
             GeometryReader { geometry in
                 Group {
-                    if geometry.size.width > geometry.size.height {
+                    if scanner.isScanning && typeSize.isAccessibilitySize {
+                        VStack(spacing: 8) {
+                            ScrollView {
+                                VStack(spacing: 12) {
+                                    captureDashboard
+                                    statusMessages
+                                    topStatusBar
+                                }.padding(.top, 8)
+                            }
+                            bottomControls
+                        }
+                    } else if geometry.size.width > geometry.size.height {
                         HStack(alignment: .top, spacing: 0) {
                             VStack(spacing: 8) {
                                 topStatusBar
@@ -207,21 +218,26 @@ struct ScannerView: View {
 
     private var captureDashboard: some View {
         VStack(spacing: 8) {
+            if let warning = checkpointWarning {
+                Text(warning).font(.caption2).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+            }
             Text(settings.captureMode == .fast && settings.captureTexture
                  ? "Blue: shape · Mint: shape + sharp photo · Blur: out of range"
                  : "Mint: captured shape · Blur: out of range")
                 .font(.caption2).foregroundStyle(.white.opacity(0.85))
-                .multilineTextAlignment(.center).padding(.horizontal, 12)
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
             scanCapacityGauge
             scanningInfoBar
-            if let warning = checkpointWarning {
-                Text(warning).font(.caption2).foregroundStyle(.orange).padding(.horizontal, 12)
-            } else if let date = activeDraft?.geometryCheckpointAt {
+            if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
                 (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
                     .font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
             }
         }
-        .padding(.top, 12).fieldPanel().padding(.horizontal, 16)
+        .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
     }
 
     // MARK: - Top Status Bar
@@ -307,14 +323,18 @@ struct ScannerView: View {
             }
             .frame(height: 6)
 
-            HStack {
+            let capacityLayout = typeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout())
+            capacityLayout {
                 Text(String(format: "%.0f MB est.", scanner.estimatedFileSizeMB))
-                Spacer()
+                if !typeSize.isAccessibilitySize { Spacer() }
                 Text(scanner.scanCapacityPercent > 80
                      ? "Scan capacity nearly full"
                      : String(format: "%.0f%% of scan capacity", scanner.scanCapacityPercent))
                     .foregroundColor(scanner.scanCapacityPercent > 80 ? .orange : .gray)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .font(.caption2)
             .foregroundColor(.white.opacity(0.8))
         }
@@ -485,6 +505,7 @@ struct ScannerView: View {
                     controlLabel(scanner.isPaused ? "Resume" : "Pause",
                                  icon: scanner.isPaused ? "play.circle.fill" : "pause.circle.fill")
                 }
+                .frame(maxWidth: .infinity)
 
                 Button {
                     stopAndPrepareSave()
@@ -495,15 +516,18 @@ struct ScannerView: View {
                             RoundedRectangle(cornerRadius: 6).fill(Color.white).frame(width: 24, height: 24)
                         }
                         Text("Finish").font(.subheadline.weight(.semibold))
+                            .lineLimit(1).minimumScaleFactor(0.65)
                     }
                     .foregroundColor(.white)
                 }
+                .frame(maxWidth: .infinity)
 
                 Button {
                     showingResetConfirmation = true
                 } label: {
                     controlLabel("Reset", icon: "arrow.counterclockwise.circle.fill")
                 }
+                .frame(maxWidth: .infinity)
             } else {
                 Button {
                     guard activeDraft == nil else { showingSaveDialog = true; return }
@@ -566,6 +590,7 @@ struct ScannerView: View {
         VStack(spacing: 4) {
             Image(systemName: icon).font(.system(size: 36))
             Text(title).font(.caption.weight(.medium))
+                .lineLimit(1).minimumScaleFactor(0.65)
         }
         .foregroundColor(.white)
         .frame(minWidth: 64, minHeight: 64)

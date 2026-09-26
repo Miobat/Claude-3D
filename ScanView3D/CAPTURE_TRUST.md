@@ -16,6 +16,8 @@ explicit action; pushes to `codex/capture-trust-recovery` only validate.
   Evicted photos invalidate their coverage claims. Other modes use mint for shape.
 - Live legend explains the colours; memory-delayed / failed recovery writes
   are visible. The checkpoint timestamp advances only after successful writing.
+  At accessibility text sizes, scanning information scrolls while the capture
+  controls stay available; warnings and the legend wrap instead of truncating.
 - Coverage carries sampled camera RGB. Lightweight Fast recovery and colour
   sampling misses retain this fallback instead of classification colours / grey.
 - Point and coverage budgets share conservative memory headroom for saving;
