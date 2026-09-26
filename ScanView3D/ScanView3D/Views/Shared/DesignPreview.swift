@@ -173,7 +173,7 @@ enum DesignPreview {
                       let image = CGImage(width: 8, height: 8, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 32,
                         space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
                         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
-                      let png = UIImage(cgImage: image).pngData() else { throw StorageFailure.missingItem }
+                      let png = UIImage(cgImage: image).pngData() else { throw CocoaError(.fileReadCorruptFile) }
                 let url = root.appendingPathComponent(name + ".png")
                 try png.write(to: url); return url
             }

@@ -2,7 +2,8 @@
 
 Branch: `codex/texture-quality-polish`, based on `codex/capture-trust-recovery`
 at `b823cfb`. Depends on the first batch; do not replace it with old `main`.
-Development pushes validate only. No TestFlight publication is authorized here.
+Development pushes validate only. The owner subsequently requested publication;
+dispatch TestFlight manually only after the validation and visual checks pass.
 
 ## Implementation
 
