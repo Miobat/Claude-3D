@@ -223,6 +223,7 @@ class StorageManager: ObservableObject {
         )
         scan.hasColor = !meshData.colors.isEmpty
         scan.hasTexture = isTextured
+        scan.textureQuality = isTextured ? baked?.quality : nil
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
 
@@ -394,6 +395,7 @@ class StorageManager: ObservableObject {
                 updated.modelScale = nil
                 updated.modelTransform = modelTransform.map(StorageManager.array(of:))
                 updated.coordinateProvenance = provenance
+                updated.textureQuality = nil // A new reconstruction has different surfaces/photos.
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
                     throw StorageFailure.missingItem
@@ -611,6 +613,7 @@ class StorageManager: ObservableObject {
             fileSize: scan.fileSize
         )
         newScan.hasTexture = scan.hasTexture
+        newScan.textureQuality = scan.textureQuality
         newScan.hasColor = scan.hasColor
         newScan.boundingBoxMin = scan.boundingBoxMin
         newScan.boundingBoxMax = scan.boundingBoxMax

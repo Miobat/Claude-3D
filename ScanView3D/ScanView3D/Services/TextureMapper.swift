@@ -29,6 +29,7 @@ struct CapturedFrame {
     /// False for a motion-blurred fallback frame: used only where no sharp
     /// photo sees a surface, so it gets real (soft) colour instead of grey.
     let sharp: Bool
+    var quality = TextureFrameQuality()
 }
 
 /// Captures keyframes during scanning and projects them onto the mesh.
@@ -60,7 +61,7 @@ class TextureMapper {
     private var lastAnyTime: TimeInterval = 0
     private var lastTickTransform: simd_float4x4?
     private var lastTickTime: TimeInterval = 0
-    private var referenceExposure: Double?
+    private var lastAttemptTime: TimeInterval = -.infinity
 
     private var maxFrames: Int = 200
     private var maxImageWidth: Int = 1920
@@ -81,6 +82,14 @@ class TextureMapper {
         lock.lock(); defer { lock.unlock() }
         return frames.count
     }
+
+    var sharpFrameCount: Int { capturedFrames.filter(\.sharp).count }
+
+    #if DEBUG && targetEnvironment(simulator)
+    func useFixtureFrames(_ values: [CapturedFrame]) {
+        lock.lock(); frames = values; lock.unlock()
+    }
+    #endif
 
     /// Memory held by kept frames (images are on disk; only depth maps are in RAM).
     var estimatedMemoryUsageMB: Double {
@@ -113,7 +122,7 @@ class TextureMapper {
         lastAnyTime = 0
         lastTickTransform = nil
         lastTickTime = 0
-        referenceExposure = nil
+        lastAttemptTime = -.infinity
     }
 
     /// No new frames may be accepted while draining. Count callbacks are queued
@@ -136,9 +145,10 @@ class TextureMapper {
     /// Call on the main thread for each candidate frame (tracking must be normal).
     /// Keeps it only if the camera moved enough since the last keyframe and the
     /// image isn't blurred by motion.
-    func captureFrame(from arFrame: ARFrame, exposure: (iso: Double, duration: Double)? = nil,
+    func captureFrame(from arFrame: ARFrame,
                       onCountChanged: ((_ count: Int, _ sharp: Bool) -> Void)? = nil,
-                      onStored: ((Int, CaptureDepthFrame?, Set<Int>) -> Void)? = nil) -> Bool {
+                      onStored: ((Int, CaptureDepthFrame?, Set<Int>) -> Void)? = nil,
+                      onIssue: ((String?) -> Void)? = nil) -> Bool {
         let now = arFrame.timestamp
         let transform = arFrame.camera.transform
 
@@ -150,13 +160,14 @@ class TextureMapper {
             let move = simd_distance(prev.position, transform.position)
             let exposureTime = arFrame.camera.exposureDuration > 0 ? arFrame.camera.exposureDuration : 1.0 / 60.0
             let fx = Double(arFrame.camera.intrinsics[0][0])
-            // Rotation smear + translation smear for a surface ~1.5 m away.
-            blurPixels = (Double(turn) / dt + Double(move) / dt / 1.5) * exposureTime * fx
+            blurPixels = TextureQualityMath.motionBlur(turn: Double(turn), move: Double(move), seconds: dt,
+                exposure: exposureTime, focalPixels: fx,
+                distance: Self.subjectDistance((arFrame.smoothedSceneDepth ?? arFrame.sceneDepth)?.depthMap))
         }
         lastTickTransform = transform
         lastTickTime = now
 
-        guard !conversionInFlight else { return false }
+        guard !conversionInFlight, now - lastAttemptTime >= 0.2 else { return false }
         func novel(from last: simd_float4x4?, move: Float, turn: Float) -> Bool {
             guard let last else { return true }
             return simd_distance(last.position, transform.position) >= move
@@ -174,26 +185,14 @@ class TextureMapper {
                   novel(from: lastAnyTransform, move: minFallbackMove, turn: minFallbackTurn) else { return false }
             sharp = false
         }
-        guard let dir = frameFolder() else { return false }
-
-        if sharp {
-            lastKeptTransform = transform
-            lastKeptTime = now
+        lastAttemptTime = now
+        guard let dir = frameFolder() else {
+            onIssue?("Photo storage unavailable — shape capture continues")
+            return false
         }
-        lastAnyTransform = transform
-        lastAnyTime = now
         conversionInFlight = true
-
-        // Exposure normalisation: brightness ∝ ISO × exposure time.
-        var gain: Float = 1
-        if let e = exposure, e.iso > 0, e.duration > 0 {
-            let value = e.iso * e.duration
-            if let ref = referenceExposure {
-                gain = Float(min(1.6, max(0.6, ref / value)))
-            } else {
-                referenceExposure = value
-            }
-        }
+        // JPEG pixels already include camera exposure/tone mapping. Correct only
+        // measured overlap at bake time, not ISO ratios between different views.
 
         let pixelBuffer = arFrame.capturedImage
         let depthBuffer = (arFrame.smoothedSceneDepth ?? arFrame.sceneDepth)?.depthMap
@@ -213,11 +212,14 @@ class TextureMapper {
             var count = 0
             var retainedPhotos: Set<Int> = []
             let depth = TextureMapper.copyDepth(depthBuffer)
-            if self.writeJPEG(pixelBuffer, maxWidth: maxWidth, to: url) {
+            let quality = TextureFrameQuality.measure(luma: Self.sampleLuma(pixelBuffer), blurPixels: Float(blurPixels))
+            let storedSharp = sharp && quality.permitsSharpCoverage
+            let written = self.writeJPEG(pixelBuffer, maxWidth: maxWidth, to: url)
+            if written {
                 let frame = CapturedFrame(id: id, imageURL: url, transform: transform, intrinsics: intrinsics,
                                           imageWidth: width, imageHeight: height, timestamp: now,
                                           depth: depth.values, depthWidth: depth.width, depthHeight: depth.height,
-                                          gain: gain, sharp: sharp)
+                                          gain: 1, sharp: storedSharp, quality: quality)
                 let accepted = self.epoch.withCurrent(token) {
                     self.lock.lock()
                     let fallbacks = self.frames.reduce(0) { $0 + ($1.sharp ? 0 : 1) }
@@ -238,13 +240,59 @@ class TextureMapper {
             DispatchQueue.main.async {
                 guard self.epoch.isCurrent(token) else { return }
                 self.conversionInFlight = false
+                onIssue?(written ? quality.lightingHint : "Photo could not be saved — check free storage")
                 if count > 0 {
-                    onCountChanged?(count, sharp)
+                    self.lastAnyTransform = transform
+                    self.lastAnyTime = now
+                    if storedSharp {
+                        self.lastKeptTransform = transform
+                        self.lastKeptTime = now
+                    }
+                    onCountChanged?(count, storedSharp)
                     onStored?(id, photoDepth, retainedPhotos)
                 }
             }
         }
         return sharp
+    }
+
+    /// Nearer quartile of sparse valid depth: close objects need stricter motion
+    /// limits than room-scale walls. Unknown depth uses a conservative 0.5 m.
+    static func subjectDistance(_ buffer: CVPixelBuffer?) -> Double {
+        guard let buffer, CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_DepthFloat32 else { return 0.5 }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return 0.5 }
+        let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
+        let bytes = CVPixelBufferGetBytesPerRow(buffer)
+        var values: [Float] = []
+        for y in stride(from: 0, to: h, by: max(1, h / 12)) {
+            let row = base.advanced(by: y * bytes).assumingMemoryBound(to: Float.self)
+            for x in stride(from: 0, to: w, by: max(1, w / 16)) where row[x].isFinite && row[x] > 0.1 && row[x] <= 5 {
+                values.append(row[x])
+            }
+        }
+        values.sort()
+        return values.isEmpty ? 0.5 : Double(values[values.count / 4])
+    }
+
+    private static func sampleLuma(_ buffer: CVPixelBuffer) -> [UInt8] {
+        guard CVPixelBufferGetPlaneCount(buffer) > 0 else { return [] }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return [] }
+        let w = CVPixelBufferGetWidthOfPlane(buffer, 0), h = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let bytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        // ARKit uses full-range bi-planar YCbCr; normalize video-range input too.
+        let videoRange = CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        var values: [UInt8] = []
+        for y in stride(from: 0, to: h, by: max(1, h / 24)) {
+            let row = base.advanced(by: y * bytes).assumingMemoryBound(to: UInt8.self)
+            for x in stride(from: 0, to: w, by: max(1, w / 32)) {
+                values.append(videoRange ? UInt8(clamping: (Int(row[x]) - 16) * 255 / 219) : row[x])
+            }
+        }
+        return values
     }
 
     private static func copyDepth(_ buffer: CVPixelBuffer?) -> (values: [Float], width: Int, height: Int) {
@@ -272,9 +320,9 @@ class TextureMapper {
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
               let data = ciContext.jpegRepresentation(
                 of: image, colorSpace: space,
-                options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.85])
+                options: [CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.92])
         else { return false }
-        return (try? data.write(to: url)) != nil
+        return (try? data.write(to: url, options: .atomic)) != nil
     }
 
     static func angle(between a: simd_float4x4, and b: simd_float4x4) -> Float {
@@ -361,7 +409,10 @@ class TextureMapper {
                       proj.uv.y >= 0.02, proj.uv.y <= 0.98, pose.isVisible(proj) else { continue }
                 let center = max(0, 1 - simd_length(proj.uv - SIMD2<Float>(0.5, 0.5)) * 1.5)
                 // Two tiers: any usable sharp view beats every blurred fallback.
-                let score = facing * viewAlign * center / max(dist, 0.2) + (sharp[fi] ? 1000 : 0)
+                let qualityScore = TextureQualityMath.viewScore(facing: facing, alignment: viewAlign,
+                    centre: center, distance: dist, quality: frameList[fi].quality)
+                guard qualityScore > 0 else { continue }
+                let score = qualityScore + (sharp[fi] ? 1000 : 0)
                 if score > bestScore { bestScore = score; choice[i] = Int32(fi); choiceUV[i] = proj.uv }
             }
         }
@@ -400,7 +451,7 @@ class TextureMapper {
             let face = meshData.faces[f]
             guard face.count == 3 else { return nil }
             let a = Int(face[0]), b = Int(face[1]), c = Int(face[2])
-            guard a < vertexCount, b < vertexCount, c < vertexCount else { return nil }
+            guard a >= 0, b >= 0, c >= 0, a < vertexCount, b < vertexCount, c < vertexCount else { return nil }
             return (a, b, c)
         }
 
@@ -420,17 +471,21 @@ class TextureMapper {
             let dir = toC / dist
             let viewAlign = simd_dot(dir, pose.forward)
             let facing = abs(simd_dot(n, dir))
-            guard viewAlign > 0.15, facing > 0.1,
-                  let pc = pose.project(centroid), pose.isVisible(pc),
-                  pose.project(v0) != nil, pose.project(v1) != nil, pose.project(v2) != nil else { return 0 }
+            guard viewAlign > 0.15, facing > 0.1, let pc = pose.project(centroid),
+                  [v0, v1, v2, centroid, (v0 + v1) / 2, (v1 + v2) / 2, (v2 + v0) / 2].allSatisfy({
+                      guard let p = pose.project($0) else { return false }
+                      return pose.isVisible(p)
+                  }) else { return 0 }
             // Prefer close, head-on views near the image centre.
             let centre = max(0.2, 1 - simd_length(pc.uv - SIMD2<Float>(0.5, 0.5)))
-            return facing * viewAlign * centre / (dist * dist)
+            return TextureQualityMath.viewScore(facing: facing, alignment: viewAlign, centre: centre,
+                                                distance: dist, quality: frameList[fi].quality)
         }
 
         // 1. Best frame per triangle: the best sharp photo; a blurred fallback
         //    only where no sharp photo sees the triangle at all.
         var faceFrame = [Int32](repeating: -1, count: faceCount)
+        var originalScore = [Float](repeating: 0, count: faceCount)
         for f in 0..<faceCount {
             var bestSharp: Float = 0, bestBlurred: Float = 0
             var sharpFrame: Int32 = -1, blurredFrame: Int32 = -1
@@ -440,6 +495,7 @@ class TextureMapper {
                 else if s > bestBlurred { bestBlurred = s; blurredFrame = Int32(fi) }
             }
             faceFrame[f] = sharpFrame >= 0 ? sharpFrame : blurredFrame
+            originalScore[f] = sharpFrame >= 0 ? bestSharp : bestBlurred
         }
 
         // 2. Edge neighbours, then smooth the choice so patches are large:
@@ -460,16 +516,37 @@ class TextureMapper {
         }
         edgeFirstFace.removeAll()
         for _ in 0..<2 {
+            var next = faceFrame
             for f in 0..<faceCount where !neighbours[f].isEmpty {
                 var counts: [Int32: Int] = [:]
                 for nb in neighbours[f] where faceFrame[Int(nb)] >= 0 { counts[faceFrame[Int(nb)], default: 0] += 1 }
-                guard let best = counts.max(by: { $0.value < $1.value }),
-                      best.key != faceFrame[f], best.value >= 2, score(f, Int(best.key)) > 0 else { continue }
-                // Never trade this triangle's sharp photo for a neighbour's blurred one.
-                if faceFrame[f] >= 0, sharp[Int(faceFrame[f])], !sharp[Int(best.key)] { continue }
-                faceFrame[f] = best.key
+                guard let best = counts.max(by: { $0.value == $1.value ? $0.key > $1.key : $0.value < $1.value }),
+                      best.key != faceFrame[f], best.value >= 2,
+                      TextureQualityMath.canAdopt(current: originalScore[f], candidate: score(f, Int(best.key)),
+                        currentSharp: faceFrame[f] >= 0 && sharp[Int(faceFrame[f])],
+                        candidateSharp: sharp[Int(best.key)]) else { continue }
+                next[f] = best.key
+            }
+            faceFrame = next
+        }
+
+        // Measure the SAME surface in adjacent photo patches. Sparse bounded
+        // samples and one decoded image at a time keep this pass memory-safe.
+        var overlaps: [(a: Int, b: Int, world: SIMD3<Float>)] = []
+        var pairCounts: [UInt64: Int] = [:]
+        for f in 0..<faceCount where faceFrame[f] >= 0 && overlaps.count < 4096 {
+            guard let (v0, v1, v2) = corners(f) else { continue }
+            for nb in neighbours[f] where Int(nb) > f && faceFrame[Int(nb)] >= 0 && faceFrame[Int(nb)] != faceFrame[f] {
+                let a = min(Int(faceFrame[f]), Int(faceFrame[Int(nb)]))
+                let b = max(Int(faceFrame[f]), Int(faceFrame[Int(nb)]))
+                let key = UInt64(a) << 32 | UInt64(b)
+                guard pairCounts[key, default: 0] < 32, overlaps.count < 4096,
+                      score(f, a) > 0, score(f, b) > 0 else { continue }
+                overlaps.append((a, b, (meshData.vertices[v0] + meshData.vertices[v1] + meshData.vertices[v2]) / 3))
+                pairCounts[key, default: 0] += 1
             }
         }
+        let seamGains = overlapGains(overlaps, frames: frameList, poses: poses)
 
         // 3. Patches = connected triangles sharing a frame (union-find).
         var parent = Array(0..<faceCount)
@@ -528,13 +605,30 @@ class TextureMapper {
         // 4. Pack patches into the atlas (shelves), shrinking evenly if needed.
         let atlas = TextureMapper.affordableAtlasSize(max(2048, min(requestedSize, 8192)))
         let pad = 3
-        let reserved = 8      // grey tile for triangles no photo sees
+        // Reserve full rows of padded colour swatches. Also used if a source
+        // JPEG becomes unreadable; such faces must not keep invalid photo UVs.
+        let tile = 8, columns = atlas / tile
+        var palette: [Int] = [], paletteIndex: [Int: Int] = [:]
+        var faceSwatch = [Int](repeating: 0, count: faceCount)
+        for f in 0..<faceCount {
+            var color = SIMD3<Float>(repeating: 0.7)
+            if let (a, b, c) = corners(f), meshData.colors.count == vertexCount {
+                let sum = (meshData.colors[a] + meshData.colors[b] + meshData.colors[c]) / 3
+                color = SIMD3(sum.x, sum.y, sum.z)
+            }
+            let key = TextureQualityMath.paletteKey(color)
+            if paletteIndex[key] == nil { paletteIndex[key] = palette.count; palette.append(key) }
+            faceSwatch[f] = paletteIndex[key]!
+        }
+        let reservedRows = ((palette.count + columns - 1) / columns) * tile
         let totalArea = patches.reduce(Float(0)) { $0 + ($1.pixelSize.x + Float(2 * pad)) * ($1.pixelSize.y + Float(2 * pad)) }
         var scale = min(1, (Float(atlas * atlas) * 0.8 / max(totalArea, 1)).squareRoot())
-        let order = patches.indices.sorted { patches[$0].pixelSize.y > patches[$1].pixelSize.y }
+        let order = patches.indices.sorted {
+            patches[$0].pixelSize.y == patches[$1].pixelSize.y ? $0 < $1 : patches[$0].pixelSize.y > patches[$1].pixelSize.y
+        }
         var packed = false
         for _ in 0..<30 {
-            var x = reserved + pad, y = 0, shelf = 0
+            var x = 0, y = reservedRows, shelf = 0
             var ok = true
             for i in order {
                 let w = Int((patches[i].pixelSize.x * scale).rounded(.up)) + 2 * pad
@@ -555,15 +649,26 @@ class TextureMapper {
         buf.initialize(repeating: 150, count: count)
         var ai = 3
         while ai < count { buf[ai] = 255; ai += 4 }
+        for (i, key) in palette.enumerated() {
+            let c = TextureQualityMath.paletteColor(key) * 255
+            for y in 0..<tile {
+                for x in 0..<tile {
+                    let o = (((i / columns) * tile + y) * atlas + (i % columns) * tile + x) * 4
+                    buf[o] = UInt8(c.x.rounded()); buf[o + 1] = UInt8(c.y.rounded()); buf[o + 2] = UInt8(c.z.rounded())
+                }
+            }
+        }
 
         // 5. Copy each patch's region of its photo (plus padding, so edges blend).
         var byFrame = [[Int]](repeating: [], count: poses.count)
         for i in patches.indices { byFrame[patches[i].frame].append(i) }
         let supersample = scale < 0.75
+        var decodedFrames = Set<Int>()
         for (fi, members) in byFrame.enumerated() where !members.isEmpty {
             autoreleasepool {
                 guard let image = DecodedImage(url: frameList[fi].imageURL) else { return }
-                let gain = frameList[fi].gain
+                decodedFrames.insert(fi)
+                let gain = frameList[fi].gain * seamGains[fi]
                 let f = frameList[fi]
                 let storedW = Float(min(f.imageWidth, maxImageWidth))
                 let storedH = Float(f.imageHeight) * storedW / Float(max(f.imageWidth, 1))
@@ -601,14 +706,21 @@ class TextureMapper {
 
         // 6. UVs per face corner (OBJ convention: origin bottom-left).
         let af = Float(atlas)
-        var cornerUVs = [SIMD2<Float>](repeating: SIMD2<Float>(Float(reserved) / 2 / af, 1 - Float(reserved) / 2 / af),
-                                        count: faceCount * 3)
-        for p in patches {
+        var cornerUVs = [SIMD2<Float>](repeating: .zero, count: faceCount * 3)
+        for face in 0..<faceCount {
+            let i = faceSwatch[face]
+            let uv = SIMD2<Float>(Float((i % columns) * tile + tile / 2) / af,
+                                 1 - Float((i / columns) * tile + tile / 2) / af)
+            for k in 0..<3 { cornerUVs[face * 3 + k] = uv }
+        }
+        var texturedFaces = Set<Int>()
+        for p in patches where decodedFrames.contains(p.frame) {
             let f = frameList[p.frame]
             let storedW = Float(min(f.imageWidth, maxImageWidth))
             let storedH = Float(f.imageHeight) * storedW / Float(max(f.imageWidth, 1))
             let size = SIMD2<Float>(storedW, storedH)
             for face in p.faces {
+                texturedFaces.insert(face)
                 for k in 0..<3 {
                     let pixel = (cornerImageUV[face * 3 + k] - p.uvMin) * size * scale
                     let ax = Float(p.origin.x + pad) + pixel.x
@@ -617,7 +729,19 @@ class TextureMapper {
                 }
             }
         }
-        _ = untextured   // these keep the grey tile UVs set above
+        _ = untextured   // these retain their sampled-colour swatches
+
+        var sharpArea = 0.0, softArea = 0.0, fallbackArea = 0.0
+        for f in 0..<faceCount {
+            guard let (a, b, c) = corners(f) else { continue }
+            let area = Double(simd_length(simd_cross(meshData.vertices[b] - meshData.vertices[a], meshData.vertices[c] - meshData.vertices[a]))) / 2
+            guard area.isFinite else { continue }
+            if !texturedFaces.contains(f) { fallbackArea += area }
+            else if sharp[Int(faceFrame[f])] { sharpArea += area }
+            else { softArea += area }
+        }
+        let report = TextureQualityReport(sharpArea: sharpArea, softArea: softArea, fallbackArea: fallbackArea,
+            atlasSize: atlas, atlasScale: scale, photoCount: decodedFrames.count)
 
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: buf, width: atlas, height: atlas, bitsPerComponent: 8,
@@ -629,7 +753,45 @@ class TextureMapper {
         }
         buf.deallocate()
         DebugLogger.shared.info("Baked \(patches.count) photo patches into \(atlas)px atlas at \(Int(scale * 100))% resolution", category: "Texture")
-        return BakedTexture(atlasImage: UIImage(cgImage: cg), cornerUVs: cornerUVs, atlasSize: atlas)
+        return BakedTexture(atlasImage: UIImage(cgImage: cg), cornerUVs: cornerUVs, atlasSize: atlas, quality: report)
+    }
+
+    private func overlapGains(_ samples: [(a: Int, b: Int, world: SIMD3<Float>)],
+                              frames: [CapturedFrame], poses: [FramePose]) -> [Float] {
+        var requests = [[(Int, SIMD2<Float>)]](repeating: [], count: frames.count)
+        for (i, s) in samples.enumerated() {
+            for fi in [s.a, s.b] {
+                if let p = poses[fi].project(s.world), poses[fi].isVisible(p) { requests[fi].append((i, p.uv)) }
+            }
+        }
+        var lumaA = [Float](repeating: 0, count: samples.count), lumaB = lumaA
+        for (fi, entries) in requests.enumerated() where !entries.isEmpty {
+            autoreleasepool {
+                guard let image = DecodedImage(url: frames[fi].imageURL) else { return }
+                for (i, uv) in entries {
+                    let c = image.sample(uv, gain: frames[fi].gain)
+                    // Ignore clipped and near-black pixels: their exposure ratio is unreliable.
+                    guard min(c.x, min(c.y, c.z)) > 0.04, max(c.x, max(c.y, c.z)) < 0.96 else { continue }
+                    let luma = TextureQualityMath.linearLuminance(SIMD3(c.x, c.y, c.z))
+                    if samples[i].a == fi { lumaA[i] = luma } else { lumaB[i] = luma }
+                }
+            }
+        }
+        var ratios: [UInt64: [Float]] = [:]
+        for (i, s) in samples.enumerated() where lumaA[i] > 0.005 && lumaB[i] > 0.005 {
+            ratios[UInt64(s.a) << 32 | UInt64(s.b), default: []].append(log(lumaA[i] / lumaB[i]))
+        }
+        var matches: [TextureSeamMatch] = []
+        for key in ratios.keys.sorted() {
+            let values = ratios[key]!.sorted()
+            guard values.count >= 6 else { continue }
+            let median = values[values.count / 2]
+            let deviations = values.map { abs($0 - median) }.sorted()
+            guard deviations[deviations.count / 2] < 0.15 else { continue }
+            matches.append(TextureSeamMatch(a: Int(key >> 32), b: Int(key & 0xffffffff),
+                                           logRatio: median, weight: Float(values.count)))
+        }
+        return TextureSeamCorrection.gains(frameCount: frames.count, matches: matches)
     }
 
     /// Largest atlas that comfortably fits in the memory the app has left.
@@ -651,6 +813,7 @@ struct BakedTexture {
     let atlasImage: UIImage
     let cornerUVs: [SIMD2<Float>]
     let atlasSize: Int
+    var quality: TextureQualityReport? = nil
 }
 
 /// A frame's camera, resolved once for fast projection and visibility tests.
@@ -675,7 +838,7 @@ struct FramePose {
     func project(_ world: SIMD3<Float>) -> Projection? {
         let cp = view * SIMD4<Float>(world.x, world.y, world.z, 1)
         let d = -cp.z
-        guard d > 0.001 else { return nil }
+        guard d.isFinite, d > 0.001, sensorW > 0, sensorH > 0 else { return nil }
         let x = intrinsics[0][0] * (cp.x / d) + intrinsics[2][0]
         let y = intrinsics[1][1] * (-cp.y / d) + intrinsics[2][1]
         let u = x / sensorW, v = y / sensorH
@@ -683,15 +846,17 @@ struct FramePose {
         return Projection(uv: SIMD2<Float>(u, v), depth: d)
     }
 
-    /// False if the LiDAR depth shows something closer in front of the point
-    /// (i.e. the point is hidden from this camera).
+    /// Require positive surface agreement, not just absence of an occluder.
+    /// Unknown depth cannot authorize stamping a background photo onto a face.
     func isVisible(_ p: Projection) -> Bool {
-        guard depthW > 0, depthH > 0, depth.count == depthW * depthH else { return true }
+        guard p.uv.x.isFinite, p.uv.y.isFinite, p.depth.isFinite, p.depth > 0,
+              p.uv.x >= 0, p.uv.x <= 1, p.uv.y >= 0, p.uv.y <= 1,
+              depthW > 0, depthH > 0, depth.count == depthW * depthH else { return false }
         let x = min(depthW - 1, max(0, Int(p.uv.x * Float(depthW))))
         let y = min(depthH - 1, max(0, Int(p.uv.y * Float(depthH))))
         let measured = depth[y * depthW + x]
-        guard measured.isFinite, measured > 0.05 else { return true }
-        return p.depth <= measured + max(0.05, measured * 0.04)
+        guard measured.isFinite, measured > 0.05 else { return false }
+        return abs(p.depth - measured) <= max(0.05, measured * 0.04)
     }
 }
 
@@ -721,8 +886,9 @@ final class DecodedImage {
 
     /// Bilinear sample at normalised uv (origin top-left), with brightness gain.
     func sample(_ uv: SIMD2<Float>, gain: Float) -> SIMD4<Float> {
-        let fx = max(0, uv.x * Float(width) - 0.5)
-        let fy = max(0, uv.y * Float(height) - 0.5)
+        guard uv.x.isFinite, uv.y.isFinite else { return SIMD4<Float>(0.7, 0.7, 0.7, 1) }
+        let fx = min(Float(width - 1), max(0, uv.x * Float(width) - 0.5))
+        let fy = min(Float(height - 1), max(0, uv.y * Float(height) - 0.5))
         let x0 = min(Int(fx), width - 1), y0 = min(Int(fy), height - 1)
         let x1 = min(x0 + 1, width - 1), y1 = min(y0 + 1, height - 1)
         let tx = fx - Float(x0), ty = fy - Float(y0)

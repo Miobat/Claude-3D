@@ -23,6 +23,8 @@ class LiDARScanner: NSObject, ObservableObject {
     @Published var faceCount: Int = 0
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var sharpTextureFrameCount: Int = 0
+    @Published var textureCaptureIssue: String?
     @Published var detectedPlaneCount: Int = 0
     @Published var isPreviewing = false
     @Published var memoryUsageMB: Double = 0
@@ -335,6 +337,8 @@ class LiDARScanner: NSObject, ObservableObject {
         faceCount = 0
         detectedPlaneCount = 0
         capturedFrameCount = 0
+        sharpTextureFrameCount = 0
+        textureCaptureIssue = nil
         memoryUsageMB = 0
         estimatedFileSizeMB = 0
         scanCapacityPercent = 0
@@ -412,7 +416,9 @@ class LiDARScanner: NSObject, ObservableObject {
             let turn = Double(TextureMapper.angle(between: prev, and: frame.camera.transform))
             let move = Double(simd_distance(prev.position, camPos))
             let exposure = frame.camera.exposureDuration > 0 ? frame.camera.exposureDuration : 1.0 / 60.0
-            blurPixels = (turn / dt + move / dt / 1.5) * exposure * Double(frame.camera.intrinsics[0][0])
+            blurPixels = TextureQualityMath.motionBlur(turn: turn, move: move, seconds: dt,
+                exposure: exposure, focalPixels: Double(frame.camera.intrinsics[0][0]),
+                distance: TextureMapper.subjectDistance((frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap))
         }
         lastTickTransform = frame.camera.transform
         lastTickTime = now
@@ -426,12 +432,16 @@ class LiDARScanner: NSObject, ObservableObject {
                     normalTrackingSince = now
                 }
             }
-            _ = textureMapper.captureFrame(from: frame, exposure: currentExposure(), onCountChanged: { [weak self] count, _ in
+            _ = textureMapper.captureFrame(from: frame, onCountChanged: { [weak self] count, _ in
                 guard let self, self.epoch.isCurrent(token) else { return }
                 self.capturedFrameCount = count
+                self.sharpTextureFrameCount = self.textureMapper.sharpFrameCount
             }, onStored: { [weak self] id, sensor, retained in
                 guard let self, self.epoch.isCurrent(token) else { return }
                 self.depthCloud.commitPhoto(id: id, sensor: sensor, retained: retained, range: self.rangeMeters)
+            }, onIssue: { [weak self] issue in
+                guard let self, self.epoch.isCurrent(token), !self.textureCapturePaused else { return }
+                self.textureCaptureIssue = issue
             })
             // Warn when moving too fast for sharp photos (those areas would come out soft/grey).
             if blurPixels > 2.5 {
@@ -740,6 +750,7 @@ class LiDARScanner: NSObject, ObservableObject {
 
         if (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
             textureCapturePaused = true
+            textureCaptureIssue = "Photos paused to protect memory — shape capture continues"
             scanProgress = "Photo capture paused (memory) — scan continues"
             DebugLogger.shared.warn("Texture capture paused: available=\(Int(available))MB", category: "Scanner")
         }
