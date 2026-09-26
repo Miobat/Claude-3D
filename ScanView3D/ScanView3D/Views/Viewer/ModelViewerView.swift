@@ -227,7 +227,10 @@ struct ModelViewerView: View {
             if DesignPreview.screen == "measure" { activeTool = .measure }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
-            if DesignPreview.screen == "quality" { showingTextureQuality = true }
+            if DesignPreview.screen == "quality" {
+                // Let the simulator fixture apply its requested orientation first.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingTextureQuality = true }
+            }
             #endif
             session.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
@@ -974,6 +977,7 @@ private struct TextureQualitySheet: View {
     let report: TextureQualityReport?
     let scanName: String
     @Environment(\.dismiss) private var dismiss
+    @ScaledMetric(relativeTo: .subheadline) private var iconWidth: CGFloat = 22
 
     var body: some View {
         NavigationStack {
@@ -1036,7 +1040,7 @@ private struct TextureQualitySheet: View {
 
     private func qualityRow(_ title: String, fraction: Double, color: Color, icon: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Image(systemName: icon).foregroundStyle(color).frame(width: 22).accessibilityHidden(true)
+            Image(systemName: icon).foregroundStyle(color).frame(width: iconWidth).accessibilityHidden(true)
             Text(title).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Text(fraction, format: .percent.precision(.fractionLength(0))).monospacedDigit()
