@@ -175,7 +175,8 @@ class StorageManager: ObservableObject {
         name: String,
         toProject project: Project,
         format: ExportFormat = .obj,
-        baked: BakedTexture? = nil
+        baked: BakedTexture? = nil,
+        metadata: ((inout Scan) -> Void)? = nil
     ) throws -> Scan {
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
@@ -246,6 +247,7 @@ class StorageManager: ObservableObject {
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
+        metadata?(&scan)
         try addScan(scan, to: project)
         return scan
     }
@@ -261,7 +263,8 @@ class StorageManager: ObservableObject {
     ///   scale; we derive this from the LiDAR mesh captured in the same session).
     /// - photosFolder: source photos to keep with the scan for later re-reconstruction.
     func importProcessedModel(modelURL: URL, name: String, toProject project: Project,
-                              modelTransform: simd_float4x4? = nil, photosFolder: URL? = nil) throws -> Scan {
+                              modelTransform: simd_float4x4? = nil, photosFolder: URL? = nil,
+                              metadata: ((inout Scan) -> Void)? = nil) throws -> Scan {
         let scanId = UUID()
         let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
         let fileName = "\(scanId.uuidString).\(ext)"
@@ -296,6 +299,7 @@ class StorageManager: ObservableObject {
             }
         }
 
+        metadata?(&scan)
         try addScan(scan, to: project)
         return scan
     }

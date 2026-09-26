@@ -10,6 +10,7 @@ on:
     paths:
       - 'ScanView3D/**'
       - '.github/workflows/**'
+      - '.github/scripts/**'
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
 # A newer push supersedes an in-flight build on the same branch.

@@ -5,6 +5,7 @@ on:
     paths:
       - 'ScanView3D/**'
       - '.github/workflows/**'
+      - '.github/scripts/**'
   workflow_call:
   workflow_dispatch:
 
@@ -50,8 +51,7 @@ jobs:
               'SUPPORTED_PLATFORMS=iphoneos iphonesimulator' build \
               2>&1 | tee -a "$RUNNER_TEMP/validation.log"
           done
-      - name: Capture native design previews
-        if: contains(fromJSON('["refs/heads/codex/design-system-upgrade", "refs/heads/codex/live-capture-navigation"]'), github.ref) || contains(fromJSON('["codex/design-system-upgrade", "codex/live-capture-navigation"]'), github.head_ref)
+      - name: Native capture, recovery and navigation checks with design previews
         run: bash .github/scripts/design-screenshots.sh
       - name: Keep native design previews
         if: always()

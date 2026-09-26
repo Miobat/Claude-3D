@@ -164,14 +164,25 @@ Viewer navigation includes surface-anchored orbit, exact point-cloud picking,
 rate-adjusted joysticks, vertical control and ground-locked walk. Real LiDAR and
 photogrammetry behaviour still require the documented phone acceptance tests.
 
-## 9. Capture capacity and rollback
+## 11. Capture capacity and rollback
 
 Scan capacity is memory-based (`LiDARScanner.captureLimits`): coverage cells
-(2.5 cm, 600 000 – 3 000 000) and saved points (Points/Splat, one per point
-spacing) share one budget sized by surface area. Limits never drop below the
-previous fixed ones. Fast/HQ keep no point cells. When the budget is full the
+(2.5 cm, up to 3 000 000) and saved points (Points/Splat, one per point
+spacing, up to 4 000 000) share one budget sized by surface area. A 600 MB
+save reserve and conservative per-entry estimate take precedence over old
+fixed minimums. Fast/HQ keep no point cells. When the budget is full the
 scan pauses (no silent loss) and cannot be resumed; the user saves.
 
 Known-good build before the large-area work: commit `c662221` (tag
 `stable-before-large-area`, local only). To roll back, install that TestFlight
 build from "Previous Builds", or run the TestFlight workflow on that commit.
+
+## 12. Capture trust and recovery hardening
+
+See `ScanView3D/CAPTURE_TRUST.md`. Fast colour coverage now distinguishes shape
+(blue) from shape plus a retained sharp photo (mint). A photo is committed only
+after its JPEG write, using its own depth pose. Every kept mesh face must fit
+a recorded range sphere; postprocessing preserves observed positions.
+Lightweight recovery retains sampled vertex colour (not the temporary photo
+atlas). Required scan metadata commits with the first library write. Native
+Metal / recovery / navigation checks now gate every release branch.

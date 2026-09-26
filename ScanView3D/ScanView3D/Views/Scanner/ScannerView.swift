@@ -30,6 +30,7 @@ struct ScannerView: View {
     @State private var checkpointTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     @State private var lastCheckpointStart = Date.distantPast
     @State private var lastCheckpointDuration: TimeInterval = 0
+    @State private var checkpointWarning: String?
 
     @EnvironmentObject var storageManager: StorageManager
     @State private var settings = ScanSettings.load()
@@ -71,7 +72,18 @@ struct ScannerView: View {
 
             GeometryReader { geometry in
                 Group {
-                    if geometry.size.width > geometry.size.height {
+                    if scanner.isScanning && typeSize.isAccessibilitySize {
+                        VStack(spacing: 8) {
+                            ScrollView {
+                                VStack(spacing: 12) {
+                                    captureDashboard
+                                    statusMessages
+                                    topStatusBar
+                                }.padding(.top, 8)
+                            }
+                            bottomControls
+                        }
+                    } else if geometry.size.width > geometry.size.height {
                         HStack(alignment: .top, spacing: 0) {
                             VStack(spacing: 8) {
                                 topStatusBar
@@ -126,6 +138,14 @@ struct ScannerView: View {
             recovery.refresh()
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "capture-settings" { showingCaptureSettings = true }
+            if DesignPreview.screen == "capture-active" {
+                settings.captureMode = .fast; settings.captureTexture = true
+                scanner.isScanning = true; scanner.vertexCount = 48_210; scanner.faceCount = 80_450
+                scanner.capturedFrameCount = 28; scanner.scanCapacityPercent = 24
+                scanner.scanProgress = "Scanning"
+                scanner.captureHint = "Move slowly for sharper colour"
+                checkpointWarning = "Checkpoint delayed by memory pressure — stop and save soon."
+            }
             #endif
             if activeDraft != nil, !scanner.isScanning { showingSaveDialog = true }
         }
@@ -198,10 +218,26 @@ struct ScannerView: View {
 
     private var captureDashboard: some View {
         VStack(spacing: 8) {
+            if let warning = checkpointWarning {
+                Text(warning).font(.caption2).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 16)
+            }
+            Text(settings.captureMode == .fast && settings.captureTexture
+                 ? "Blue: shape · Mint: shape + sharp photo · Blur: out of range"
+                 : "Mint: captured shape · Blur: out of range")
+                .font(.caption2).foregroundStyle(.white.opacity(0.85))
+                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 16)
             scanCapacityGauge
             scanningInfoBar
+            if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
+                (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
+                    .font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
+            }
         }
-        .padding(.top, 12).fieldPanel().padding(.horizontal, 16)
+        .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
     }
 
     // MARK: - Top Status Bar
@@ -287,14 +323,18 @@ struct ScannerView: View {
             }
             .frame(height: 6)
 
-            HStack {
+            let capacityLayout = typeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout())
+            capacityLayout {
                 Text(String(format: "%.0f MB est.", scanner.estimatedFileSizeMB))
-                Spacer()
+                if !typeSize.isAccessibilitySize { Spacer() }
                 Text(scanner.scanCapacityPercent > 80
                      ? "Scan capacity nearly full"
                      : String(format: "%.0f%% of scan capacity", scanner.scanCapacityPercent))
                     .foregroundColor(scanner.scanCapacityPercent > 80 ? .orange : .gray)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .font(.caption2)
             .foregroundColor(.white.opacity(0.8))
         }
@@ -379,7 +419,7 @@ struct ScannerView: View {
                     Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
                         .accessibilityLabel("Capture range in metres")
                 } header: { Text("Range") } footer: {
-                    Text("Distance from the phone. Blurred areas are out of range; mint shows committed LiDAR coverage. Unknown depth is not captured.")
+                    Text("Distance from the phone. Blurred areas are out of range. With Fast colour capture, blue means captured shape and mint adds a saved sharp photo. Other modes use mint for captured shape. Unknown depth is not captured.")
                 }
                 if settings.captureMode.usesDetail {
                     Section {
@@ -465,6 +505,7 @@ struct ScannerView: View {
                     controlLabel(scanner.isPaused ? "Resume" : "Pause",
                                  icon: scanner.isPaused ? "play.circle.fill" : "pause.circle.fill")
                 }
+                .frame(maxWidth: .infinity)
 
                 Button {
                     stopAndPrepareSave()
@@ -475,21 +516,27 @@ struct ScannerView: View {
                             RoundedRectangle(cornerRadius: 6).fill(Color.white).frame(width: 24, height: 24)
                         }
                         Text("Finish").font(.subheadline.weight(.semibold))
+                            .lineLimit(1).minimumScaleFactor(0.65)
                     }
                     .foregroundColor(.white)
                 }
+                .frame(maxWidth: .infinity)
 
                 Button {
                     showingResetConfirmation = true
                 } label: {
                     controlLabel("Reset", icon: "arrow.counterclockwise.circle.fill")
                 }
+                .frame(maxWidth: .infinity)
             } else {
                 Button {
                     guard activeDraft == nil else { showingSaveDialog = true; return }
                     captureLocation = nil
                     recoveredDraft = false
                     recoveredPoses = []
+                    checkpointWarning = nil
+                    lastCheckpointStart = .distantPast
+                    lastCheckpointDuration = 0
                     scanName = Scan.autoName()
                     scanner.startScanning(
                         captureTexture: settings.captureTexture,
@@ -543,6 +590,7 @@ struct ScannerView: View {
         VStack(spacing: 4) {
             Image(systemName: icon).font(.system(size: 36))
             Text(title).font(.caption.weight(.medium))
+                .lineLimit(1).minimumScaleFactor(0.65)
         }
         .foregroundColor(.white)
         .frame(minWidth: 64, minHeight: 64)
@@ -594,13 +642,16 @@ struct ScannerView: View {
                     draft.checkpointAt = Date()
                     if mesh != nil { draft.geometryCheckpointAt = draft.checkpointAt }
                     draft.isFinalized = true
-                    activeDraft = draft
                     recovery.checkpoint(draft, mesh: mesh) { result in
                         guard preparationToken == token else { return }
                         isPreparingMesh = false
                         endBackgroundCheckpoint()
                         if case .failure(let error) = result {
+                            checkpointWarning = "Checkpoint failed — stop and save soon."
                             failSave("Checkpoint failed; capture remains in memory. \(error.localizedDescription)")
+                        } else {
+                            activeDraft = draft
+                            checkpointWarning = nil
                         }
                     }
                 } else {
@@ -750,7 +801,7 @@ struct ScannerView: View {
                 }
             }
             .confirmationDialog("Not saving yet?", isPresented: $showingCancelOptions, titleVisibility: .visible) {
-                if !recoveredDraft, !scanner.needsRecoveryCheckpoint {
+                if !recoveredDraft, !scanner.needsRecoveryCheckpoint, !scanner.pointBudgetReached {
                     Button("Continue Scanning") {
                         showingSaveDialog = false
                         pendingMesh = nil
@@ -861,7 +912,10 @@ struct ScannerView: View {
         // Never let a safety copy be what runs the phone out of memory.
         #if !targetEnvironment(simulator)
         // The coverage index may be copied while the checkpoint reads it.
-        guard LiDARScanner.availableMemoryMB() > 700 + scanner.coverageMemoryMB else { return }
+        guard LiDARScanner.availableMemoryMB() > 700 + scanner.coverageMemoryMB else {
+            checkpointWarning = "Checkpoint delayed by memory pressure — stop and save soon."
+            return
+        }
         #endif
         checkpointInFlight = true
         let started = Date()
@@ -877,12 +931,16 @@ struct ScannerView: View {
             if mesh != nil { draft.geometryCheckpointAt = draft.checkpointAt }
             draft.isFinalized = false
             draft.location = settings.alignToNorth ? location.currentFix() : nil
-            activeDraft = draft
             recovery.checkpoint(draft, mesh: mesh) { result in
                 checkpointInFlight = false
                 lastCheckpointDuration = Date().timeIntervalSince(started)
+                guard preparationToken == token, activeDraft?.id == current.id else { return }
                 if case .failure(let error) = result {
+                    checkpointWarning = "Checkpoint failed — stop and save soon."
                     scanner.scanError = "Automatic checkpoint failed. Stop and save soon. \(error.localizedDescription)"
+                } else {
+                    activeDraft = draft
+                    checkpointWarning = nil
                 }
             }
         }
@@ -988,22 +1046,9 @@ struct ScannerView: View {
 
     /// Hide the save sheet, record where/how the scan was aligned, open the
     /// saved scan, and get the camera ready again.
-    private func finishSave(scan: Scan, project: Project, extra: ((inout Scan) -> Void)? = nil) {
-        let north = settings.alignToNorth
-        let fix = north ? captureLocation : nil
-        let change: (inout Scan) -> Void = { s in
-            s.recordLocation(fix, compassRequested: north)
-            extra?(&s)
-        }
-        var updated = scan
-        change(&updated)
-        // The model itself is already safely in the library at this point. If only
-        // the extra details (location / alignment) fail to save, finish normally and
-        // say so — treating it as a failure would invite a duplicate save.
-        var detailsWarning: String?
-        do { try storageManager.updateScan(scan.id, in: project, change) }
-        catch { detailsWarning = "The scan was saved, but its location/alignment details could not be stored. \(error.localizedDescription)" }
-
+    private func finishSave(scan: Scan, project: Project) {
+        // Every save path commits geometry and required metadata in one library
+        // transaction. Recovery is discarded only after that succeeds.
         isSaving = false
         savingProgress = ""
         showingSaveDialog = false
@@ -1011,14 +1056,7 @@ struct ScannerView: View {
         completeRecovery()
         scanner.resetScanning()
         scanner.startPreview()
-        if let detailsWarning {
-            // Stay on the scanner and explain; the scan is in the project library.
-            DebugLogger.shared.warn(detailsWarning, category: "Storage")
-            errorMessage = detailsWarning
-            showingError = true
-            return
-        }
-        savedScan = updated
+        savedScan = scan
         savedProject = project
         showingSavedScan = true
     }
@@ -1046,16 +1084,17 @@ struct ScannerView: View {
         let format = exportFormat
         let name = scanName
         let north = settings.alignToNorth
+        let fix = north ? captureLocation : nil
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Light smoothing as before; it hides LiDAR stepping on flat surfaces.
-                var meshData = MeshProcessor.postProcess(rawMesh, level: level)
+                // Keep observation-time positions, especially at the range edge.
+                var meshData = MeshProcessor.postProcess(rawMesh, level: level, preservePositions: true)
 
                 // DETAIL slider: simplify to about one vertex per chosen spacing, so
                 // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if detailMeters > 0.005 {
-                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters)
+                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters, preservePositions: true)
                 }
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)
@@ -1073,8 +1112,11 @@ struct ScannerView: View {
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
                 let scan = try storageManager.saveScan(meshData: meshData, name: name, toProject: project,
-                                                       format: format, baked: baked)
-                DispatchQueue.main.async { finishSave(scan: scan, project: project) { $0.recordCaptureFrame(frame) } }
+                                                       format: format, baked: baked) {
+                    $0.recordLocation(fix, compassRequested: north)
+                    $0.recordCaptureFrame(frame)
+                }
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
                 DispatchQueue.main.async { failSave("Failed to save: \(error.localizedDescription)") }
             }
@@ -1156,14 +1198,18 @@ struct ScannerView: View {
         let grey = !settings.captureTexture
         let name = scanName
         let north = settings.alignToNorth
+        let fix = north ? captureLocation : nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 var points = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
                 let frame = SceneFrame.compute(from: points, keepHeading: north)
                 points = points.transformed(by: frame)
-                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project)
-                DispatchQueue.main.async { finishSave(scan: scan, project: project) { $0.recordCaptureFrame(frame) } }
+                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project) {
+                    $0.recordLocation(fix, compassRequested: north)
+                    $0.recordCaptureFrame(frame)
+                }
+                DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
                 DispatchQueue.main.async { failSave("Failed to save point cloud: \(error.localizedDescription)") }
             }
@@ -1183,6 +1229,7 @@ struct ScannerView: View {
         let quality: PhotogrammetryProcessor.Quality = settings.reconstructQuality == .draft ? .draft : .best
         let name = scanName
         let north = settings.alignToNorth
+        let fix = north ? captureLocation : nil
 
         Task {
             do {
@@ -1214,14 +1261,14 @@ struct ScannerView: View {
                     toProject: project,
                     modelTransform: transform,
                     photosFolder: inputFolder
-                )
+                ) { s in
+                    s.recordLocation(fix, compassRequested: north)
+                    s.sceneFrame = frame.map(StorageManager.array(of:))
+                    s.coordinateProvenance = ScannerView.photoProvenance(alignment, frame: frame)
+                }
                 try? FileManager.default.removeItem(at: outputURL)
-                let sceneFrame = frame.map(StorageManager.array(of:))
                 DispatchQueue.main.async {
-                    finishSave(scan: scan, project: project) { s in
-                        s.sceneFrame = sceneFrame
-                        s.coordinateProvenance = ScannerView.photoProvenance(alignment, frame: frame)
-                    }
+                    finishSave(scan: scan, project: project)
                 }
             } catch {
                 DispatchQueue.main.async { failSave(PhotogrammetryProcessor.friendlyMessage(for: error)) }

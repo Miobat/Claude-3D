@@ -13,6 +13,7 @@ import ARKit
 /// full-resolution JPEG, so we can keep many sharp frames without using much
 /// memory; only one is decoded at a time when colouring.
 struct CapturedFrame {
+    let id: Int
     let imageURL: URL
     let transform: simd_float4x4
     let intrinsics: simd_float3x3
@@ -136,7 +137,8 @@ class TextureMapper {
     /// Keeps it only if the camera moved enough since the last keyframe and the
     /// image isn't blurred by motion.
     func captureFrame(from arFrame: ARFrame, exposure: (iso: Double, duration: Double)? = nil,
-                      onCountChanged: ((_ count: Int, _ sharp: Bool) -> Void)? = nil) -> Bool {
+                      onCountChanged: ((_ count: Int, _ sharp: Bool) -> Void)? = nil,
+                      onStored: ((Int, CaptureDepthFrame?, Set<Int>) -> Void)? = nil) -> Bool {
         let now = arFrame.timestamp
         let transform = arFrame.camera.transform
 
@@ -201,15 +203,18 @@ class TextureMapper {
         let maxWidth = maxImageWidth
         let limit = maxFrames
         fileCounter += 1
+        let id = fileCounter
+        let photoDepth = sharp ? CaptureDepthFrame(arFrame) : nil
         let url = dir.appendingPathComponent(String(format: "f_%05d.jpg", fileCounter))
         let token = epoch.current
 
         captureQueue.async { [weak self] in
             guard let self = self else { return }
             var count = 0
+            var retainedPhotos: Set<Int> = []
             let depth = TextureMapper.copyDepth(depthBuffer)
             if self.writeJPEG(pixelBuffer, maxWidth: maxWidth, to: url) {
-                let frame = CapturedFrame(imageURL: url, transform: transform, intrinsics: intrinsics,
+                let frame = CapturedFrame(id: id, imageURL: url, transform: transform, intrinsics: intrinsics,
                                           imageWidth: width, imageHeight: height, timestamp: now,
                                           depth: depth.values, depthWidth: depth.width, depthHeight: depth.height,
                                           gain: gain, sharp: sharp)
@@ -225,6 +230,7 @@ class TextureMapper {
                     if self.frames.count >= limit { self.removeRedundantFrameLocked() }
                     self.frames.append(frame)
                     count = self.frames.count
+                    retainedPhotos = Set(self.frames.filter(\.sharp).map(\.id))
                     self.lock.unlock()
                 }
                 if !accepted { try? FileManager.default.removeItem(at: url) }
@@ -232,7 +238,10 @@ class TextureMapper {
             DispatchQueue.main.async {
                 guard self.epoch.isCurrent(token) else { return }
                 self.conversionInFlight = false
-                if count > 0 { onCountChanged?(count, sharp) }
+                if count > 0 {
+                    onCountChanged?(count, sharp)
+                    onStored?(id, photoDepth, retainedPhotos)
+                }
             }
         }
         return sharp
@@ -323,9 +332,10 @@ class TextureMapper {
     // MARK: - Vertex Color Sampling
 
     /// One colour per vertex, from the best frame that actually sees it.
-    func sampleVertexColors(vertices: [SIMD3<Float>], normals: [SIMD3<Float>]) -> [SIMD4<Float>] {
+    func sampleVertexColors(vertices: [SIMD3<Float>], normals: [SIMD3<Float>],
+                            fallbackColors: [SIMD4<Float>]? = nil) -> [SIMD4<Float>] {
         let fallback = SIMD4<Float>(0.7, 0.7, 0.7, 1.0)
-        var colors = [SIMD4<Float>](repeating: fallback, count: vertices.count)
+        var colors = fallbackColors?.count == vertices.count ? fallbackColors! : [SIMD4<Float>](repeating: fallback, count: vertices.count)
         let frameList = capturedFrames
         let poses = makePoses(frameList)
         guard !poses.isEmpty else { return colors }
