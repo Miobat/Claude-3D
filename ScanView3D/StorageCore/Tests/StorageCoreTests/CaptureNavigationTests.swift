@@ -37,6 +37,18 @@ final class CaptureNavigationTests: XCTestCase {
         XCTAssertFalse(index.contains(SIMD3(0.4, 0, -0.5)))
         XCTAssertTrue(index.insert(SIMD3(0, 0, -0.5), camera: .zero, range: 1))
     }
+    func testPhotoCoverageNeedsAPhotoAndIsNeverLost() {
+        var index = CapturedSurfaceIndex()
+        let p = SIMD3<Float>(0, 0, -0.8)
+        index.insert(p, camera: .zero, range: 1)
+        XCTAssertTrue(index.contains(p))
+        XCTAssertFalse(index.contains(p, requirePhoto: true))
+        index.insert(p, camera: .zero, range: 1, photographed: true)
+        XCTAssertTrue(index.isPhotographed(p))
+        // A later depth-only observation keeps the photo mark.
+        index.insert(p, camera: .zero, range: 1)
+        XCTAssertTrue(index.contains(p, requirePhoto: true))
+    }
     func testMaskErosionKeepsBackgroundExcludedAndRoundTrips() throws {
         let mask = PhotoRangeMask(width: 5, height: 5, pixels: Data(repeating: 255, count: 25), rangeMetres: 1)
         let eroded = mask.eroded()

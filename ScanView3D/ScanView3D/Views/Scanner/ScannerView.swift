@@ -1049,12 +1049,13 @@ struct ScannerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                var meshData = MeshProcessor.postProcess(rawMesh, level: level, preservePositions: true)
+                // Light smoothing as before; it hides LiDAR stepping on flat surfaces.
+                var meshData = MeshProcessor.postProcess(rawMesh, level: level)
 
                 // DETAIL slider: simplify to about one vertex per chosen spacing, so
                 // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if detailMeters > 0.005 {
-                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters, preservePositions: true)
+                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters)
                 }
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)

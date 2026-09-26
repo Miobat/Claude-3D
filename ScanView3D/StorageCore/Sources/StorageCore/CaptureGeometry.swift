@@ -105,6 +105,8 @@ struct CapturedSurfaceIndex {
         let point: SIMD3<Float>
         let camera: SIMD3<Float>
         let range: Float
+        /// A sharp colour photo was taken while this surface was in view.
+        var photographed = false
     }
     private(set) var cells: [SIMD3<Int32>: Sample] = [:]
     let cellSize: Float
@@ -123,18 +125,27 @@ struct CapturedSurfaceIndex {
     }
 
     @discardableResult
-    mutating func insert(_ p: SIMD3<Float>, camera: SIMD3<Float>, range: Float) -> Bool {
+    mutating func insert(_ p: SIMD3<Float>, camera: SIMD3<Float>, range: Float, photographed: Bool = false) -> Bool {
         guard range.isFinite, range > 0, simd_distance_squared(p, camera) <= range * range,
               let k = key(p) else { return false }
         // Preserve prior observations at capacity, never invent new coverage.
-        guard cells[k] != nil || cells.count < capacity else { return false }
-        cells[k] = Sample(point: p, camera: camera, range: range)
+        let previous = cells[k]
+        guard previous != nil || cells.count < capacity else { return false }
+        cells[k] = Sample(point: p, camera: camera, range: range,
+                          photographed: photographed || (previous?.photographed ?? false))
         return true
     }
 
-    func contains(_ p: SIMD3<Float>, tolerance: Float = 0.04) -> Bool {
+    /// Whether the cell holding `p` has had a sharp photo taken of it.
+    func isPhotographed(_ p: SIMD3<Float>) -> Bool {
+        guard let k = key(p) else { return false }
+        return cells[k]?.photographed ?? false
+    }
+
+    func contains(_ p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Bool {
         guard let k = key(p), tolerance.isFinite, tolerance >= 0 else { return false }
         func matches(_ s: Sample) -> Bool {
+            (!requirePhoto || s.photographed) &&
             simd_distance_squared(s.point, p) <= tolerance * tolerance &&
             simd_distance_squared(s.camera, p) <= s.range * s.range
         }

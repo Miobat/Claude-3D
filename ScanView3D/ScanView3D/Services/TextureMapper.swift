@@ -25,6 +25,9 @@ struct CapturedFrame {
     let depthHeight: Int
     /// Brightness correction relative to the first frame (exposure changes).
     let gain: Float
+    /// False for a motion-blurred fallback frame: used only where no sharp
+    /// photo sees a surface, so it gets real (soft) colour instead of grey.
+    let sharp: Bool
 }
 
 /// Captures keyframes during scanning and projects them onto the mesh.
@@ -50,8 +53,10 @@ class TextureMapper {
 
     // Main-thread capture state
     private var conversionInFlight = false
-    private var lastKeptTransform: simd_float4x4?
+    private var lastKeptTransform: simd_float4x4?      // last SHARP keyframe
     private var lastKeptTime: TimeInterval = 0
+    private var lastAnyTransform: simd_float4x4?       // last keyframe of either kind
+    private var lastAnyTime: TimeInterval = 0
     private var lastTickTransform: simd_float4x4?
     private var lastTickTime: TimeInterval = 0
     private var referenceExposure: Double?
@@ -61,6 +66,10 @@ class TextureMapper {
     private let minKeyframeMove: Float = 0.08          // metres
     private let minKeyframeTurn: Float = 7 * .pi / 180 // radians
     private let maxBlurPixels: Double = 2.5
+    /// Fallback frames: blurred, but still better than grey. Spaced further apart.
+    private let maxFallbackBlurPixels: Double = 12
+    private let minFallbackMove: Float = 0.25
+    private let minFallbackTurn: Float = 15 * .pi / 180
 
     var capturedFrames: [CapturedFrame] {
         lock.lock(); defer { lock.unlock() }
@@ -99,6 +108,8 @@ class TextureMapper {
         fileCounter = 0
         lastKeptTransform = nil
         lastKeptTime = 0
+        lastAnyTransform = nil
+        lastAnyTime = 0
         lastTickTransform = nil
         lastTickTime = 0
         referenceExposure = nil
@@ -125,7 +136,7 @@ class TextureMapper {
     /// Keeps it only if the camera moved enough since the last keyframe and the
     /// image isn't blurred by motion.
     func captureFrame(from arFrame: ARFrame, exposure: (iso: Double, duration: Double)? = nil,
-                      onCountChanged: ((Int) -> Void)? = nil) {
+                      onCountChanged: ((_ count: Int, _ sharp: Bool) -> Void)? = nil) -> Bool {
         let now = arFrame.timestamp
         let transform = arFrame.camera.transform
 
@@ -143,16 +154,32 @@ class TextureMapper {
         lastTickTransform = transform
         lastTickTime = now
 
-        guard !conversionInFlight, blurPixels <= maxBlurPixels, now - lastKeptTime >= 0.2 else { return }
-        if let last = lastKeptTransform {
-            let moved = simd_distance(last.position, transform.position)
-            let turned = TextureMapper.angle(between: last, and: transform)
-            guard moved >= minKeyframeMove || turned >= minKeyframeTurn else { return }
+        guard !conversionInFlight else { return false }
+        func novel(from last: simd_float4x4?, move: Float, turn: Float) -> Bool {
+            guard let last else { return true }
+            return simd_distance(last.position, transform.position) >= move
+                || TextureMapper.angle(between: last, and: transform) >= turn
         }
-        guard let dir = frameFolder() else { return }
+        let sharp: Bool
+        if blurPixels <= maxBlurPixels {
+            // Sharp keyframes are spaced only against other sharp ones, so a blurred
+            // fallback never stops the sharp photo of the same view being taken.
+            guard now - lastKeptTime >= 0.2, novel(from: lastKeptTransform, move: minKeyframeMove, turn: minKeyframeTurn) else { return false }
+            sharp = true
+        } else {
+            // Moving too fast for a sharp photo: keep an occasional blurred one.
+            guard blurPixels <= maxFallbackBlurPixels, now - lastAnyTime >= 0.35,
+                  novel(from: lastAnyTransform, move: minFallbackMove, turn: minFallbackTurn) else { return false }
+            sharp = false
+        }
+        guard let dir = frameFolder() else { return false }
 
-        lastKeptTransform = transform
-        lastKeptTime = now
+        if sharp {
+            lastKeptTransform = transform
+            lastKeptTime = now
+        }
+        lastAnyTransform = transform
+        lastAnyTime = now
         conversionInFlight = true
 
         // Exposure normalisation: brightness ∝ ISO × exposure time.
@@ -185,9 +212,16 @@ class TextureMapper {
                 let frame = CapturedFrame(imageURL: url, transform: transform, intrinsics: intrinsics,
                                           imageWidth: width, imageHeight: height, timestamp: now,
                                           depth: depth.values, depthWidth: depth.width, depthHeight: depth.height,
-                                          gain: gain)
+                                          gain: gain, sharp: sharp)
                 let accepted = self.epoch.withCurrent(token) {
                     self.lock.lock()
+                    let fallbacks = self.frames.reduce(0) { $0 + ($1.sharp ? 0 : 1) }
+                    if !frame.sharp && (fallbacks >= limit / 4 || (self.frames.count >= limit && fallbacks == 0)) {
+                        // A blurred fallback never displaces a sharp photo.
+                        self.lock.unlock()
+                        try? FileManager.default.removeItem(at: url)
+                        return
+                    }
                     if self.frames.count >= limit { self.removeRedundantFrameLocked() }
                     self.frames.append(frame)
                     count = self.frames.count
@@ -198,9 +232,10 @@ class TextureMapper {
             DispatchQueue.main.async {
                 guard self.epoch.isCurrent(token) else { return }
                 self.conversionInFlight = false
-                if count > 0 { onCountChanged?(count) }
+                if count > 0 { onCountChanged?(count, sharp) }
             }
         }
+        return sharp
     }
 
     private static func copyDepth(_ buffer: CVPixelBuffer?) -> (values: [Float], width: Int, height: Int) {
@@ -242,6 +277,21 @@ class TextureMapper {
     /// Drop the frame most similar to its predecessor (direction AND position).
     /// Caller must hold `lock`.
     private func removeRedundantFrameLocked() {
+        // Blurred fallbacks go first, the one most like its predecessor.
+        var fallbackIndex: Int?
+        var fallbackCost: Float = .greatestFiniteMagnitude
+        for i in frames.indices where !frames[i].sharp {
+            let j = i == 0 ? 1 : i - 1
+            guard j < frames.count else { continue }
+            let cost = TextureMapper.angle(between: frames[i].transform, and: frames[j].transform)
+                + simd_distance(frames[i].transform.position, frames[j].transform.position)
+            if cost < fallbackCost { fallbackCost = cost; fallbackIndex = i }
+        }
+        if let i = fallbackIndex {
+            try? FileManager.default.removeItem(at: frames[i].imageURL)
+            frames.remove(at: i)
+            return
+        }
         guard frames.count >= 3 else {
             if frames.count >= 2 { try? FileManager.default.removeItem(at: frames[0].imageURL); frames.removeFirst() }
             return
@@ -260,8 +310,8 @@ class TextureMapper {
     // MARK: - Choosing frames
 
     /// Poses of all frames, resolved once.
-    private func makePoses() -> [FramePose] {
-        capturedFrames.map { f in
+    private func makePoses(_ frames: [CapturedFrame]) -> [FramePose] {
+        frames.map { f in
             FramePose(view: f.transform.inverse, intrinsics: f.intrinsics,
                       sensorW: Float(f.imageWidth), sensorH: Float(f.imageHeight),
                       position: f.transform.position,
@@ -276,9 +326,10 @@ class TextureMapper {
     func sampleVertexColors(vertices: [SIMD3<Float>], normals: [SIMD3<Float>]) -> [SIMD4<Float>] {
         let fallback = SIMD4<Float>(0.7, 0.7, 0.7, 1.0)
         var colors = [SIMD4<Float>](repeating: fallback, count: vertices.count)
-        let poses = makePoses()
         let frameList = capturedFrames
+        let poses = makePoses(frameList)
         guard !poses.isEmpty else { return colors }
+        let sharp = frameList.map(\.sharp)
 
         // 1. Best frame for each vertex (geometry only — no pixels needed).
         var choice = [Int32](repeating: -1, count: vertices.count)
@@ -299,7 +350,8 @@ class TextureMapper {
                 guard let proj = pose.project(v), proj.uv.x >= 0.02, proj.uv.x <= 0.98,
                       proj.uv.y >= 0.02, proj.uv.y <= 0.98, pose.isVisible(proj) else { continue }
                 let center = max(0, 1 - simd_length(proj.uv - SIMD2<Float>(0.5, 0.5)) * 1.5)
-                let score = facing * viewAlign * center / max(dist, 0.2)
+                // Two tiers: any usable sharp view beats every blurred fallback.
+                let score = facing * viewAlign * center / max(dist, 0.2) + (sharp[fi] ? 1000 : 0)
                 if score > bestScore { bestScore = score; choice[i] = Int32(fi); choiceUV[i] = proj.uv }
             }
         }
@@ -328,10 +380,11 @@ class TextureMapper {
     /// only if everything wouldn't fit.
     func bakeTexture(meshData: MeshData, atlasSize requestedSize: Int = 8192) -> BakedTexture? {
         let faceCount = meshData.faces.count
-        let poses = makePoses()
         let frameList = capturedFrames
+        let poses = makePoses(frameList)
         let vertexCount = meshData.vertices.count
         guard faceCount > 0, !poses.isEmpty else { return nil }
+        let sharp = frameList.map(\.sharp)
 
         func corners(_ f: Int) -> (Int, Int, Int)? {
             let face = meshData.faces[f]
@@ -365,14 +418,18 @@ class TextureMapper {
             return facing * viewAlign * centre / (dist * dist)
         }
 
-        // 1. Best frame per triangle.
+        // 1. Best frame per triangle: the best sharp photo; a blurred fallback
+        //    only where no sharp photo sees the triangle at all.
         var faceFrame = [Int32](repeating: -1, count: faceCount)
         for f in 0..<faceCount {
-            var best: Float = 0
+            var bestSharp: Float = 0, bestBlurred: Float = 0
+            var sharpFrame: Int32 = -1, blurredFrame: Int32 = -1
             for fi in 0..<poses.count {
                 let s = score(f, fi)
-                if s > best { best = s; faceFrame[f] = Int32(fi) }
+                if sharp[fi] { if s > bestSharp { bestSharp = s; sharpFrame = Int32(fi) } }
+                else if s > bestBlurred { bestBlurred = s; blurredFrame = Int32(fi) }
             }
+            faceFrame[f] = sharpFrame >= 0 ? sharpFrame : blurredFrame
         }
 
         // 2. Edge neighbours, then smooth the choice so patches are large:
@@ -398,6 +455,8 @@ class TextureMapper {
                 for nb in neighbours[f] where faceFrame[Int(nb)] >= 0 { counts[faceFrame[Int(nb)], default: 0] += 1 }
                 guard let best = counts.max(by: { $0.value < $1.value }),
                       best.key != faceFrame[f], best.value >= 2, score(f, Int(best.key)) > 0 else { continue }
+                // Never trade this triangle's sharp photo for a neighbour's blurred one.
+                if faceFrame[f] >= 0, sharp[Int(faceFrame[f])], !sharp[Int(best.key)] { continue }
                 faceFrame[f] = best.key
             }
         }
