@@ -28,7 +28,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 34 and not r["failures"], "Native capture / navigation / recovery checks failed"' "$OUT/navigation-checks.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 38 and not r["failures"], "Native capture / navigation / recovery checks failed"' "$OUT/navigation-checks.json"
 SCREENS="scanner capture-active capture-settings viewer measure"
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-system-upgrade" || "${GITHUB_HEAD_REF:-}" == "codex/design-system-upgrade" ]]; then
   SCREENS="projects library project settings scanner capture-active capture-settings viewer measure empty"
@@ -48,6 +48,7 @@ xcrun simctl ui "$DEVICE" content_size large
 capture joysticks viewer-joysticks
 capture walk viewer-walk-selection
 capture scanner scanner-landscape --landscape
+capture capture-active capture-active-landscape --landscape
 capture viewer viewer-landscape --landscape
 capture measure measure-landscape --landscape
 capture joysticks viewer-joysticks-landscape --landscape

@@ -149,10 +149,12 @@ struct CapturedSurfaceIndex {
         cells[k] = sample
     }
 
-    /// Whether the cell holding `p` has had a sharp photo taken of it.
+    /// Constant-time photo query for the live mask. Do not borrow a neighbour's
+    /// photo claim: absence should invite another photograph, not paint mint.
     func isPhotographed(_ p: SIMD3<Float>) -> Bool {
-        guard let k = key(p) else { return false }
-        return cells[k]?.photoID.map { retainedPhotos.contains($0) } ?? false
+        guard let k = key(p), let s = cells[k], let id = s.photoID else { return false }
+        return retainedPhotos.contains(id) && simd_distance_squared(s.point, p) <= 0.035 * 0.035 &&
+            simd_distance_squared(s.camera, p) <= s.range * s.range
     }
 
     func sample(at p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Sample? {

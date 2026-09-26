@@ -279,9 +279,12 @@ class LiDARScanner: NSObject, ObservableObject {
         let token = epoch.current
         let draining = DispatchGroup()
         draining.enter()
-        textureMapper.drain { draining.leave() }
-        draining.enter()
-        depthCloud.drain { draining.leave() }
+        // Stored-photo callbacks enqueue work on depthCloud. Drain that queue
+        // AFTER the mapper has delivered every callback, not in parallel.
+        textureMapper.drain { [weak self] in
+            guard let self else { draining.leave(); return }
+            self.depthCloud.drain { draining.leave() }
+        }
         draining.enter()
         photoWork.notify(queue: .main) { draining.leave() }
         draining.notify(queue: .main) { [weak self] in
@@ -297,6 +300,10 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Continue a stopped (not reset) scan, keeping everything captured so far.
     func continueScanning() {
         guard let config = arSession.configuration, !isScanning, !isFinalizing, !needsRecoveryCheckpoint else { return }
+        guard !pointBudgetReached else {
+            scanError = "This scan is at full capacity. Save it, then start a new scan for the next area."
+            return
+        }
         arSession.run(config)
         isScanning = true
         isPaused = false
@@ -770,8 +777,8 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Combine the scan into one mesh on a background queue.
     /// Copy the Metal buffer bytes on the delegate/main queue before dispatching.
     /// Retaining an ARMeshAnchor alone does not give a worker owned geometry.
-    /// - lightweight: for periodic recovery checkpoints — skips the (expensive)
-    ///   camera colouring; the final save always colours properly.
+    /// - lightweight: skips expensive photo reprojection, retaining sampled
+    ///   depth-camera vertex colour for a usable recovery checkpoint.
     func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
         let cloud = (captureMode == .pointCloud || captureMode == .splatExport) ? depthCloud : nil
         // Point modes return the depth cloud, so don't copy all mesh buffers for nothing.
@@ -799,8 +806,8 @@ class LiDARScanner: NSObject, ObservableObject {
         }
     }
 
-    /// Merge anchors into world space, keeping triangles within `range` of the
-    /// walked path whose ARKit classification passes the mesh mode.
+    /// Merge anchors into world space using actual observation-time range
+    /// evidence and the requested ARKit classification filter.
     private static func combine(anchors: [MeshAnchorSnapshot], evidence: CapturedSurfaceIndex,
                                 meshMode: ScanSettings.MeshMode) -> MeshData? {
         guard !anchors.isEmpty else { return nil }
@@ -1309,7 +1316,7 @@ final class DepthPointAccumulator {
                 if photoCoverage {
                     for pixel in sensor.depth.indices where acceptedDepth[pixel] > 0 {
                         let w = sensor.cameraToWorld * SIMD4(sensor.cameraPoint(at: pixel), 1)
-                        if self.evidence.contains(SIMD3(w.x, w.y, w.z), tolerance: 0.035, requirePhoto: true) {
+                        if self.evidence.isPhotographed(SIMD3(w.x, w.y, w.z)) {
                             photoDepth[pixel] = acceptedDepth[pixel]
                         }
                     }
@@ -1623,7 +1630,7 @@ struct MeshData: Codable {
             }
             faces = decodedFaces
             let colorData = try c.decode(Data.self, forKey: .packedColors)
-            guard colorData.count % 4 == 0, colorData.count / 4 == vertices.count else {
+            guard colorData.count % 4 == 0, colorData.isEmpty || colorData.count / 4 == vertices.count else {
                 throw CocoaError(.fileReadCorruptFile)
             }
             var decodedColors: [SIMD4<Float>] = []
@@ -1656,7 +1663,8 @@ struct MeshData: Codable {
     private func validateCheckpoint() throws {
         func finite(_ p: SIMD3<Float>) -> Bool { p.x.isFinite && p.y.isFinite && p.z.isFinite }
         guard vertices.count <= 8_000_000, faces.count <= 16_000_000,
-              normals.count == vertices.count, colors.count == vertices.count,
+              (normals.isEmpty || normals.count == vertices.count),
+              (colors.isEmpty || colors.count == vertices.count),
               vertices.allSatisfy(finite), normals.allSatisfy(finite),
               colors.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite }),
               finite(boundingBoxMin), finite(boundingBoxMax),

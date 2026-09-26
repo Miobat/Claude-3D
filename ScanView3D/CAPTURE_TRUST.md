@@ -27,6 +27,9 @@ explicit action; pushes to `codex/capture-trust-recovery` only validate.
   invalid indices and nonfinite geometry. Legacy encoding remains readable.
 - Native GPU, recovery and navigation tests gate every validation/release branch.
   Their report is required before the screenshot tour begins.
+- Fix the previous GPU fixture's ambiguous `flatMap` overload: upload an explicit
+  `[UInt8]` buffer and assert its contents before testing the range effect.
+  Finalization drains photo callbacks before their dependent coverage work.
 
 ## Validation
 

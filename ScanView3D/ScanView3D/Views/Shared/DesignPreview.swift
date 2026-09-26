@@ -182,7 +182,9 @@ enum DesignPreview {
               let depth = texture(.r32Float), let accepted = texture(.r32Float) else {
             check(false, "Capture feedback test textures"); return
         }
-        let colorBytes = (0..<256).flatMap { _ in [UInt8(26), 51, 204, 255] }
+        // Explicit element type is essential: unconstrained flatMap selected
+        // the optional overload and uploaded array storage, not RGBA bytes.
+        let colorBytes: [UInt8] = (0..<256).flatMap { _ -> [UInt8] in [26, 51, 204, 255] }
         let depths: [Float] = (0..<256).map { i in i % 16 < 4 ? 1 : i % 16 < 8 ? 2 : i % 16 < 12 ? 0 : 1 }
         let committed: [Float] = (0..<256).map { $0 % 16 < 8 ? 1 : 0 }
         colorBytes.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
@@ -217,6 +219,9 @@ enum DesignPreview {
         check(referenceCommand.status == .completed, "Capture feedback reference GPU command")
         var reference = [SIMD4<Float>](repeating: .zero, count: 256)
         reference.withUnsafeMutableBytes { baseline.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+        let sourceColour = SIMD4<Float>(26.0 / 255, 51.0 / 255, 204.0 / 255, 1)
+        check(reference.allSatisfy { simd_distance($0, sourceColour) < 0.002 },
+              "GPU fixture uploads uniform RGBA8 bytes: \(reference[8 * 16 + 5]), expected \(sourceColour)")
         func unchanged(_ i: Int) -> Bool {
             simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
         }
@@ -290,6 +295,11 @@ enum DesignPreview {
                                     colors: mesh.colors, boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
             let old = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(legacy))
             check(old.vertices == mesh.vertices && old.colors == mesh.colors, "Legacy checkpoint remains readable")
+            let bare = LegacyMesh(vertices: mesh.vertices, normals: [], faces: mesh.faces, colors: [],
+                                  boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            let bareMesh = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(bare))
+            check(bareMesh.vertices == mesh.vertices && bareMesh.normals.isEmpty && bareMesh.colors.isEmpty,
+                  "Legacy geometry without optional colour / normals remains readable")
             var invalidVertices = mesh.vertices; invalidVertices[0].x = .nan
             let nonFinite = MeshData(vertices: invalidVertices, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
                                      boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
@@ -311,6 +321,17 @@ enum DesignPreview {
             let reloaded = StorageManager(directory: root).projects.first?.scans.first
             check(reloaded?.id == scan.id && reloaded?.latitude == 59.91 && reloaded?.longitude == 10.75,
                   "Mesh and capture metadata survive first index commit")
+            let indexURL = root.appendingPathComponent("projects.json")
+            let externalIndex = Data("[]".utf8)
+            try externalIndex.write(to: indexURL, options: .atomic)
+            do {
+                _ = try store.saveScan(meshData: mesh, name: "Must fail", toProject: project, metadata: { $0.latitude = 60 })
+                check(false, "Reject a save when the library index changes externally")
+            } catch { check(true, "Reject a save when the library index changes externally") }
+            let diskAfterFailure = try Data(contentsOf: indexURL)
+            check(store.projects.first?.scans.count == 1 && store.projects.first?.scans.first?.id == scan.id &&
+                  diskAfterFailure == externalIndex,
+                  "Failed metadata/model transaction leaves published library and external index unchanged")
         } catch { check(false, "Recovery / atomic save fixtures: \(error)") }
     }
 }

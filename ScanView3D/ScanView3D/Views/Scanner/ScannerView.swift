@@ -617,13 +617,16 @@ struct ScannerView: View {
                     draft.checkpointAt = Date()
                     if mesh != nil { draft.geometryCheckpointAt = draft.checkpointAt }
                     draft.isFinalized = true
-                    activeDraft = draft
                     recovery.checkpoint(draft, mesh: mesh) { result in
                         guard preparationToken == token else { return }
                         isPreparingMesh = false
                         endBackgroundCheckpoint()
                         if case .failure(let error) = result {
+                            checkpointWarning = "Checkpoint failed — stop and save soon."
                             failSave("Checkpoint failed; capture remains in memory. \(error.localizedDescription)")
+                        } else {
+                            activeDraft = draft
+                            checkpointWarning = nil
                         }
                     }
                 } else {
@@ -773,7 +776,7 @@ struct ScannerView: View {
                 }
             }
             .confirmationDialog("Not saving yet?", isPresented: $showingCancelOptions, titleVisibility: .visible) {
-                if !recoveredDraft, !scanner.needsRecoveryCheckpoint {
+                if !recoveredDraft, !scanner.needsRecoveryCheckpoint, !scanner.pointBudgetReached {
                     Button("Continue Scanning") {
                         showingSaveDialog = false
                         pendingMesh = nil
