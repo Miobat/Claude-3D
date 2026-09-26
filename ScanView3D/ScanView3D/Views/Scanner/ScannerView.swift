@@ -291,8 +291,8 @@ struct ScannerView: View {
                 Text(String(format: "%.0f MB est.", scanner.estimatedFileSizeMB))
                 Spacer()
                 Text(scanner.scanCapacityPercent > 80
-                     ? "Memory nearly full"
-                     : String(format: "%.0f%% memory used", scanner.scanCapacityPercent))
+                     ? "Scan capacity nearly full"
+                     : String(format: "%.0f%% of scan capacity", scanner.scanCapacityPercent))
                     .foregroundColor(scanner.scanCapacityPercent > 80 ? .orange : .gray)
             }
             .font(.caption2)
@@ -860,7 +860,8 @@ struct ScannerView: View {
         guard Date().timeIntervalSince(lastCheckpointStart) >= max(30, lastCheckpointDuration * 5) - 2 else { return }
         // Never let a safety copy be what runs the phone out of memory.
         #if !targetEnvironment(simulator)
-        guard LiDARScanner.availableMemoryMB() > 700 else { return }
+        // The coverage index may be copied while the checkpoint reads it.
+        guard LiDARScanner.availableMemoryMB() > 700 + scanner.coverageMemoryMB else { return }
         #endif
         checkpointInFlight = true
         let started = Date()

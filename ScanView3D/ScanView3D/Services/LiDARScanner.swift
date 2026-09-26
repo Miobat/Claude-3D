@@ -35,6 +35,8 @@ class LiDARScanner: NSObject, ObservableObject {
     /// Points in the LiDAR depth cloud (Point Cloud / Splat modes).
     @Published var depthPointCount: Int = 0
     @Published var pointBudgetReached = false
+    /// Share of the scan's point/coverage budget in use (0–100).
+    @Published var captureBudgetPercent: Double = 0
     /// Advice about how the user is moving (e.g. "walk around, don't pivot").
     @Published var captureHint: String?
 
@@ -192,9 +194,8 @@ class LiDARScanner: NSObject, ObservableObject {
         // All modes retain capture-time depth evidence. Raw ARKit anchor extents
         // and the camera's walked path must never expand the accepted range.
         let dense = captureMode == .pointCloud || captureMode == .splatExport
-        let budget = Int(max(200, Self.availableMemoryMB() - 600) * 1_048_576 * 0.35 / 100)
-        depthCloud.configure(voxelSize: dense ? max(0.004, detailMM / 1000) : 0.025,
-                             maxPoints: min(dense ? 4_000_000 : 600_000, budget))
+        let limits = Self.captureLimits(dense: dense, detailMM: detailMM, availableMB: Self.availableMemoryMB())
+        depthCloud.configure(voxelSize: limits.voxelSize, maxPoints: limits.points, coverageCells: limits.coverageCells)
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
@@ -244,6 +245,11 @@ class LiDARScanner: NSObject, ObservableObject {
 
     func resumeScanning() {
         guard isScanning, !isFinalizing, !needsRecoveryCheckpoint else { return }
+        // Full: resuming would only leave new areas out. Save instead.
+        guard !pointBudgetReached else {
+            scanError = "This scan is at full capacity. Tap Stop to save it, then start a new scan for the next area."
+            return
+        }
         guard let config = arSession.configuration else { return }
         arSession.run(config)
         isPaused = false
@@ -338,6 +344,7 @@ class LiDARScanner: NSObject, ObservableObject {
         depthCloud.reset()
         depthPointCount = 0
         pointBudgetReached = false
+        captureBudgetPercent = 0
         captureHint = nil
         captureMode = .fast
         cameraPath = []
@@ -412,12 +419,17 @@ class LiDARScanner: NSObject, ObservableObject {
 
         // Commit depth before showing coverage; one worker is in flight at most.
         do {
-            depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5)) { [weak self] count, full in
+            depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5)) { [weak self] count, full, used in
                 guard let self = self, self.epoch.isCurrent(token) else { return }
                 self.depthPointCount = count
+                self.captureBudgetPercent = used * 100
                 if full && !self.pointBudgetReached {
+                    // Stop here rather than keep scanning while new areas are quietly left out.
                     self.pointBudgetReached = true
-                    self.scanProgress = "Capture budget reached — tap Stop to save"
+                    if !self.isPaused { self.pauseScanning() }
+                    self.scanProgress = "Scan capacity full — tap Stop to save"
+                    self.scanError = "This scan has reached its capacity, so scanning was paused. Everything captured so far is kept. Tap Stop to save it, then start a new scan for the next area."
+                    DebugLogger.shared.warn("Capture budget full: \(count) points, \(Int(used * 100))%", category: "Scanner")
                 }
             }
         }
@@ -682,13 +694,15 @@ class LiDARScanner: NSObject, ObservableObject {
         let textureMemoryMB = textureMapper.estimatedMemoryUsageMB
         let meshMemoryMB = Double(vertexCount * 48 + faceCount * 12) / (1024.0 * 1024.0)
         let totalMB = textureMemoryMB + meshMemoryMB + Double(depthPointCount * 80) / 1_048_576
+            + depthCloud.coverageMemoryMB
         let estFileMB = Double(vertexCount * 80 + faceCount * 30) / (1024.0 * 1024.0)
         let available = Self.availableMemoryMB()
 
         memoryUsageMB = totalMB
         estimatedFileSizeMB = estFileMB + textureMapper.estimatedAtlasSizeMB
         // Capacity = share of the app's real memory budget in use.
-        scanCapacityPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
+        let memoryPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
+        scanCapacityPercent = max(memoryPercent, captureBudgetPercent)
 
         if (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
             textureCapturePaused = true
@@ -705,10 +719,35 @@ class LiDARScanner: NSObject, ObservableObject {
         }
     }
 
+    /// Memory the coverage index holds; a mid-scan checkpoint may briefly copy it.
+    var coverageMemoryMB: Double { depthCloud.coverageMemoryMB }
+
     /// Memory the app can still use before iOS terminates it (MB).
     static func availableMemoryMB() -> Double {
         let bytes = os_proc_available_memory()
         return bytes > 0 ? Double(bytes) / 1_048_576 : 1024
+    }
+
+    /// How much a capture may hold, from the memory free when it starts.
+    /// Coverage cells (2.5 cm) and saved points (one per `detailMM`) share one
+    /// budget sized by surface area, so coarser spacing really covers more
+    /// ground. Never below the previous fixed limits (600 000 coverage cells;
+    /// points as before), so a scan that worked before still fits.
+    static func captureLimits(dense: Bool, detailMM: Float, availableMB: Double)
+        -> (voxelSize: Float, points: Int, coverageCells: Int) {
+        let spacing = dense ? max(0.004, detailMM / 1000) : 0.025
+        let budgetBytes = max(200, availableMB - 600) * 1_048_576 * 0.35
+        let bytesPerEntry = 100.0
+        let cellsPerM2 = 1 / (0.025 * 0.025)
+        let pointsPerM2 = dense ? 1 / Double(spacing * spacing) : 0
+        let balancedArea = budgetBytes / (bytesPerEntry * (cellsPerM2 + pointsPerM2))
+        // What the previous fixed limits allowed (points, and 600 000 coverage cells).
+        let previousPoints = Double(min(4_000_000, Int(budgetBytes / bytesPerEntry)))
+        let previousArea = dense ? min(previousPoints / pointsPerM2, 600_000 / cellsPerM2) : 600_000 / cellsPerM2
+        let areaM2 = max(balancedArea, previousArea)
+        let points = dense ? min(4_000_000, Int(areaM2 * pointsPerM2)) : 0
+        let cells = min(3_000_000, max(600_000, Int(areaM2 * cellsPerM2)))
+        return (spacing, points, cells)
     }
 
     // MARK: - Mesh Data Access
@@ -1100,7 +1139,9 @@ final class DepthPointAccumulator {
     private let lock = NSLock()
     private var cells: [SIMD3<Int32>: Cell] = [:]
     private var voxelSize: Float = 0.01
+    /// 0 = coverage only (Fast / HQ), no saved point cloud is kept.
     private var maxPoints = 2_000_000
+    private var coverageCells = 600_000
     private var full = false
     private var inFlight = false          // main thread
     private var evidence = CapturedSurfaceIndex()
@@ -1119,10 +1160,31 @@ final class DepthPointAccumulator {
         return cells.count
     }
 
-    func configure(voxelSize: Float, maxPoints: Int) {
+    /// Share of the capture budget in use (0…1): coverage or points, whichever is fuller.
+    var budgetFraction: Double {
+        lock.lock(); defer { lock.unlock() }
+        return fraction()
+    }
+
+    /// Approximate memory held by the coverage index (a checkpoint may copy it).
+    var coverageMemoryMB: Double {
+        lock.lock(); defer { lock.unlock() }
+        return Double(evidence.cells.count) * 100 / 1_048_576
+    }
+
+    private func fraction() -> Double {
+        let cover = Double(evidence.cells.count) / Double(max(1, evidence.capacity))
+        let points = maxPoints > 0 ? Double(cells.count) / Double(maxPoints) : 0
+        return min(1, max(cover, points))
+    }
+
+    func configure(voxelSize: Float, maxPoints: Int, coverageCells: Int) {
         lock.lock()
         self.voxelSize = voxelSize
-        self.maxPoints = max(100_000, maxPoints)
+        self.maxPoints = maxPoints > 0 ? max(100_000, maxPoints) : 0
+        self.coverageCells = max(600_000, coverageCells)
+        // Only an empty index is resized; captured coverage is never dropped.
+        if evidence.cells.isEmpty { evidence = CapturedSurfaceIndex(capacity: self.coverageCells) }
         lock.unlock()
     }
 
@@ -1131,7 +1193,7 @@ final class DepthPointAccumulator {
         inFlight = false
         lock.lock()
         cells.removeAll()
-        evidence = CapturedSurfaceIndex()
+        evidence = CapturedSurfaceIndex(capacity: coverageCells)
         coverageLock.lock(); coverage = nil; coverageLock.unlock()
         full = false
         lock.unlock()
@@ -1143,7 +1205,7 @@ final class DepthPointAccumulator {
 
     /// Main thread. Converts one frame in the background (one at a time, so
     /// ARKit's camera buffers are never held for long).
-    func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool) -> Void) {
+    func integrate(_ frame: ARFrame, maxDistance: Float, onUpdate: @escaping (Int, Bool, Double) -> Void) {
         guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
               let confidence = depthData.confidenceMap,
               let sensor = CaptureDepthFrame(frame) else { return }
@@ -1162,29 +1224,35 @@ final class DepthPointAccumulator {
                                                      imageSize: SIMD2<Float>(imageW, imageH), maxDistance: maxDistance)
             var count = 0
             var isFull = false
+            var used = 0.0
             self.epoch.withCurrent(token) {
                 self.lock.lock()
                 defer { self.lock.unlock() }
                 let inv = 1 / self.voxelSize
                 var acceptedDepth = [Float](repeating: 0, count: sensor.depth.count)
+                let keepsPoints = self.maxPoints > 0
                 for (p, c, pixel) in batch {
-                    let s = p * inv
-                    let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
-                    if var cell = self.cells[key] {
-                        // Keep a real accepted point (not an average that can
-                        // move beyond the range boundary); average only colour.
-                        if cell.count < 1000 { cell.color += c; cell.count += 1 }
-                        self.cells[key] = cell
-                    } else if self.cells.count < self.maxPoints {
-                        self.cells[key] = Cell(position: p, color: c, count: 1)
-                    } else {
-                        self.full = true
-                        continue
+                    if keepsPoints {
+                        let s = p * inv
+                        let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+                        if var cell = self.cells[key] {
+                            // Keep a real accepted point (not an average that can
+                            // move beyond the range boundary); average only colour.
+                            if cell.count < 1000 { cell.color += c; cell.count += 1 }
+                            self.cells[key] = cell
+                        } else if self.cells.count < self.maxPoints {
+                            self.cells[key] = Cell(position: p, color: c, count: 1)
+                        } else {
+                            continue
+                        }
                     }
                     if self.evidence.insert(p, camera: transform.position, range: maxDistance) {
                         acceptedDepth[pixel] = sensor.depth[pixel]
-                    } else { self.full = true }
+                    }
                 }
+                // Full = a real capacity limit, not a point rejected at the range edge.
+                if (keepsPoints && self.cells.count >= self.maxPoints)
+                    || self.evidence.cells.count >= self.evidence.capacity { self.full = true }
                 // Confidence can fluctuate on a surface already captured. Keep
                 // its coverage if current depth still agrees with stored world
                 // evidence; do not blink or add low-confidence geometry.
@@ -1201,11 +1269,12 @@ final class DepthPointAccumulator {
                 self.coverageLock.unlock()
                 count = self.cells.count
                 isFull = self.full
+                used = self.fraction()
             }
             DispatchQueue.main.async {
                 guard self.epoch.isCurrent(token) else { return }
                 self.inFlight = false
-                onUpdate(count, isFull)
+                onUpdate(count, isFull, used)
             }
         }
     }
