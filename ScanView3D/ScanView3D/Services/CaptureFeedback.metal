@@ -12,6 +12,7 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
                             texture2d<float, access::write> output [[texture(1)]],
                             texture2d<float, access::sample> depth [[texture(2)]],
                             texture2d<float, access::sample> accepted [[texture(3)]],
+                            texture2d<float, access::sample> photographed [[texture(4)]],
                             constant CaptureUniforms &u [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
@@ -52,7 +53,11 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
                 float3 grid = abs(fract(world.xyz * 10.0 + 0.5) - 0.5);
                 float line = 1.0 - smoothstep(0.012, 0.038, min(grid.x, min(grid.y, grid.z)));
                 float edge = smoothstep(0.0, 0.018, u.parameters.x - distance);
-                float3 ink = mix(float3(0.04, 0.84, 0.66), float3(0.45, 1.0, 0.86), line);
+                float photoDepth = photographed.sample(nearestSampler, previousUV).r;
+                bool needsPhoto = u.parameters.y > 1.5 &&
+                    !(photoDepth > 0 && abs(photoDepth - z) < 0.035 + z * 0.012);
+                float3 ink = needsPhoto ? mix(float3(0.10, 0.42, 1.0), float3(0.4, 0.7, 1.0), line)
+                    : mix(float3(0.04, 0.84, 0.66), float3(0.45, 1.0, 0.86), line);
                 color.rgb = mix(color.rgb, ink, (0.40 + line * 0.16) * edge);
             }
         }

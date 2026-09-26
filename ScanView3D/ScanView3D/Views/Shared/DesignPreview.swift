@@ -148,6 +148,7 @@ enum DesignPreview {
         } catch { check(false, "Photo-mask resize: \(error)") }
 
         checkFeedbackShader(check)
+        checkRecoveryAndSave(check)
         let report: [String: Any] = ["checks": count, "failures": failures]
         let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("navigation-checks.json")
@@ -181,7 +182,6 @@ enum DesignPreview {
               let depth = texture(.r32Float), let accepted = texture(.r32Float) else {
             check(false, "Capture feedback test textures"); return
         }
-        let colors = [SIMD4<Float>](repeating: SIMD4(26.0 / 255, 0.2, 0.8, 1), count: 256)
         let colorBytes = (0..<256).flatMap { _ in [UInt8(26), 51, 204, 255] }
         let depths: [Float] = (0..<256).map { i in i % 16 < 4 ? 1 : i % 16 < 8 ? 2 : i % 16 < 12 ? 0 : 1 }
         let committed: [Float] = (0..<256).map { $0 % 16 < 8 ? 1 : 0 }
@@ -192,6 +192,7 @@ enum DesignPreview {
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(source, index: 0); encoder.setTexture(output, index: 1)
         encoder.setTexture(depth, index: 2); encoder.setTexture(accepted, index: 3)
+        encoder.setTexture(accepted, index: 4)
         var uniforms = Uniforms()
         encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
@@ -209,6 +210,7 @@ enum DesignPreview {
         referenceEncoder.setComputePipelineState(pipeline)
         referenceEncoder.setTexture(source, index: 0); referenceEncoder.setTexture(baseline, index: 1)
         referenceEncoder.setTexture(depth, index: 2); referenceEncoder.setTexture(accepted, index: 3)
+        referenceEncoder.setTexture(accepted, index: 4)
         referenceEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         referenceEncoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
         referenceEncoder.endEncoding(); referenceCommand.commit(); referenceCommand.waitUntilCompleted()
@@ -219,9 +221,97 @@ enum DesignPreview {
             simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
         }
         check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
-        check(result[8 * 16 + 5].y < 0.4 && result[8 * 16 + 5].z < 0.7, "Out-of-range surface is muted without mint coverage")
+        let outside = 8 * 16 + 5
+        let original = SIMD3(reference[outside].x, reference[outside].y, reference[outside].z)
+        let grey = simd_dot(original, SIMD3<Float>(0.2126, 0.7152, 0.0722))
+        // A uniform input is unchanged by blur. Check the actual desaturation /
+        // dimming formula, not a GPU-dependent fixed colour threshold.
+        let expected = (original * 0.55 + SIMD3<Float>(repeating: grey) * 0.45) * 0.78
+        check(simd_distance(SIMD3(result[outside].x, result[outside].y, result[outside].z), expected) < 0.002,
+              "Out-of-range colour: actual \(result[outside]), expected \(expected), GPU \(device.name), OS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         check(unchanged(8 * 16 + 9), "Unknown depth does not invent coverage: actual \(result[8 * 16 + 9]), baseline \(reference[8 * 16 + 9])")
         check(unchanged(8 * 16 + 13), "Uncommitted depth does not invent coverage: actual \(result[8 * 16 + 13]), baseline \(reference[8 * 16 + 13])")
+
+        // Fast colour mode: geometry alone is blue; only a retained, saved
+        // sharp photo is allowed to turn it mint. Test the production kernel.
+        for hasPhoto in [false, true] {
+            guard let photo = texture(.r32Float), let cmd = queue.makeCommandBuffer(),
+                  let enc = cmd.makeComputeCommandEncoder() else { check(false, "Photo coverage command"); return }
+            let photoDepths = hasPhoto ? committed : [Float](repeating: 0, count: 256)
+            photoDepths.withUnsafeBytes { photo.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
+            uniforms.parameters = SIMD4(1.5, 2, 16, 16)
+            enc.setComputePipelineState(pipeline)
+            enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
+            enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3); enc.setTexture(photo, index: 4)
+            enc.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+            enc.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+            var pixels = [SIMD4<Float>](repeating: .zero, count: 256)
+            pixels.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+            let p = pixels[8 * 16 + 1]
+            check(cmd.status == .completed && (hasPhoto ? simd_distance(p, result[8 * 16 + 1]) < 0.0001 : p.z > p.y && p.y < result[8 * 16 + 1].y - 0.08),
+                  "Fast coverage \(hasPhoto ? "mint with photo" : "blue without photo"): \(p)")
+        }
+    }
+
+    private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {
+        do {
+            let mesh = terrain()
+            let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+            let data = try encoder.encode(mesh)
+            let restored = try PropertyListDecoder().decode(MeshData.self, from: data)
+            check(restored.vertices == mesh.vertices && restored.normals == mesh.normals && restored.faces == mesh.faces,
+                  "Packed checkpoint geometry round-trip")
+            check(zip(restored.colors, mesh.colors).allSatisfy { simd_distance($0, $1) <= 0.004 },
+                  "Packed checkpoint retains sampled camera colour")
+            var properties = try PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+            for key in ["packedVertices", "packedNormals", "packedFaces", "packedColors"] {
+                var corrupt = properties
+                var bytes = corrupt[key] as! Data; bytes.append(0)
+                corrupt[key] = bytes
+                let invalid = try PropertyListSerialization.data(fromPropertyList: corrupt, format: .binary, options: 0)
+                do {
+                    _ = try PropertyListDecoder().decode(MeshData.self, from: invalid)
+                    check(false, "Reject truncated \(key)")
+                } catch { check(true, "Reject truncated \(key)") }
+            }
+            properties["packedFaces"] = Data(repeating: 255, count: 12)
+            let invalidFaces = try PropertyListSerialization.data(fromPropertyList: properties, format: .binary, options: 0)
+            do {
+                _ = try PropertyListDecoder().decode(MeshData.self, from: invalidFaces)
+                check(false, "Reject out-of-bounds checkpoint indices")
+            } catch { check(true, "Reject out-of-bounds checkpoint indices") }
+            // Preserve compatibility with the original synthesized Codable shape.
+            struct LegacyMesh: Encodable {
+                let vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>]
+                let boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>
+            }
+            let legacy = LegacyMesh(vertices: mesh.vertices, normals: mesh.normals, faces: mesh.faces,
+                                    colors: mesh.colors, boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            let old = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(legacy))
+            check(old.vertices == mesh.vertices && old.colors == mesh.colors, "Legacy checkpoint remains readable")
+            var invalidVertices = mesh.vertices; invalidVertices[0].x = .nan
+            let nonFinite = MeshData(vertices: invalidVertices, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                                     boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try encoder.encode(nonFinite); check(false, "Reject nonfinite checkpoint") }
+            catch { check(true, "Reject nonfinite checkpoint") }
+            var invalidTriangles = mesh.faces; invalidTriangles[0] = [0, 1]
+            let brokenFace = MeshData(vertices: mesh.vertices, normals: mesh.normals, faces: invalidTriangles, colors: mesh.colors,
+                                      boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try encoder.encode(brokenFace); check(false, "Never silently discard malformed faces") }
+            catch { check(true, "Never silently discard malformed faces") }
+
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("save-check-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Atomic metadata fixture") else { check(false, "Fixture project creation"); return }
+            let scan = try store.saveScan(meshData: mesh, name: "Atomic save", toProject: project, metadata: {
+                $0.latitude = 59.91; $0.longitude = 10.75
+            })
+            let reloaded = StorageManager(directory: root).projects.first?.scans.first
+            check(reloaded?.id == scan.id && reloaded?.latitude == 59.91 && reloaded?.longitude == 10.75,
+                  "Mesh and capture metadata survive first index commit")
+        } catch { check(false, "Recovery / atomic save fixtures: \(error)") }
     }
 }
 
@@ -239,7 +329,7 @@ struct DesignPreviewRoot: View {
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: ["scanner", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
         .onAppear {

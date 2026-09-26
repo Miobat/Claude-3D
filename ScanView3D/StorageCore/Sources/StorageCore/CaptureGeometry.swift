@@ -105,12 +105,14 @@ struct CapturedSurfaceIndex {
         let point: SIMD3<Float>
         let camera: SIMD3<Float>
         let range: Float
-        /// A sharp colour photo was taken while this surface was in view.
-        var photographed = false
+        /// Sampled camera colour survives lightweight recovery checkpoints.
+        let color: SIMD3<Float>
+        var photoID: Int?
     }
     private(set) var cells: [SIMD3<Int32>: Sample] = [:]
     let cellSize: Float
     let capacity: Int
+    private var retainedPhotos: Set<Int> = []
 
     init(cellSize: Float = 0.025, capacity: Int = 600_000) {
         self.cellSize = max(0.005, cellSize)
@@ -125,40 +127,80 @@ struct CapturedSurfaceIndex {
     }
 
     @discardableResult
-    mutating func insert(_ p: SIMD3<Float>, camera: SIMD3<Float>, range: Float, photographed: Bool = false) -> Bool {
+    mutating func insert(_ p: SIMD3<Float>, camera: SIMD3<Float>, range: Float,
+                         color: SIMD3<Float> = SIMD3(repeating: 0.7)) -> Bool {
         guard range.isFinite, range > 0, simd_distance_squared(p, camera) <= range * range,
               let k = key(p) else { return false }
         // Preserve prior observations at capacity, never invent new coverage.
         let previous = cells[k]
         guard previous != nil || cells.count < capacity else { return false }
-        cells[k] = Sample(point: p, camera: camera, range: range,
-                          photographed: photographed || (previous?.photographed ?? false))
+        cells[k] = Sample(point: p, camera: camera, range: range, color: color, photoID: previous?.photoID)
         return true
+    }
+
+    mutating func retainPhotos(_ ids: Set<Int>) { retainedPhotos = ids }
+
+    /// Called only after the JPEG is durable, using THAT photo's owned depth.
+    /// A photo cannot invent geometry or attach to a different surface in space.
+    mutating func markPhotographed(_ p: SIMD3<Float>, photoID: Int) {
+        guard retainedPhotos.contains(photoID), let k = key(p), var sample = cells[k],
+              simd_distance_squared(sample.point, p) <= 0.035 * 0.035 else { return }
+        sample.photoID = photoID
+        cells[k] = sample
     }
 
     /// Whether the cell holding `p` has had a sharp photo taken of it.
     func isPhotographed(_ p: SIMD3<Float>) -> Bool {
         guard let k = key(p) else { return false }
-        return cells[k]?.photographed ?? false
+        return cells[k]?.photoID.map { retainedPhotos.contains($0) } ?? false
     }
 
-    func contains(_ p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Bool {
-        guard let k = key(p), tolerance.isFinite, tolerance >= 0 else { return false }
+    func sample(at p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Sample? {
+        guard let k = key(p), tolerance.isFinite, tolerance >= 0 else { return nil }
         func matches(_ s: Sample) -> Bool {
-            (!requirePhoto || s.photographed) &&
+            (!requirePhoto || s.photoID.map { retainedPhotos.contains($0) } == true) &&
             simd_distance_squared(s.point, p) <= tolerance * tolerance &&
             simd_distance_squared(s.camera, p) <= s.range * s.range
         }
-        if let s = cells[k], matches(s) { return true }
+        if let s = cells[k], matches(s) { return s }
         let reach = min(8, Int32(ceil(tolerance / cellSize)))
         for dx in -reach...reach {
             for dy in -reach...reach {
                 for dz in -reach...reach {
                     guard let s = cells[k &+ SIMD3(dx, dy, dz)], matches(s) else { continue }
-                    return true
+                    return s
                 }
             }
         }
-        return false
+        return nil
+    }
+
+    func contains(_ p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Bool {
+        sample(at: p, tolerance: tolerance, requirePhoto: requirePhoto) != nil
+    }
+
+    /// One observation sphere must contain the whole triangle (a convex set).
+    /// A single in-range corner must never admit two out-of-range corners.
+    static func withinObservedRange(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ c: SIMD3<Float>,
+                                    observations: [Sample]) -> Bool {
+        observations.contains { s in
+            [a, b, c].allSatisfy { simd_distance_squared($0, s.camera) <= s.range * s.range }
+        }
+    }
+}
+
+/// Reserve memory for checkpointing and final save, not only accumulation.
+enum CaptureBudget {
+    static let bytesPerEntry = 128.0
+    static func limits(dense: Bool, detailMM: Float, availableMB: Double)
+        -> (voxelSize: Float, points: Int, coverageCells: Int) {
+        let spacing = dense ? max(0.004, detailMM.isFinite ? detailMM / 1000 : 0.01) : 0.025
+        let usableMB = max(0, min(1_000_000, availableMB.isFinite ? availableMB : 0) - 600)
+        let entries = usableMB * 1_048_576 * 0.35 / bytesPerEntry
+        let coverageDensity = 1600.0
+        let pointDensity = dense ? 1 / Double(spacing * spacing) : 0
+        let area = entries / (coverageDensity + pointDensity)
+        return (spacing, dense ? min(4_000_000, Int(area * pointDensity)) : 0,
+                min(3_000_000, Int(area * coverageDensity)))
     }
 }
