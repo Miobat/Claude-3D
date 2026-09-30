@@ -8,6 +8,8 @@ struct ObjectMeasurementPanel: View {
     @State private var showingDelete = false
     @State private var showingNew = false
     @State private var showingWall = false
+    @State private var showingOpen = false
+    @State private var pendingOpen: AutomaticMeasuredRegion?
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
@@ -20,6 +22,14 @@ struct ObjectMeasurementPanel: View {
                 }
                 Spacer(minLength: 4)
                 if session.busy { ProgressView().tint(FieldStyle.mint).accessibilityLabel("Analysing selection") }
+                else if session.draft != nil {
+                    Button { session.save() } label: {
+                        Label(session.dirty ? "Save" : "Saved", systemImage: session.dirty ? "checkmark" : "checkmark.circle")
+                            .font(.caption.weight(.semibold)).padding(.horizontal, 10).frame(minHeight: 44)
+                            .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+                    }.disabled(!session.writable || !session.dirty)
+                        .accessibilityLabel(session.dirty ? "Save reviewed object" : "Object is saved")
+                }
             }
             if let warning = session.warning {
                 Label(warning, systemImage: "exclamationmark.circle")
@@ -102,18 +112,16 @@ struct ObjectMeasurementPanel: View {
                     Spacer(minLength: 0)
                     Button { showingDelete = true } label: { Image(systemName: "trash").frame(width: 44, height: 44) }
                         .disabled(session.busy || !session.writable).accessibilityLabel("Delete selected object")
-                    Button { session.save() } label: {
-                        Label(session.dirty ? "Save object" : "Saved", systemImage: session.dirty ? "checkmark" : "checkmark.circle")
-                            .font(.caption.weight(.semibold)).padding(.horizontal, 14).frame(minHeight: 44)
-                            .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
-                    }.disabled(session.busy || !session.writable || !session.dirty)
                 }
             }
             if !session.saved.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(session.saved.filter { $0.kind == .object }) { object in
-                            Button { session.open(object) } label: {
+                            Button {
+                                if session.dirty { pendingOpen = object; showingOpen = true }
+                                else { session.open(object) }
+                            } label: {
                                 Label(object.name, systemImage: "cube").font(.caption).padding(.horizontal, 12).frame(minHeight: 44)
                                     .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                             }.disabled(session.busy).accessibilityLabel("Reopen saved object \(object.name)")
@@ -137,6 +145,10 @@ struct ObjectMeasurementPanel: View {
             Button("Confirm flush contact — use wall depth") { session.confirmWallContact() }
         } message: {
             Text("This uses the front-to-wall span. Depth will be labelled Wall assumption, not measured. If you cannot confirm contact, keep the scanned span or unknown depth.")
+        }
+        .confirmationDialog("Discard unsaved changes and open the saved object?", isPresented: $showingOpen, titleVisibility: .visible) {
+            Button("Discard and open", role: .destructive) { if let pendingOpen { session.open(pendingOpen) }; pendingOpen = nil }
+            Button("Cancel", role: .cancel) { pendingOpen = nil }
         }
     }
 

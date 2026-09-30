@@ -1,5 +1,6 @@
 import Foundation
 import simd
+import CryptoKit
 
 /// Exact source IDs, tied to the enclosing document's model revision. Packing
 /// avoids huge JSON arrays and lets reopening highlight only reviewed surfaces.
@@ -7,6 +8,7 @@ struct AutomaticRegionSelection: Codable, Equatable {
     enum Kind: String, Codable { case triangles, points }
     var kind: Kind
     var packedIDs: Data
+    var geometrySHA256: String? = nil
 
     init(kind: Kind, ids: [Int]) throws {
         guard ids.count <= ObjectSelectionIndex.maximumSelection,
@@ -26,13 +28,15 @@ struct AutomaticRegionSelection: Codable, Equatable {
             throw AutomaticMeasurementError.invalidDocument
         }
         let values = ids
+        guard geometrySHA256.map(MeasurementModelRevision.validHash) ?? true else { throw AutomaticMeasurementError.invalidDocument }
         guard zip(values, values.dropFirst()).allSatisfy({ $0 < $1 }) else {
             throw AutomaticMeasurementError.invalidDocument
         }
     }
 
     var ids: [Int] {
-        packedIDs.withUnsafeBytes { bytes in
+        guard packedIDs.count % 4 == 0, packedIDs.count / 4 <= ObjectSelectionIndex.maximumSelection else { return [] }
+        return packedIDs.withUnsafeBytes { bytes in
             stride(from: 0, to: bytes.count, by: 4).map {
                 Int(UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: $0, as: UInt32.self)))
             }
@@ -63,6 +67,7 @@ final class ObjectSelectionIndex {
     let triangles: [SIMD3<UInt32>]
     let normals: [SIMD3<Float>]
     let structural: Set<Int>
+    let geometrySHA256: String
     private let welded: [Int]
     private let incidents: [[Int]]
     private let cells: [SIMD3<Int32>: [Int]]
@@ -76,6 +81,28 @@ final class ObjectSelectionIndex {
               triangles.allSatisfy({ Int(max($0.x, max($0.y, $0.z))) < points.count }),
               labels == nil || labels?.count == triangles.count else { throw AutomaticMeasurementError.invalidGeometry }
         self.points = points; self.triangles = triangles
+        // Bind IDs to the geometry actually opened, including source ordering
+        // and world transform. A .scn → OBJ fallback must not reuse a different
+        // native topology merely because both files still have the same hashes.
+        var digest = SHA256()
+        var buffer = Data(capacity: 65_536)
+        func word(_ value: UInt32) {
+            var value = value.littleEndian
+            withUnsafeBytes(of: &value) { buffer.append(contentsOf: $0) }
+            if buffer.count >= 65_536 { digest.update(data: buffer); buffer.removeAll(keepingCapacity: true) }
+        }
+        word(UInt32(points.count)); word(UInt32(triangles.count))
+        for (i, p) in points.enumerated() {
+            if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+            if triangles.isEmpty {
+                buckets[Self.cell(p, size: 0.04), default: []].append(i)
+                continue
+            }
+            word(p.x.bitPattern); word(p.y.bitPattern); word(p.z.bitPattern)
+        }
+        for t in triangles { word(t.x); word(t.y); word(t.z) }
+        digest.update(data: buffer)
+        geometrySHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
         var weldMap: [SIMD3<Int32>: [Int]] = [:], representatives: [SIMD3<Float>] = [], remap: [Int] = []
         var buckets: [SIMD3<Int32>: [Int]] = [:]
         for (i, p) in points.enumerated() {
@@ -90,7 +117,6 @@ final class ObjectSelectionIndex {
             } } }
             if let match { remap.append(match) }
             else { remap.append(representatives.count); weldMap[key, default: []].append(representatives.count); representatives.append(p) }
-            buckets[Self.cell(p, size: 0.04), default: []].append(i)
         }
         welded = remap; cells = buckets
         var incident = [[Int]](repeating: [], count: representatives.count)
@@ -122,7 +148,9 @@ final class ObjectSelectionIndex {
             plane.high = simd_max(plane.high, simd_max(a, simd_max(b, c)))
             planes[k] = plane
         }
-        let minY = points.reduce(Float.greatestFiniteMagnitude) { min($0, $1.y) }
+        // A disconnected point below the room must not disable floor rejection.
+        let minY = planes.values.filter { $0.area > 1.5 && abs(faceNormals[$0.ids[0]].y) > 0.95 }
+            .reduce(Float.greatestFiniteMagnitude) { min($0, $1.low.y) }
         for plane in planes.values {
             let extent = plane.high - plane.low
             let n = faceNormals[plane.ids[0]]
@@ -180,7 +208,7 @@ final class ObjectSelectionIndex {
             }
         }
         guard !selected.isEmpty else { throw ObjectSelectionError.emptySelection }
-        return Result(selection: try AutomaticRegionSelection(kind: kind, ids: selected), touchesLimit: clipped)
+        return Result(selection: try identifiedSelection(selected), touchesLimit: clipped)
     }
 
     /// Paint corrections use real triangle distance, not just triangle centroids.
@@ -195,14 +223,21 @@ final class ObjectSelectionIndex {
                 if adding { ids.insert(i) } else { ids.remove(i) }
             }
         }
-        return ids.isEmpty ? nil : try AutomaticRegionSelection(kind: kind, ids: Array(ids))
+        return ids.isEmpty ? nil : try identifiedSelection(Array(ids))
     }
 
     func validate(_ selection: AutomaticRegionSelection) throws {
         try selection.validate()
-        guard selection.kind == kind, selection.ids.allSatisfy({ $0 < (triangles.isEmpty ? points.count : triangles.count) }) else {
+        guard selection.kind == kind, selection.geometrySHA256 == geometrySHA256,
+              selection.ids.allSatisfy({ $0 < (triangles.isEmpty ? points.count : triangles.count) }) else {
             throw AutomaticMeasurementError.staleModel
         }
+    }
+
+    private func identifiedSelection(_ ids: [Int]) throws -> AutomaticRegionSelection {
+        var result = try AutomaticRegionSelection(kind: kind, ids: ids)
+        result.geometrySHA256 = geometrySHA256
+        return result
     }
 
     func region(selection: AutomaticRegionSelection, front: SIMD3<Float>, partial: Bool, name: String = "Object") throws -> AutomaticMeasuredRegion {

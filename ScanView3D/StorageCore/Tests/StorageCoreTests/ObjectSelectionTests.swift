@@ -153,4 +153,27 @@ final class ObjectSelectionTests: XCTestCase {
         XCTAssertNil(index.wallDepth(for: region))
         XCTAssertThrowsError(try index.assumingWallContact(region, confirmed: true))
     }
+
+    func testOpenedTopologyFingerprintRejectsSameCountReorderingAndTransform() throws {
+        let mesh = box(), index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces)
+        let selection = try index.grow(from: 0, radius: 2).selection
+        XCTAssertEqual(selection.geometrySHA256, index.geometrySHA256)
+        let reordered = try ObjectSelectionIndex(points: mesh.points, triangles: Array(mesh.faces.reversed()))
+        XCTAssertThrowsError(try reordered.validate(selection))
+        let moved = try ObjectSelectionIndex(points: mesh.points.map { $0 + SIMD3(0, 1, 0) }, triangles: mesh.faces)
+        XCTAssertThrowsError(try moved.validate(selection))
+        let identical = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces)
+        XCTAssertNoThrow(try identical.validate(selection))
+        var legacy = selection; legacy.geometrySHA256 = nil
+        XCTAssertThrowsError(try identical.validate(legacy)) // review-only, not guessed
+    }
+
+    func testLegacyShapeOnlyFloorSurvivesDisconnectedLowNoise() throws {
+        var mesh = box()
+        mesh.points.append(contentsOf: [SIMD3(-3, 0, -3), SIMD3(3, 0, -3), SIMD3(0, -1, 0)])
+        mesh.faces.append(SIMD3(0, 8, 9))
+        let index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces)
+        XCTAssertTrue(index.structural.contains(12))
+        XCTAssertFalse(try index.grow(from: 0, radius: 5).selection.ids.contains(12))
+    }
 }

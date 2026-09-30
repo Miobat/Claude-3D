@@ -236,7 +236,8 @@ Branch `codex/object-measurement` builds on the validated measurement foundation
   labels need horizontal normals; large background planes need geometric support.
   Unknown/legacy labels fall back to shape, not invented semantic identities.
 - Mint highlight contains exact selected triangles/points. Stored packed source
-  IDs are optional on each automatic region and bound to the document revision.
+  IDs are optional on each automatic region and bound to the document revision
+  plus a digest of the opened geometry's positions, indices and world frame.
   Legacy results still reopen as bounds-only; unreadable/stale files are read-only.
 - Select reach limits growing; clipped and point-cloud selections are Partial.
   Mesh values are Scanned spans, not proof of a closed physical object. Depth

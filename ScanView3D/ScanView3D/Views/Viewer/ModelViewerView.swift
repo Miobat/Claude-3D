@@ -258,8 +258,8 @@ struct ModelViewerView: View {
                 objects.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
             }
         }
-        .onChange(of: objects.busy) { _, busy in
-            if !busy, DesignPreview.screen == "object", let region = objects.draft {
+        .onChange(of: objects.draft) { _, region in
+            if DesignPreview.screen == "object", let region {
                 objects.alignView?("front", region.bounds)
             }
         }

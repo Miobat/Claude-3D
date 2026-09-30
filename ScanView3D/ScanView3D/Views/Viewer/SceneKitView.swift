@@ -3,6 +3,11 @@ import SceneKit
 import SpriteKit
 import Combine
 
+private final class ObjectSceneView: SCNView {
+    var layoutChanged: (() -> Void)?
+    override func layoutSubviews() { super.layoutSubviews(); layoutChanged?() }
+}
+
 /// UIViewRepresentable wrapper for SceneKit 3D viewer
 struct SceneKitViewRepresentable: UIViewRepresentable {
     let scan: Scan
@@ -21,7 +26,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     @ObservedObject var navigation: WalkNavigation
 
     func makeUIView(context: Context) -> SCNView {
-        let sceneView = SCNView(frame: .zero)
+        let sceneView = ObjectSceneView(frame: .zero)
         sceneView.scene = SCNScene()
         sceneView.backgroundColor = UIColor(FieldStyle.viewport)
         sceneView.autoenablesDefaultLighting = false
@@ -32,6 +37,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         setupCamera(sceneView)
 
         let coordinator = context.coordinator
+        sceneView.layoutChanged = { [weak coordinator] in coordinator?.updateObjectFramingForLayout() }
         if let cameraNode = sceneView.pointOfView {
             let controller = OrbitCameraController(view: sceneView, cameraNode: cameraNode)
             controller.surfacePoint = { [weak coordinator] location in coordinator?.surfacePointForFocus(at: location) }
@@ -312,6 +318,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         var geometryIndex: ModelGeometryIndex?
         var objectPaint: UIPanGestureRecognizer?
         private var lastPaintTime: TimeInterval = 0
+        private var objectPresetView: String?
+        private var objectPresetSize = CGSize.zero
         private var previewTimer: Timer?
         private var activeCancellable: AnyCancellable?
         private var lastPreviewCamera: simd_float4x4?
@@ -463,6 +471,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 guard let self, !self.disposed, let root = self.sceneView?.scene?.rootNode else { return }
                 root.childNode(withName: "objectSelection", recursively: false)?.removeFromParentNode()
                 if let node { root.addChildNode(node) }
+                if region == nil { self.objectPresetView = nil }
                 self.overlay?.updateObject(region, unit: self.parent.objects.unit)
                 self.sceneView?.rendersContinuously = objects.active || (self.session?.isActive ?? false)
             }
@@ -486,7 +495,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         func objectPick(at location: CGPoint) {
             guard parent.objects.active, let view = sceneView, let hit = surfaceHit(at: location, in: view) else { return }
             let m = view.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
-            let normal = surfacePlane(at: hit.point, fallbackNormal: hit.normal).normal
+            let normal = parent.objects.mode == .select ? surfacePlane(at: hit.point, fallbackNormal: hit.normal).normal : hit.normal
             parent.objects.pick(point: hit.point, normal: normal, cameraFront: SIMD3(m.columns.2.x, 0, m.columns.2.z))
         }
 
@@ -511,6 +520,20 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             camera.orthographicScale = Double(scale)
             rig.set(yaw: atan2(direction.x, direction.z), pitch: view == "top" ? -.pi / 2 : 0,
                     target: target, distance: max(simd_length(bounds.size) * 2, 0.5), animated: false)
+            objectPresetView = view; objectPresetSize = sceneView.bounds.size
+        }
+
+        func updateObjectFramingForLayout() {
+            guard let view = sceneView, view.bounds.width > 0, view.bounds.height > 0,
+                  view.bounds.size != objectPresetSize, let preset = objectPresetView,
+                  parent.objects.active, let region = parent.objects.draft, let rig = cameraController else { return }
+            let direction = preset == "side" ? region.bounds.right : region.bounds.front
+            let expectedYaw = atan2(direction.x, direction.z)
+            let yawDifference = atan2(sin(rig.yaw - expectedYaw), cos(rig.yaw - expectedYaw))
+            let expectedPitch: Float = preset == "top" ? -.pi / 2 : 0
+            // A freely orbited camera is no longer an aligned preset.
+            guard abs(yawDifference) < 0.01, abs(rig.pitch - expectedPitch) < 0.01 else { objectPresetView = nil; return }
+            alignObject(view: preset, bounds: region.bounds)
         }
 
         func pickingProjection(in view: SCNView) -> simd_float4x4? {
@@ -889,6 +912,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         @objc func resetCamera() {
+            objectPresetView = nil
+            parent.cameraProjection = .perspective
             exitWalk()
             guard let camera = sceneView?.pointOfView?.camera else { return }
             SCNTransaction.begin()

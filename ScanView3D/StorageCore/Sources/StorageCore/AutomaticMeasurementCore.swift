@@ -41,7 +41,7 @@ enum AutomaticMeasurementError: LocalizedError {
         case .invalidGeometry: return "The selected geometry cannot support these dimensions."
         case .invalidDocument: return "The measurement data is invalid. The original file has been preserved."
         case .unsupportedVersion: return "These measurements were saved by a newer app. The original file has been preserved."
-        case .staleModel: return "The model or its alignment has changed. Review the automatic measurements before using them."
+        case .staleModel: return "The model, opened geometry or alignment has changed. Review the automatic measurements before using them."
         case .unconfirmedWall: return "Confirm that the object is flush to the wall before using wall-based depth."
         case .unverifiedScale: return "This model's scale is unverified or estimated. Calibrate it before automatic metric measurement."
         }

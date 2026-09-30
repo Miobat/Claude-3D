@@ -376,22 +376,22 @@ enum DesignPreview {
                                             }
                                         }
                                         func finishEdits() {
-                                        session.adjust(name: "Reviewed cabinet", size: SIMD3(1.25, 1.3, 0.6))
-                                        check(session.draft?.dimensions.first { $0.axis == .width }?.evidence == .adjusted && session.dirty,
-                                              "Edited object bounds are explicitly adjusted, never measured")
-                                        for aligned in ["front", "side", "top"] {
-                                            coordinator.alignObject(view: aligned, bounds: draft.bounds)
-                                            let direction = aligned == "side" ? draft.bounds.right : draft.bounds.front
-                                            let camera = view.pointOfView?.simdTransform
-                                            let axis = aligned == "top" ? SIMD3<Float>(0, 1, 0) : direction
-                                            check(camera.map { simd_dot(SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z), axis) > 0.999 } ?? false,
-                                                  "Object \(aligned) view aligns orthographically to selection axes")
-                                        }
-                                        session.deleteDraft()
-                                        idle {
-                                            check(session.saved.isEmpty && session.draft == nil, "Delete removes only the saved object result")
-                                            finish()
-                                        }
+                                            session.adjust(name: "Reviewed cabinet", size: SIMD3(1.25, 1.3, 0.6))
+                                            check(session.draft?.dimensions.first { $0.axis == .width }?.evidence == .adjusted && session.dirty,
+                                                  "Edited object bounds are explicitly adjusted, never measured")
+                                            for aligned in ["front", "side", "top"] {
+                                                coordinator.alignObject(view: aligned, bounds: draft.bounds)
+                                                let direction = aligned == "side" ? draft.bounds.right : draft.bounds.front
+                                                let camera = view.pointOfView?.simdTransform
+                                                let axis = aligned == "top" ? SIMD3<Float>(0, 1, 0) : direction
+                                                check(camera.map { simd_dot(SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z), axis) > 0.999 } ?? false,
+                                                      "Object \(aligned) view aligns orthographically to selection axes")
+                                            }
+                                            session.deleteDraft()
+                                            idle {
+                                                check(session.saved.isEmpty && session.draft == nil, "Delete removes only the saved object result")
+                                                finish()
+                                            }
                                         }
                                     }
                                 }
