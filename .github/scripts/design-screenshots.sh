@@ -28,7 +28,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 56 and not r["failures"], "Native capture / navigation / recovery / texture checks failed"' "$OUT/navigation-checks.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 85 and not r["failures"], "Native capture / navigation / recovery / texture / automatic measurement checks failed"' "$OUT/navigation-checks.json"
 SCREENS="scanner capture-active capture-settings viewer measure quality"
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-system-upgrade" || "${GITHUB_HEAD_REF:-}" == "codex/design-system-upgrade" ]]; then
   SCREENS="projects library project settings scanner capture-active capture-settings viewer measure quality empty"

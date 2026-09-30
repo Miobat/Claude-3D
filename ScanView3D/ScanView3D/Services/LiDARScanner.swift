@@ -827,6 +827,7 @@ class LiDARScanner: NSObject, ObservableObject {
         var allNormals: [SIMD3<Float>] = []
         var allFaces: [[UInt32]] = []
         var allColors: [SIMD4<Float>] = []
+        var allClassifications: [UInt8] = []
 
         for anchor in anchors {
             let transform = anchor.transform
@@ -890,13 +891,14 @@ class LiDARScanner: NSObject, ObservableObject {
                     mapped.append(UInt32(localIndex[v]))
                 }
                 allFaces.append(mapped)
+                allClassifications.append(faceClass)
             }
         }
 
         guard !allVertices.isEmpty else { return nil }
         let (minB, maxB) = MeshData.bounds(of: allVertices)
         return MeshData(vertices: allVertices, normals: allNormals, faces: allFaces, colors: allColors,
-                        boundingBoxMin: minB, boundingBoxMax: maxB)
+                        boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: Data(allClassifications))
     }
 
     /// Build clean room geometry from detected planes (for Area mode)
@@ -1559,6 +1561,22 @@ struct MeshData: Codable {
     let colors: [SIMD4<Float>]
     let boundingBoxMin: SIMD3<Float>
     let boundingBoxMax: SIMD3<Float>
+    /// Optional for legacy scans / point clouds. One byte per face, never per vertex.
+    let faceClassifications: Data?
+
+    init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>],
+         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>, faceClassifications: Data? = nil) {
+        self.vertices = vertices; self.normals = normals; self.faces = faces; self.colors = colors
+        self.boundingBoxMin = boundingBoxMin; self.boundingBoxMax = boundingBoxMax
+        self.faceClassifications = faceClassifications
+    }
+
+    /// Cleanup operations record the source face of each kept output triangle.
+    func classifications(retaining sourceFaces: [Int]) -> Data? {
+        // A malformed map must not be misapplied. Checkpoint validation separately
+        // rejects malformed data; derived geometry falls back to shape-only.
+        try? SurfaceLabelDocument.retaining(sourceFaces, from: faceClassifications, originalFaceCount: faces.count)
+    }
 
     var vertexCount: Int { vertices.count }
     var faceCount: Int { faces.count }
@@ -1577,23 +1595,13 @@ struct MeshData: Codable {
         return (minB, maxB)
     }
 
-    init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>],
-         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>) {
-        self.vertices = vertices
-        self.normals = normals
-        self.faces = faces
-        self.colors = colors
-        self.boundingBoxMin = boundingBoxMin
-        self.boundingBoxMax = boundingBoxMax
-    }
-
     // MARK: Compact encoding
     // Recovery checkpoints encode whole scans. The synthesized Codable form stores
     // every number as its own object (millions for a big scan → gigabytes of
     // memory while encoding). Instead each array is one packed binary blob.
 
     private enum CodingKeys: String, CodingKey {
-        case packedVertices, packedNormals, packedFaces, packedColors, boundsMin, boundsMax
+        case packedVertices, packedNormals, packedFaces, packedColors, boundsMin, boundsMax, faceClassifications
         case vertices, normals, faces, colors, boundingBoxMin, boundingBoxMax   // older format
     }
 
@@ -1614,6 +1622,7 @@ struct MeshData: Codable {
         try c.encode(colorData, forKey: .packedColors)
         try c.encode([boundingBoxMin.x, boundingBoxMin.y, boundingBoxMin.z], forKey: .boundsMin)
         try c.encode([boundingBoxMax.x, boundingBoxMax.y, boundingBoxMax.z], forKey: .boundsMax)
+        try c.encodeIfPresent(faceClassifications, forKey: .faceClassifications)
     }
 
     init(from decoder: Decoder) throws {
@@ -1666,6 +1675,7 @@ struct MeshData: Codable {
             boundingBoxMin = try c.decode(SIMD3<Float>.self, forKey: .boundingBoxMin)
             boundingBoxMax = try c.decode(SIMD3<Float>.self, forKey: .boundingBoxMax)
         }
+        faceClassifications = try c.decodeIfPresent(Data.self, forKey: .faceClassifications)
         try validateCheckpoint()
     }
 
@@ -1674,6 +1684,7 @@ struct MeshData: Codable {
     private func validateCheckpoint() throws {
         func finite(_ p: SIMD3<Float>) -> Bool { p.x.isFinite && p.y.isFinite && p.z.isFinite }
         guard vertices.count <= 8_000_000, faces.count <= 16_000_000,
+              (faceClassifications == nil || faceClassifications?.count == faces.count),
               (normals.isEmpty || normals.count == vertices.count),
               (colors.isEmpty || colors.count == vertices.count),
               vertices.allSatisfy(finite), normals.allSatisfy(finite),

@@ -66,8 +66,9 @@ class MeshProcessor {
     /// Remove triangles with zero or near-zero area
     static func removeDegenerateTriangles(_ meshData: MeshData, minArea: Float = 0.0000001) -> MeshData {
         var validFaces: [[UInt32]] = []
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
 
-        for face in meshData.faces {
+        for (fi, face) in meshData.faces.enumerated() {
             guard face.count == 3 else { continue }
             let i0 = Int(face[0]), i1 = Int(face[1]), i2 = Int(face[2])
             guard i0 < meshData.vertices.count && i1 < meshData.vertices.count && i2 < meshData.vertices.count else { continue }
@@ -87,6 +88,7 @@ class MeshProcessor {
 
             if area > minArea {
                 validFaces.append(face)
+                labels.keep(fi)
             }
         }
 
@@ -96,7 +98,8 @@ class MeshProcessor {
             faces: validFaces,
             colors: meshData.colors,
             boundingBoxMin: meshData.boundingBoxMin,
-            boundingBoxMax: meshData.boundingBoxMax
+            boundingBoxMax: meshData.boundingBoxMax,
+            faceClassifications: labels.data
         )
     }
 
@@ -165,11 +168,14 @@ class MeshProcessor {
 
         // Remap faces
         var newFaces: [[UInt32]] = []
-        for face in meshData.faces {
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
+        for (fi, face) in meshData.faces.enumerated() {
+            guard face.count == 3, face.allSatisfy({ Int($0) < vertexMap.count }) else { continue }
             let mapped = face.map { UInt32(vertexMap[Int($0)]) }
             // Skip degenerate faces after welding
             if mapped.count == 3 && mapped[0] != mapped[1] && mapped[1] != mapped[2] && mapped[0] != mapped[2] {
                 newFaces.append(mapped)
+                labels.keep(fi)
             }
         }
 
@@ -179,7 +185,8 @@ class MeshProcessor {
             faces: newFaces,
             colors: newColors,
             boundingBoxMin: meshData.boundingBoxMin,
-            boundingBoxMax: meshData.boundingBoxMax
+            boundingBoxMax: meshData.boundingBoxMax,
+            faceClassifications: labels.data
         )
     }
 
@@ -256,10 +263,13 @@ class MeshProcessor {
 
         // Remap faces
         var newFaces: [[UInt32]] = []
-        for face in meshData.faces {
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
+        for (fi, face) in meshData.faces.enumerated() {
+            guard face.count == 3, face.allSatisfy({ Int($0) < vertexRemap.count }) else { continue }
             let allKept = face.allSatisfy { vertexRemap[Int($0)] >= 0 }
             if allKept {
                 newFaces.append(face.map { UInt32(vertexRemap[Int($0)]) })
+                labels.keep(fi)
             }
         }
 
@@ -277,7 +287,8 @@ class MeshProcessor {
             faces: newFaces,
             colors: newColors,
             boundingBoxMin: newVertices.isEmpty ? meshData.boundingBoxMin : minB,
-            boundingBoxMax: newVertices.isEmpty ? meshData.boundingBoxMax : maxB
+            boundingBoxMax: newVertices.isEmpty ? meshData.boundingBoxMax : maxB,
+            faceClassifications: labels.data
         )
     }
 
@@ -318,7 +329,8 @@ class MeshProcessor {
             faces: meshData.faces,
             colors: meshData.colors,
             boundingBoxMin: meshData.boundingBoxMin,
-            boundingBoxMax: meshData.boundingBoxMax
+            boundingBoxMax: meshData.boundingBoxMax,
+            faceClassifications: meshData.faceClassifications
         )
     }
 
@@ -355,7 +367,8 @@ class MeshProcessor {
             faces: meshData.faces,
             colors: meshData.colors,
             boundingBoxMin: meshData.boundingBoxMin,
-            boundingBoxMax: meshData.boundingBoxMax
+            boundingBoxMax: meshData.boundingBoxMax,
+            faceClassifications: meshData.faceClassifications
         )
     }
 
@@ -409,7 +422,8 @@ class MeshProcessor {
 
         let (minB, maxB) = MeshData.bounds(of: positions)
         return MeshData(vertices: positions, normals: meshData.normals, faces: meshData.faces,
-                        colors: meshData.colors, boundingBoxMin: minB, boundingBoxMax: maxB)
+                        colors: meshData.colors, boundingBoxMin: minB, boundingBoxMax: maxB,
+                        faceClassifications: meshData.faceClassifications)
     }
 
     // MARK: - Simplification (vertex clustering)
@@ -449,21 +463,28 @@ class MeshProcessor {
 
         let vertices = preservePositions ? representatives : zip(sums, counts).map { $0 / $1 }
         let colors = zip(colorSums, counts).map { $0 / $1 }
-        var seen = Set<SIMD3<UInt32>>()
+        var seen: [SIMD3<UInt32>: Int] = [:]
         var faces: [[UInt32]] = []
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
         faces.reserveCapacity(meshData.faces.count / 2)
-        for face in meshData.faces where face.count == 3 {
+        for (fi, face) in meshData.faces.enumerated() where face.count == 3 {
+            guard face.allSatisfy({ Int($0) < remap.count }) else { continue }
             let a = UInt32(remap[Int(face[0])]), b = UInt32(remap[Int(face[1])]), c = UInt32(remap[Int(face[2])])
             guard a != b, b != c, a != c else { continue }
             // Drop duplicates (same triangle in any rotation).
             let key: SIMD3<UInt32>
             if a < b && a < c { key = SIMD3(a, b, c) } else if b < c { key = SIMD3(b, c, a) } else { key = SIMD3(c, a, b) }
-            if seen.insert(key).inserted { faces.append([a, b, c]) }
+            if let existing = seen[key] {
+                labels.mergeDuplicate(fi, into: existing)
+            } else {
+                seen[key] = faces.count
+                faces.append([a, b, c]); labels.keep(fi)
+            }
         }
 
         let (minB, maxB) = MeshData.bounds(of: vertices)
         let simplified = MeshData(vertices: vertices, normals: [], faces: faces, colors: colors,
-                                  boundingBoxMin: minB, boundingBoxMax: maxB)
+                                  boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: labels.data)
         return recalculateNormals(simplified)
     }
 
@@ -657,7 +678,8 @@ class MeshProcessor {
             faces: meshData.faces,
             colors: [SIMD4<Float>](repeating: g, count: meshData.vertices.count),
             boundingBoxMin: meshData.boundingBoxMin,
-            boundingBoxMax: meshData.boundingBoxMax
+            boundingBoxMax: meshData.boundingBoxMax,
+            faceClassifications: meshData.faceClassifications
         )
     }
 
