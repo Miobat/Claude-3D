@@ -166,6 +166,9 @@ final class ObjectSelectionTests: XCTestCase {
         XCTAssertNoThrow(try identical.validate(selection))
         var legacy = selection; legacy.geometrySHA256 = nil
         XCTAssertThrowsError(try identical.validate(legacy)) // review-only, not guessed
+        let cloud = try ObjectSelectionIndex(points: mesh.points, triangles: [])
+        let changedCloud = try ObjectSelectionIndex(points: mesh.points.map { $0 + SIMD3(0.1, 0, 0) }, triangles: [])
+        XCTAssertThrowsError(try changedCloud.validate(cloud.grow(from: 0, radius: 2).selection))
     }
 
     func testLegacyShapeOnlyFloorSurvivesDisconnectedLowNoise() throws {

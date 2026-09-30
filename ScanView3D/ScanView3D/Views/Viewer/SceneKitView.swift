@@ -500,7 +500,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         func alignObject(view: String, bounds: UprightMeasurementBounds) {
-            exitWalk(); stopNavigation()
+            if walkEnabled || parent.navigation.enabled || parent.navigation.isWalking { exitWalk() }
+            else { stopNavigation() }
             guard let sceneView, let camera = sceneView.pointOfView?.camera, let rig = cameraController else { return }
             let landscape = sceneView.bounds.width > sceneView.bounds.height
             let availableWidth = Float(sceneView.bounds.width) * (landscape ? 0.50 : 0.9)
@@ -515,7 +516,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let right = view == "top" ? bounds.right : simd_cross(SIMD3<Float>(0, 1, 0), direction)
             let target = landscape ? bounds.center + right * scale * Float(sceneView.bounds.width / sceneView.bounds.height) * 0.5 :
                 bounds.center - up * scale * (1 - availableHeight / Float(sceneView.bounds.height))
-            parent.cameraProjection = .ortho
+            if parent.cameraProjection != .ortho { parent.cameraProjection = .ortho }
             camera.usesOrthographicProjection = true
             camera.orthographicScale = Double(scale)
             rig.set(yaw: atan2(direction.x, direction.z), pitch: view == "top" ? -.pi / 2 : 0,
@@ -560,6 +561,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         private var center: SIMD3<Float> { SIMD3<Float>(modelCenter.x, modelCenter.y, modelCenter.z) }
 
         @objc func handleSetCameraView(_ notification: Notification) {
+            objectPresetView = nil
             exitWalk()
             guard let viewStr = notification.userInfo?["view"] as? String, let rig = cameraController else { return }
             switch viewStr {
@@ -584,6 +586,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         @objc func handleSetCameraProjection(_ notification: Notification) {
+            objectPresetView = nil
             exitWalk()
             guard let sceneView = sceneView,
                   let projStr = notification.userInfo?["projection"] as? String,
@@ -608,6 +611,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         /// Top-down orthographic snapshot with a scale bar, shared as an image.
         @objc func handleCaptureTopDown() {
+            objectPresetView = nil
             exitWalk()
             guard let sceneView = sceneView, let camera = sceneView.pointOfView?.camera else { return }
             SCNTransaction.begin()

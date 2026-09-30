@@ -94,10 +94,6 @@ final class ObjectSelectionIndex {
         word(UInt32(points.count)); word(UInt32(triangles.count))
         for (i, p) in points.enumerated() {
             if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
-            if triangles.isEmpty {
-                buckets[Self.cell(p, size: 0.04), default: []].append(i)
-                continue
-            }
             word(p.x.bitPattern); word(p.y.bitPattern); word(p.z.bitPattern)
         }
         for t in triangles { word(t.x); word(t.y); word(t.z) }
@@ -107,6 +103,10 @@ final class ObjectSelectionIndex {
         var buckets: [SIMD3<Int32>: [Int]] = [:]
         for (i, p) in points.enumerated() {
             if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+            if triangles.isEmpty {
+                buckets[Self.cell(p, size: 0.04), default: []].append(i)
+                continue
+            }
             // Neighbor buckets avoid seams caused by a quantization boundary.
             let key = Self.cell(p, size: 0.006)
             var match: Int?
