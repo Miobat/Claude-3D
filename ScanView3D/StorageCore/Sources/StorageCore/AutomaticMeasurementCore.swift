@@ -190,9 +190,11 @@ struct AutomaticMeasuredRegion: Codable, Equatable, Identifiable {
     var bounds: UprightMeasurementBounds
     var dimensions: [AutomaticDimension]
     var createdAt = Date()
+    var selection: AutomaticRegionSelection? = nil
 
     func validate() throws {
         try bounds.validate()
+        try selection?.validate()
         guard name.count <= 200, createdAt.timeIntervalSince1970.isFinite, dimensions.count == 3,
               Set(dimensions.map(\.axis)).count == 3 else { throw AutomaticMeasurementError.invalidDocument }
         for dimension in dimensions {

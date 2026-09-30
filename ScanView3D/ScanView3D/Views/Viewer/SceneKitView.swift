@@ -14,8 +14,10 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     @Binding var showGrid: Bool
     @Binding var showBoundingBox: Bool
     @Binding var vizMode: ModelViewerView.VisualizationMode
+    @Binding var cameraProjection: ModelViewerView.CameraProjection
     @Binding var activeTool: ModelViewerView.ViewerTool
     let session: MeasurementSession
+    let objects: ObjectMeasurementSession
     @ObservedObject var navigation: WalkNavigation
 
     func makeUIView(context: Context) -> SCNView {
@@ -48,6 +50,11 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         context.coordinator.sceneView = sceneView
+        let paint = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleObjectPaint(_:)))
+        paint.maximumNumberOfTouches = 1
+        paint.isEnabled = false
+        sceneView.addGestureRecognizer(paint)
+        coordinator.objectPaint = paint
 
         // Flat measurement overlay (constant-size lines and labels) drawn by
         // SpriteKit on top of the 3D view, refreshed from the render loop.
@@ -55,6 +62,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         sceneView.overlaySKScene = overlay
         sceneView.delegate = context.coordinator
         context.coordinator.attach(session: session, overlay: overlay)
+        coordinator.attachObjects(objects)
 
         loadModel(sceneView: sceneView, context: context)
 
@@ -86,7 +94,9 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             addBoundingBox(to: sceneView.scene!, for: model)
         } else if !showBoundingBox { bbNode?.removeFromParentNode() }
 
+        context.coordinator.parent = self
         context.coordinator.activeTool = activeTool
+        context.coordinator.updateObjectGestures()
         context.coordinator.updateWalkMode()
     }
 
@@ -221,6 +231,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
         DispatchQueue.global(qos: .userInitiated).async {
             var node: SCNNode?
+            var loadedNativeScene = false
 
             // Prefer .scn for internal viewing (preserves vertex colors, materials)
             if FileManager.default.fileExists(atPath: scnURL.path) {
@@ -235,6 +246,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                         container.addChildNode(cloned)
                     }
                     node = container
+                    loadedNativeScene = true
                 }
             }
 
@@ -269,6 +281,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
 
                     // Surface index for snapping (corners, edges, wall directions).
                     let sources = ModelGeometryIndex.sources(in: node)
+                    self.objects.prepare(sources: sources, store: self.storageManager, scan: self.scan, project: self.project, labelsVerified: loadedNativeScene)
                     DispatchQueue.global(qos: .utility).async {
                         let index = ModelGeometryIndex.build(from: sources)
                         DispatchQueue.main.async { context.coordinator.geometryIndex = index }
@@ -297,6 +310,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         var cameraController: OrbitCameraController?
         private var overlay: MeasurementOverlayScene?
         var geometryIndex: ModelGeometryIndex?
+        var objectPaint: UIPanGestureRecognizer?
+        private var lastPaintTime: TimeInterval = 0
         private var previewTimer: Timer?
         private var activeCancellable: AnyCancellable?
         private var lastPreviewCamera: simd_float4x4?
@@ -338,6 +353,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             activeCancellable?.cancel()
             session?.geometry = nil
             session?.renderSink = nil
+            parent.objects.detach()
         }
 
         func attach(session: MeasurementSession, overlay: MeasurementOverlayScene) {
@@ -440,6 +456,60 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             return picker.pick(at: SIMD2(Float(location.x), Float(location.y)),
                 viewport: SIMD2(Float(view.bounds.width), Float(view.bounds.height)), projection: projection)
                 .map { SCNVector3($0.x, $0.y, $0.z) }
+        }
+
+        func attachObjects(_ objects: ObjectMeasurementSession) {
+            objects.render = { [weak self] region, node in
+                guard let self, !self.disposed, let root = self.sceneView?.scene?.rootNode else { return }
+                root.childNode(withName: "objectSelection", recursively: false)?.removeFromParentNode()
+                if let node { root.addChildNode(node) }
+                self.overlay?.updateObject(region, unit: self.parent.objects.unit)
+                self.sceneView?.rendersContinuously = objects.active || (self.session?.isActive ?? false)
+            }
+            objects.alignView = { [weak self] view, bounds in self?.alignObject(view: view, bounds: bounds) }
+        }
+
+        func updateObjectGestures() {
+            let editing = parent.objects.active && parent.objects.mode != .select
+            cameraController?.selectionEditing = editing
+            objectPaint?.isEnabled = editing
+        }
+
+        @objc func handleObjectPaint(_ gesture: UIPanGestureRecognizer) {
+            guard gesture.state == .began || gesture.state == .changed || gesture.state == .ended else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard gesture.state != .changed || now - lastPaintTime >= 0.10 else { return }
+            lastPaintTime = now
+            objectPick(at: gesture.location(in: sceneView))
+        }
+
+        func objectPick(at location: CGPoint) {
+            guard parent.objects.active, let view = sceneView, let hit = surfaceHit(at: location, in: view) else { return }
+            let m = view.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
+            parent.objects.pick(point: hit.point, normal: hit.normal, cameraFront: SIMD3(m.columns.2.x, 0, m.columns.2.z))
+        }
+
+        func alignObject(view: String, bounds: UprightMeasurementBounds) {
+            exitWalk(); stopNavigation()
+            guard let sceneView, let camera = sceneView.pointOfView?.camera, let rig = cameraController else { return }
+            let landscape = sceneView.bounds.width > sceneView.bounds.height
+            let availableWidth = Float(sceneView.bounds.width) * (landscape ? 0.50 : 0.9)
+            let availableHeight = max(Float(sceneView.bounds.height) - (landscape ? 50 : 420), 80)
+            let aspect = max(availableWidth / availableHeight, 0.1)
+            let direction = view == "side" ? bounds.right : bounds.front
+            let width = view == "side" ? bounds.size.z : bounds.size.x
+            let height = view == "top" ? bounds.size.z : bounds.size.y
+            let fitHeight = max(max(height, width / aspect) * 1.2, 0.1)
+            let scale = fitHeight * Float(sceneView.bounds.height) / availableHeight * 0.5
+            let up: SIMD3<Float> = view == "top" ? -bounds.front : SIMD3(0, 1, 0)
+            let right = view == "top" ? bounds.right : simd_cross(SIMD3<Float>(0, 1, 0), direction)
+            let target = landscape ? bounds.center + right * scale * Float(sceneView.bounds.width / sceneView.bounds.height) * 0.5 :
+                bounds.center - up * scale * (1 - availableHeight / Float(sceneView.bounds.height))
+            parent.cameraProjection = .ortho
+            camera.usesOrthographicProjection = true
+            camera.orthographicScale = Double(scale)
+            rig.set(yaw: atan2(direction.x, direction.z), pitch: view == "top" ? -.pi / 2 : 0,
+                    target: target, distance: max(simd_length(bounds.size) * 2, 0.5), animated: false)
         }
 
         func pickingProjection(in view: SCNView) -> simd_float4x4? {
@@ -618,6 +688,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Tap / Measure
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            if parent.objects.active { objectPick(at: gesture.location(in: sceneView)); return }
             if walkEnabled {
                 guard let view = sceneView, let hit = surfaceHit(at: gesture.location(in: view), in: view),
                       (hit.normal.map { abs($0.y) >= 0.75 } ?? true),
@@ -638,7 +709,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             }
         }
 
-        private let helperNames: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera"]
+        private let helperNames: Set<String> = ["measurementNode", "axisGuide", "grid", "boundingBox", "camera", "objectSelection"]
 
         private func isHelper(_ node: SCNNode) -> Bool {
             var n: SCNNode? = node

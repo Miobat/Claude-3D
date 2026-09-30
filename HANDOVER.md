@@ -226,3 +226,32 @@ add/remove selection corrections, evidence-backed dimensions and aligned
 front/side/top views. Then multi-height room boundaries and plan export; finally
 a separate RoomPlan capture trial. Do not promise centimetre field accuracy until
 repeat scans have been checked against physical measurements on LiDAR hardware.
+## 14. Object measurement tool (Codex stage 2)
+
+Branch `codex/object-measurement` builds on the validated measurement foundation
+`3b1902e` on `codex/automatic-measurements`; it does not merge unrelated branches.
+
+- Measure → Object uses worker-thread connected-surface selection. Floor/ceiling
+  labels need horizontal normals; large background planes need geometric support.
+  Unknown/legacy labels fall back to shape, not invented semantic identities.
+- Mint highlight contains exact selected triangles/points. Stored packed source
+  IDs are optional on each automatic region and bound to the document revision.
+  Legacy results still reopen as bounds-only; unreadable/stale files are read-only.
+- Select reach limits growing; clipped and point-cloud selections are Partial.
+  Mesh values are Scanned spans, not proof of a closed physical object. Depth
+  below 2 cm is Unknown; there is no automatic wall-depth assumption in this stage.
+- Add/Remove supports taps and one-finger painting; two-finger pan/pinch remains.
+  Undo, local front-axis turning, named saved objects and explicit Adjusted bounds
+  are separate from legacy manual measurements. Upright/gravity-aligned only.
+- Front/Side/Top are orthographic and framed around the selection, reserving room
+  for the tool panel. Selection overlay nodes never participate in surface picking.
+- Safety limits: 500k source points, 300k triangles, 100k selected primitives,
+  4 MB measurement document. Limits fail explicitly; geometry is not silently thinned.
+- New Xcode IDs: A/B10046 ObjectSelectionCore, 10047 ObjectMeasurement, 10048
+  ObjectMeasurementPanel. Next free ID 10049. Pure tests cover segmentation and
+  format contracts; native simulator checks cover actual SceneKit/UI session wiring.
+
+Remaining plan: room outlines from multiple slices/planes, drawing exports, and a
+separate RoomPlan capture trial. Flush-to-wall depth confirmation and tilted-object
+frames are not implemented here. Physical accuracy still needs iPhone/tape tests.
+Development pushes validate only; TestFlight publication remains an explicit action.
