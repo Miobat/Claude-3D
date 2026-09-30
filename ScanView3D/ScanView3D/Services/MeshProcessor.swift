@@ -66,7 +66,7 @@ class MeshProcessor {
     /// Remove triangles with zero or near-zero area
     static func removeDegenerateTriangles(_ meshData: MeshData, minArea: Float = 0.0000001) -> MeshData {
         var validFaces: [[UInt32]] = []
-        var sourceFaces: [Int] = []
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
 
         for (fi, face) in meshData.faces.enumerated() {
             guard face.count == 3 else { continue }
@@ -88,7 +88,7 @@ class MeshProcessor {
 
             if area > minArea {
                 validFaces.append(face)
-                sourceFaces.append(fi)
+                labels.keep(fi)
             }
         }
 
@@ -99,7 +99,7 @@ class MeshProcessor {
             colors: meshData.colors,
             boundingBoxMin: meshData.boundingBoxMin,
             boundingBoxMax: meshData.boundingBoxMax,
-            faceClassifications: meshData.classifications(retaining: sourceFaces)
+            faceClassifications: labels.data
         )
     }
 
@@ -168,14 +168,14 @@ class MeshProcessor {
 
         // Remap faces
         var newFaces: [[UInt32]] = []
-        var sourceFaces: [Int] = []
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
         for (fi, face) in meshData.faces.enumerated() {
             guard face.count == 3, face.allSatisfy({ Int($0) < vertexMap.count }) else { continue }
             let mapped = face.map { UInt32(vertexMap[Int($0)]) }
             // Skip degenerate faces after welding
             if mapped.count == 3 && mapped[0] != mapped[1] && mapped[1] != mapped[2] && mapped[0] != mapped[2] {
                 newFaces.append(mapped)
-                sourceFaces.append(fi)
+                labels.keep(fi)
             }
         }
 
@@ -186,7 +186,7 @@ class MeshProcessor {
             colors: newColors,
             boundingBoxMin: meshData.boundingBoxMin,
             boundingBoxMax: meshData.boundingBoxMax,
-            faceClassifications: meshData.classifications(retaining: sourceFaces)
+            faceClassifications: labels.data
         )
     }
 
@@ -263,13 +263,13 @@ class MeshProcessor {
 
         // Remap faces
         var newFaces: [[UInt32]] = []
-        var sourceFaces: [Int] = []
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
         for (fi, face) in meshData.faces.enumerated() {
             guard face.count == 3, face.allSatisfy({ Int($0) < vertexRemap.count }) else { continue }
             let allKept = face.allSatisfy { vertexRemap[Int($0)] >= 0 }
             if allKept {
                 newFaces.append(face.map { UInt32(vertexRemap[Int($0)]) })
-                sourceFaces.append(fi)
+                labels.keep(fi)
             }
         }
 
@@ -288,7 +288,7 @@ class MeshProcessor {
             colors: newColors,
             boundingBoxMin: newVertices.isEmpty ? meshData.boundingBoxMin : minB,
             boundingBoxMax: newVertices.isEmpty ? meshData.boundingBoxMax : maxB,
-            faceClassifications: meshData.classifications(retaining: sourceFaces)
+            faceClassifications: labels.data
         )
     }
 
@@ -465,8 +465,7 @@ class MeshProcessor {
         let colors = zip(colorSums, counts).map { $0 / $1 }
         var seen: [SIMD3<UInt32>: Int] = [:]
         var faces: [[UInt32]] = []
-        var sourceFaces: [Int] = []
-        var conflictingLabels = Set<Int>()
+        var labels = FaceLabelAccumulator(classifications: meshData.faceClassifications, faceCount: meshData.faceCount)
         faces.reserveCapacity(meshData.faces.count / 2)
         for (fi, face) in meshData.faces.enumerated() where face.count == 3 {
             guard face.allSatisfy({ Int($0) < remap.count }) else { continue }
@@ -476,23 +475,16 @@ class MeshProcessor {
             let key: SIMD3<UInt32>
             if a < b && a < c { key = SIMD3(a, b, c) } else if b < c { key = SIMD3(b, c, a) } else { key = SIMD3(c, a, b) }
             if let existing = seen[key] {
-                if let labels = meshData.faceClassifications, labels.count == meshData.faces.count,
-                   labels[labels.startIndex + sourceFaces[existing]] != labels[labels.startIndex + fi] {
-                    conflictingLabels.insert(existing)
-                }
+                labels.mergeDuplicate(fi, into: existing)
             } else {
                 seen[key] = faces.count
-                faces.append([a, b, c]); sourceFaces.append(fi)
+                faces.append([a, b, c]); labels.keep(fi)
             }
         }
 
-        var labels = meshData.classifications(retaining: sourceFaces)
-        if labels != nil {
-            for i in conflictingLabels { labels![i] = SurfaceCategory.unknown.rawValue }
-        }
         let (minB, maxB) = MeshData.bounds(of: vertices)
         let simplified = MeshData(vertices: vertices, normals: [], faces: faces, colors: colors,
-                                  boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: labels)
+                                  boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: labels.data)
         return recalculateNormals(simplified)
     }
 

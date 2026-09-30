@@ -7,6 +7,32 @@ enum SurfaceCategory: UInt8, Codable {
     case table = 4, seat = 5, window = 6, door = 7
 }
 
+/// Streaming face remap: one output byte per kept triangle, not an extra array
+/// of Int indices (eight times larger). Missing/invalid labels stay shape-only.
+struct FaceLabelAccumulator {
+    private let source: Data?
+    private(set) var data: Data?
+
+    init(classifications: Data?, faceCount: Int) {
+        let validated = classifications?.count == faceCount ? classifications : nil
+        source = validated
+        data = validated == nil ? nil : Data()
+    }
+
+    mutating func keep(_ face: Int) {
+        guard let source, data != nil else { return }
+        guard face >= 0, face < source.count else { data = nil; return }
+        data?.append(source[source.startIndex + face])
+    }
+
+    /// Clustering can fold conflicting classifications onto the same triangle.
+    mutating func mergeDuplicate(_ face: Int, into outputFace: Int) {
+        guard let source, let count = data?.count else { return }
+        guard face >= 0, face < source.count, outputFace >= 0, outputFace < count else { data = nil; return }
+        if data?[outputFace] != source[source.startIndex + face] { data?[outputFace] = SurfaceCategory.unknown.rawValue }
+    }
+}
+
 enum AutomaticMeasurementError: LocalizedError {
     case invalidGeometry, invalidDocument, unsupportedVersion, staleModel, unconfirmedWall, unverifiedScale
 

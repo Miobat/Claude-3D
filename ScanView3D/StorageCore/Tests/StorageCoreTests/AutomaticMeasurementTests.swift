@@ -84,6 +84,22 @@ final class AutomaticMeasurementTests: XCTestCase {
         XCTAssertEqual(try SurfaceLabelDocument.retaining([], from: Data([1]), originalFaceCount: 1), Data())
     }
 
+    func testStreamingRemapAndConflictingDuplicate() {
+        var labels = FaceLabelAccumulator(classifications: Data([1, 2, 3, 4]), faceCount: 4)
+        labels.keep(3); labels.keep(0)
+        XCTAssertEqual(labels.data, Data([4, 1]))
+        labels.mergeDuplicate(2, into: 0)
+        XCTAssertEqual(labels.data, Data([0, 1]))
+        labels.mergeDuplicate(3, into: 0) // a later duplicate cannot restore certainty
+        XCTAssertEqual(labels.data, Data([0, 1]))
+        labels.keep(4)
+        XCTAssertNil(labels.data) // invalid mapping must not leave a partial label list
+        var missing = FaceLabelAccumulator(classifications: nil, faceCount: 4)
+        missing.keep(0); XCTAssertNil(missing.data)
+        var invalid = FaceLabelAccumulator(classifications: Data([1]), faceCount: 4)
+        invalid.keep(0); XCTAssertNil(invalid.data)
+    }
+
     func testIncorrectFaceMappingsRejected() {
         XCTAssertThrowsError(try SurfaceLabelDocument.retaining([0], from: Data([1, 2]), originalFaceCount: 1))
         for index in [-1, 2] {
