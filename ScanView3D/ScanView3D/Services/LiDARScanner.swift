@@ -1595,16 +1595,6 @@ struct MeshData: Codable {
         return (minB, maxB)
     }
 
-    init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>],
-         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>) {
-        self.vertices = vertices
-        self.normals = normals
-        self.faces = faces
-        self.colors = colors
-        self.boundingBoxMin = boundingBoxMin
-        self.boundingBoxMax = boundingBoxMax
-    }
-
     // MARK: Compact encoding
     // Recovery checkpoints encode whole scans. The synthesized Codable form stores
     // every number as its own object (millions for a big scan → gigabytes of
