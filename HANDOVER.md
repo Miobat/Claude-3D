@@ -36,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10045`/`B10045`). Deleting a file = remove those 4 lines too.
+(currently `A10049`/`B10049`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -226,6 +226,7 @@ add/remove selection corrections, evidence-backed dimensions and aligned
 front/side/top views. Then multi-height room boundaries and plan export; finally
 a separate RoomPlan capture trial. Do not promise centimetre field accuracy until
 repeat scans have been checked against physical measurements on LiDAR hardware.
+
 ## 14. Object measurement tool (Codex stage 2)
 
 Branch `codex/object-measurement` builds on the validated measurement foundation
@@ -239,7 +240,8 @@ Branch `codex/object-measurement` builds on the validated measurement foundation
   Legacy results still reopen as bounds-only; unreadable/stale files are read-only.
 - Select reach limits growing; clipped and point-cloud selections are Partial.
   Mesh values are Scanned spans, not proof of a closed physical object. Depth
-  below 2 cm is Unknown; there is no automatic wall-depth assumption in this stage.
+  below 2 cm is Unknown. A supported wall behind the object offers front-to-wall
+  depth ONLY after explicit flush-contact confirmation, labelled Wall assumption.
 - Add/Remove supports taps and one-finger painting; two-finger pan/pinch remains.
   Undo, local front-axis turning, named saved objects and explicit Adjusted bounds
   are separate from legacy manual measurements. Upright/gravity-aligned only.
@@ -252,6 +254,6 @@ Branch `codex/object-measurement` builds on the validated measurement foundation
   format contracts; native simulator checks cover actual SceneKit/UI session wiring.
 
 Remaining plan: room outlines from multiple slices/planes, drawing exports, and a
-separate RoomPlan capture trial. Flush-to-wall depth confirmation and tilted-object
-frames are not implemented here. Physical accuracy still needs iPhone/tape tests.
+separate RoomPlan capture trial. Tilted-object frames are not implemented here.
+Physical accuracy still needs iPhone/tape tests.
 Development pushes validate only; TestFlight publication remains an explicit action.

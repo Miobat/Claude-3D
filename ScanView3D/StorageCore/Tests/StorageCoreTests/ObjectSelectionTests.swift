@@ -128,4 +128,29 @@ final class ObjectSelectionTests: XCTestCase {
         let result = try index.grow(from: 0, radius: 5)
         XCTAssertFalse(result.selection.ids.contains(12)); XCTAssertFalse(result.selection.ids.contains(13))
     }
+
+    func testWallDepthNeedsExplicitContactAndPreservesFrontDatum() throws {
+        var mesh = box(bottom: 0.7)
+        mesh.points.append(contentsOf: [SIMD3(-2, 0, -0.8), SIMD3(2, 0, -0.8), SIMD3(2, 3, -0.8), SIMD3(-2, 3, -0.8)])
+        mesh.faces.append(contentsOf: [SIMD3(8, 9, 10), SIMD3(8, 10, 11)])
+        let index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces, labels: Data(Array(repeating: UInt8(0), count: 12) + [1, 1]))
+        let selection = try index.grow(from: 0, radius: 2).selection
+        let region = try index.region(selection: selection, front: mesh.front, partial: false)
+        XCTAssertEqual(try XCTUnwrap(index.wallDepth(for: region)).metres, 1.1, accuracy: 0.00001)
+        XCTAssertThrowsError(try index.assumingWallContact(region, confirmed: false))
+        let assumed = try index.assumingWallContact(region, confirmed: true)
+        XCTAssertEqual(assumed.bounds.size.z, 1.1, accuracy: 0.00001)
+        XCTAssertEqual(assumed.bounds.size.x, region.bounds.size.x)
+        XCTAssertEqual(assumed.bounds.bottom, region.bounds.bottom)
+        XCTAssertEqual(assumed.bounds.center.z + assumed.bounds.size.z * 0.5, 0.3, accuracy: 0.00001)
+        let depth = try XCTUnwrap(assumed.dimensions.first { $0.axis == .depth })
+        XCTAssertEqual(depth.evidence, .assumedFlushToWall); XCTAssertEqual(depth.wallContactConfirmed, true)
+        XCTAssertNoThrow(try assumed.validate())
+    }
+    func testFreeStandingBoxDoesNotInventWallDepth() throws {
+        let mesh = box(), index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces)
+        let region = try index.region(selection: index.grow(from: 0, radius: 2).selection, front: mesh.front, partial: false)
+        XCTAssertNil(index.wallDepth(for: region))
+        XCTAssertThrowsError(try index.assumingWallContact(region, confirmed: true))
+    }
 }

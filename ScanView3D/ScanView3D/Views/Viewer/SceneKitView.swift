@@ -382,7 +382,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Live snap preview at the crosshair
 
         private func measuringChanged(_ on: Bool) {
-            sceneView?.rendersContinuously = on
+            sceneView?.rendersContinuously = on || parent.objects.active
             previewTimer?.invalidate()
             previewTimer = nil
             lastPreviewCamera = nil
@@ -486,7 +486,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         func objectPick(at location: CGPoint) {
             guard parent.objects.active, let view = sceneView, let hit = surfaceHit(at: location, in: view) else { return }
             let m = view.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
-            parent.objects.pick(point: hit.point, normal: hit.normal, cameraFront: SIMD3(m.columns.2.x, 0, m.columns.2.z))
+            let normal = surfacePlane(at: hit.point, fallbackNormal: hit.normal).normal
+            parent.objects.pick(point: hit.point, normal: normal, cameraFront: SIMD3(m.columns.2.x, 0, m.columns.2.z))
         }
 
         func alignObject(view: String, bounds: UprightMeasurementBounds) {

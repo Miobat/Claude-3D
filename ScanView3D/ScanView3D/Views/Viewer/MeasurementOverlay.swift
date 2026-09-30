@@ -290,7 +290,8 @@ final class MeasurementOverlayScene: SKScene {
             for (axis, end) in [(AutomaticDimension.Axis.width, 1), (.height, 2), (.depth, 4)] {
                 guard let dimension = region.dimensions.first(where: { $0.axis == axis }), let value = dimension.metres,
                       let a = corners[0], let b = corners[end], hypot(a.x - b.x, a.y - b.y) > 30 else { continue }
-                let prefix = dimension.evidence == .adjusted ? "Edited " : (dimension.evidence == .partial ? "Partial " : "")
+                let prefix = dimension.evidence == .adjusted ? "Edited " : (dimension.evidence == .partial ? "Partial " :
+                    (dimension.evidence == .assumedFlushToWall ? "Wall " : ""))
                 label(prefix + regionUnit.format(meters: value), at: CGPoint(x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 + 12), color: .systemMint)
             }
         }

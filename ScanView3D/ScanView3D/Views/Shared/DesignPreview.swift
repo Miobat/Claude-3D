@@ -314,8 +314,15 @@ enum DesignPreview {
             let index = try ObjectSelectionIndex(points: geometry.points, triangles: geometry.triangles, labels: mesh.faceClassifications)
             let selection = try index.grow(from: 0, radius: 2).selection
             let highlight = try ObjectSceneGeometry.highlight(index: index, selection: selection)
-            check(highlight.name == "objectSelection" && highlight.geometry?.elements.first?.primitiveCount == 12,
+            check(highlight.name == "objectSelection" && highlight.geometry?.elements.first?.primitiveCount == selection.ids.count &&
+                  !selection.ids.contains(12) && !selection.ids.contains(13),
                   "Object highlight contains only selected triangles, not the floor")
+            coordinator.parent.objects.active = true; coordinator.parent.objects.mode = .add; coordinator.updateObjectGestures()
+            check(coordinator.objectPaint?.isEnabled == true && coordinator.cameraController?.selectionEditing == true,
+                  "Object paint mode replaces only one-finger orbit")
+            check(view.gestureRecognizers?.contains { ($0 as? UIPanGestureRecognizer)?.minimumNumberOfTouches == 2 && $0.isEnabled } ?? false,
+                  "Object paint keeps two-finger navigation available")
+            coordinator.parent.objects.active = false; coordinator.parent.objects.mode = .select; coordinator.updateObjectGestures()
             // Actual hit under the overlay must resolve to model geometry.
             let old = view.pointOfView?.simdTransform
             node.simdPosition = SIMD3(20, 0, 0); highlight.simdPosition = SIMD3(20, 0, 0)
@@ -331,6 +338,7 @@ enum DesignPreview {
             idle {
                 check(session.ready && session.writable, "Object session prepares verified model and writable storage")
                 guard session.ready else { finish(); return }
+                session.active = true
                 session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
                 idle {
                     guard let draft = session.draft else { check(false, "Object tap produces a draft"); finish(); return }
@@ -352,6 +360,22 @@ enum DesignPreview {
                                     session.undo()
                                     idle {
                                         check(session.draft?.bounds == draft.bounds, "Object undo restores prior orientation and extents")
+                                        session.mode = .remove
+                                        session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                                        session.pick(point: SIMD3(0, 0.65, -0.3), normal: SIMD3(0, 0, -1), cameraFront: SIMD3(0, 0, 1))
+                                        idle {
+                                            check(session.draft?.selection?.ids.count == (draft.selection?.ids.count ?? 0) - 4,
+                                                  "Coalesced paint removes front and final rear stroke without unbounded work")
+                                            session.undo()
+                                            idle {
+                                                session.undo()
+                                                idle {
+                                                    check(session.draft?.selection == draft.selection, "Undo restores exact surfaces after both paint samples")
+                                                    finishEdits()
+                                                }
+                                            }
+                                        }
+                                        func finishEdits() {
                                         session.adjust(name: "Reviewed cabinet", size: SIMD3(1.25, 1.3, 0.6))
                                         check(session.draft?.dimensions.first { $0.axis == .width }?.evidence == .adjusted && session.dirty,
                                               "Edited object bounds are explicitly adjusted, never measured")
@@ -367,6 +391,7 @@ enum DesignPreview {
                                         idle {
                                             check(session.saved.isEmpty && session.draft == nil, "Delete removes only the saved object result")
                                             finish()
+                                        }
                                         }
                                     }
                                 }

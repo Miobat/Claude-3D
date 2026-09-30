@@ -7,6 +7,7 @@ struct ObjectMeasurementPanel: View {
     @State private var showingEdit = false
     @State private var showingDelete = false
     @State private var showingNew = false
+    @State private var showingWall = false
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
@@ -32,6 +33,13 @@ struct ObjectMeasurementPanel: View {
                 }
                 Text("Scanned surfaces only. Hidden parts may extend beyond these spans.")
                     .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
+                if let wall = session.wallDepth {
+                    Button { showingWall = true } label: {
+                        Label("Use wall depth · " + unit.format(meters: wall.metres), systemImage: "rectangle.dashed")
+                            .font(.caption.weight(.semibold)).frame(minHeight: 44)
+                    }.disabled(session.busy)
+                        .accessibilityHint("Requires you to confirm that the object has no gap behind it")
+                }
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -124,6 +132,11 @@ struct ObjectMeasurementPanel: View {
         }
         .confirmationDialog("Discard the unsaved selection?", isPresented: $showingNew, titleVisibility: .visible) {
             Button("Discard and select another", role: .destructive) { session.newObject() }
+        }
+        .confirmationDialog("Is the back of this object flush against the detected wall, with no gap?", isPresented: $showingWall, titleVisibility: .visible) {
+            Button("Confirm flush contact — use wall depth") { session.confirmWallContact() }
+        } message: {
+            Text("This uses the front-to-wall span. Depth will be labelled Wall assumption, not measured. If you cannot confirm contact, keep the scanned span or unknown depth.")
         }
     }
 

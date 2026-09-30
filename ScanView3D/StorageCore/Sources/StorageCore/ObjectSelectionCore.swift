@@ -113,14 +113,16 @@ final class ObjectSelectionIndex {
             let canonical = dominant < 0 ? -n : n
             let k = PlaneKey(normal: SIMD3(Int32((canonical.x * 12).rounded()), Int32((canonical.y * 12).rounded()), Int32((canonical.z * 12).rounded())),
                              offset: Int32((simd_dot(canonical, a) / 0.04).rounded()))
-            var plane = planes[k] ?? Plane(low: a, high: a)
+            // Remove before appending: otherwise the dictionary retains the
+            // array buffer and every coplanar triangle causes a full CoW copy.
+            var plane = planes.removeValue(forKey: k) ?? Plane(low: a, high: a)
             plane.area += length * 0.5
             if category == .wall { plane.wallArea += length * 0.5 }
             plane.ids.append(i); plane.low = simd_min(plane.low, simd_min(a, simd_min(b, c)))
             plane.high = simd_max(plane.high, simd_max(a, simd_max(b, c)))
             planes[k] = plane
         }
-        let minY = points.map(\.y).min() ?? 0
+        let minY = points.reduce(Float.greatestFiniteMagnitude) { min($0, $1.y) }
         for plane in planes.values {
             let extent = plane.high - plane.low
             let n = faceNormals[plane.ids[0]]
@@ -222,6 +224,38 @@ final class ObjectSelectionIndex {
     func position(_ id: Int) -> SIMD3<Float> {
         let vertices = vertexIDs(id)
         return vertices.reduce(SIMD3<Float>.zero) { $0 + points[$1] } / Float(vertices.count)
+    }
+
+    struct WallDepthCandidate: Equatable { let metres: Float; let wallPoint: SIMD3<Float> }
+
+    /// A real, geometrically supported large wall behind the selected object.
+    /// This is ONLY a front-to-wall span; contact cannot be inferred from it.
+    func wallDepth(for region: AutomaticMeasuredRegion) -> WallDepthCandidate? {
+        let bounds = region.bounds, frontFace = bounds.center + bounds.front * bounds.size.z * 0.5
+        var candidate: WallDepthCandidate?
+        for id in structural where id < normals.count && abs(normals[id].y) < 0.2 && abs(simd_dot(normals[id], bounds.front)) > 0.97 {
+            let point = position(id)
+            let depth = simd_dot(frontFace - point, bounds.front)
+            guard depth > bounds.size.z + 0.01, depth <= bounds.size.z + 1.5 else { continue }
+            let projected = frontFace - bounds.front * depth
+            let wallPoint = closestPoint(projected, triangle: id)
+            guard simd_distance(wallPoint, projected) < 0.15 else { continue }
+            if candidate == nil || depth < candidate!.metres { candidate = WallDepthCandidate(metres: depth, wallPoint: projected) }
+        }
+        return candidate
+    }
+
+    func assumingWallContact(_ region: AutomaticMeasuredRegion, confirmed: Bool) throws -> AutomaticMeasuredRegion {
+        guard confirmed else { throw AutomaticMeasurementError.unconfirmedWall }
+        guard let candidate = wallDepth(for: region) else { throw AutomaticMeasurementError.invalidGeometry }
+        var result = region
+        let extensionDepth = candidate.metres - result.bounds.size.z
+        result.bounds.center -= result.bounds.front * extensionDepth * 0.5
+        result.bounds.size.z = candidate.metres
+        guard let i = result.dimensions.firstIndex(where: { $0.axis == .depth }) else { throw AutomaticMeasurementError.invalidDocument }
+        result.dimensions[i] = AutomaticDimension(axis: .depth, metres: candidate.metres,
+                                                  evidence: .assumedFlushToWall, wallContactConfirmed: true)
+        try result.validate(); return result
     }
     func vertexIDs(_ id: Int) -> [Int] {
         guard !triangles.isEmpty else { return [id] }
