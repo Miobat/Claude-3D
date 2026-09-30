@@ -3,10 +3,10 @@ import simd
 @testable import StorageCore
 
 final class AutomaticMeasurementTests: XCTestCase {
-    private let hash = String(repeating: "a", count: 64)
+    private let modelDigest = String(repeating: "a", count: 64)
 
     private func revision() -> MeasurementModelRevision {
-        MeasurementModelRevision(modelSHA256: hash, worldTransform: CoordinateMath.identity)
+        MeasurementModelRevision(modelSHA256: modelDigest, worldTransform: CoordinateMath.identity)
     }
 
     private func bounds(angle: Float = 0) -> UprightMeasurementBounds {
@@ -92,7 +92,7 @@ final class AutomaticMeasurementTests: XCTestCase {
     }
 
     func testUnclassifiedAndFutureCategoriesAreNotWalls() throws {
-        let doc = SurfaceLabelDocument(modelSHA256: hash, viewerSHA256: hash, faceCount: 3,
+        let doc = SurfaceLabelDocument(modelSHA256: modelDigest, viewerSHA256: modelDigest, faceCount: 3,
                                        classifications: Data([0, 255, 1]))
         try doc.validate()
         XCTAssertEqual(doc.category(at: 0), .unknown)
@@ -103,13 +103,13 @@ final class AutomaticMeasurementTests: XCTestCase {
     }
 
     func testSurfaceMetadataRoundTripAndValidation() throws {
-        var doc = SurfaceLabelDocument(modelSHA256: hash, viewerSHA256: hash, faceCount: 2, classifications: Data([2, 1]))
+        var doc = SurfaceLabelDocument(modelSHA256: modelDigest, viewerSHA256: modelDigest, faceCount: 2, classifications: Data([2, 1]))
         XCTAssertEqual(try JSONDecoder().decode(SurfaceLabelDocument.self, from: JSONEncoder().encode(doc)), doc)
         doc.faceCount = 3
         XCTAssertThrowsError(try doc.validate())
         doc.faceCount = 2; doc.modelSHA256 = "bad"
         XCTAssertThrowsError(try doc.validate())
-        doc.modelSHA256 = hash; doc.version = 2
+        doc.modelSHA256 = modelDigest; doc.version = 2
         XCTAssertThrowsError(try doc.validate())
     }
 
@@ -140,7 +140,7 @@ final class AutomaticMeasurementTests: XCTestCase {
         XCTAssertThrowsError(try doc.validate(for: changed))
         changed = revision(); changed.worldTransform[12] = 0.1
         XCTAssertThrowsError(try doc.validate(for: changed))
-        changed = revision(); changed.viewerSHA256 = hash
+        changed = revision(); changed.viewerSHA256 = modelDigest
         XCTAssertThrowsError(try doc.validate(for: changed))
         XCTAssertNoThrow(try doc.validate(for: revision()))
     }
