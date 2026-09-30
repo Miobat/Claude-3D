@@ -237,6 +237,10 @@ final class MeasurementOverlayScene: SKScene {
     private var drawnCamera: simd_float4x4?
     private var drawnOrtho: Double = 0
     private var drawnSize: CGSize = .zero
+    private var objectRegion: AutomaticMeasuredRegion?
+    private var objectUnit: ScanSettings.MeasurementUnit = .preferred
+    private var objectVersion = 0
+    private var drawnObjectVersion = -1
 
     override init(size: CGSize) {
         super.init(size: size)
@@ -254,21 +258,43 @@ final class MeasurementOverlayScene: SKScene {
         lock.unlock()
     }
 
+    func updateObject(_ region: AutomaticMeasuredRegion?, unit: ScanSettings.MeasurementUnit) {
+        lock.lock()
+        objectRegion = region; objectUnit = unit; objectVersion += 1
+        lock.unlock()
+    }
+
     /// SceneKit render thread. `project` maps a world point to overlay
     /// coordinates (origin bottom-left), or nil if it's behind the camera.
     func redrawIfNeeded(camera: simd_float4x4, ortho: Double, project: (SIMD3<Float>) -> CGPoint?) {
         lock.lock()
         let s = state
+        let region = objectRegion, regionUnit = objectUnit, regionVersion = objectVersion
         lock.unlock()
 
-        if s.version == drawnVersion, size == drawnSize, ortho == drawnOrtho,
+        if s.version == drawnVersion, regionVersion == drawnObjectVersion, size == drawnSize, ortho == drawnOrtho,
            let last = drawnCamera, Self.same(last, camera) { return }
         drawnVersion = s.version
+        drawnObjectVersion = regionVersion
         drawnCamera = camera
         drawnOrtho = ortho
         drawnSize = size
 
         removeAllChildren()
+
+        if let region {
+            let corners = region.bounds.corners().map(project)
+            for i in 0..<8 { for bit in [1, 2, 4] where i & bit == 0 {
+                if let a = corners[i], let b = corners[i | bit] { line([a, b], color: .systemMint, width: 1.5, dashed: true) }
+            } }
+            for (axis, end) in [(AutomaticDimension.Axis.width, 1), (.height, 2), (.depth, 4)] {
+                guard let dimension = region.dimensions.first(where: { $0.axis == axis }), let value = dimension.metres,
+                      let a = corners[0], let b = corners[end], hypot(a.x - b.x, a.y - b.y) > 30 else { continue }
+                let prefix = dimension.evidence == .adjusted ? "Edited " : (dimension.evidence == .partial ? "Partial " :
+                    (dimension.evidence == .assumedFlushToWall ? "Wall " : ""))
+                label(prefix + regionUnit.format(meters: value), at: CGPoint(x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 + 12), color: .systemMint)
+            }
+        }
 
         for m in s.measurements {
             let color: UIColor = m.id == s.selectedID ? .systemOrange : .systemYellow

@@ -31,6 +31,8 @@ struct ModelViewerView: View {
 
     // Measuring
     @StateObject private var session = MeasurementSession()
+    @StateObject private var objects = ObjectMeasurementSession()
+    @State private var measuringObjects = false
     @StateObject private var navigation = WalkNavigation()
     @Environment(\.scenePhase) private var scenePhase
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
@@ -89,8 +91,10 @@ struct ModelViewerView: View {
                 showGrid: $showGrid,
                 showBoundingBox: $showBoundingBox,
                 vizMode: $vizMode,
+                cameraProjection: $cameraProjection,
                 activeTool: $activeTool,
                 session: session,
+                objects: objects,
                 navigation: navigation
             )
             .id(reloadToken)
@@ -225,6 +229,7 @@ struct ModelViewerView: View {
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
+            if DesignPreview.screen == "object" { activeTool = .measure; measuringObjects = true }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
             if DesignPreview.screen == "quality" {
@@ -233,14 +238,32 @@ struct ModelViewerView: View {
             }
             #endif
             session.unit = measurementUnit
+            objects.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
             session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
         }
         .onChange(of: activeTool) { _, tool in
-            session.isActive = (tool == .measure)
+            session.isActive = (tool == .measure && !measuringObjects)
+            objects.active = (tool == .measure && measuringObjects)
             if tool == .measure { navigation.enabled = false }
         }
+        .onChange(of: measuringObjects) { _, enabled in
+            session.isActive = activeTool == .measure && !enabled
+            objects.active = activeTool == .measure && enabled
+        }
+        #if DEBUG && targetEnvironment(simulator)
+        .onChange(of: objects.ready) { _, ready in
+            if ready, DesignPreview.screen == "object" {
+                objects.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+            }
+        }
+        .onChange(of: objects.draft) { _, region in
+            if DesignPreview.screen == "object", let region {
+                objects.alignView?("front", region.bounds)
+            }
+        }
+        #endif
         .onChange(of: navigation.enabled) { _, enabled in
             stopNavigationInputs()
             navigation.isWalking = false
@@ -530,13 +553,21 @@ struct ModelViewerView: View {
         VStack(spacing: 8) {
             if activeTool == .measure {
                 ScrollView {
-                    measurePanel.background {
+                    VStack(spacing: 8) {
+                        Picker("Measurement type", selection: $measuringObjects) {
+                            Text("Manual").tag(false)
+                            Text("Object").tag(true)
+                        }.pickerStyle(.segmented).padding(.horizontal, 12)
+                            .accessibilityIdentifier("measurementType")
+                        if measuringObjects { ObjectMeasurementPanel(session: objects, unit: measurementUnit) }
+                        else { measurePanel }
+                    }.background {
                         GeometryReader { proxy in
                             Color.clear.preference(key: MeasurePanelHeightKey.self, value: proxy.size.height)
                         }
                     }
                 }
-                .frame(height: min(measurePanelHeight, compact ? 200 : 260))
+                .frame(height: min(measurePanelHeight, compact ? 230 : (measuringObjects ? 320 : 290)))
                 .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 

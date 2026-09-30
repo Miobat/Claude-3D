@@ -20,7 +20,7 @@ enum DesignPreview {
         let store = StorageManager(directory: root)
         guard !empty else { return store }
         if let site = store.createProject(name: "Coastal path · Demo") {
-            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site, metadata: {
+            _ = try? store.saveScan(meshData: screen == "object" ? objectMesh() : terrain(), name: screen == "object" ? "Cabinet · Demo" : "Rocky shoreline", toProject: site, metadata: {
                 if screen == "quality" {
                     $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
                         atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
@@ -52,6 +52,17 @@ enum DesignPreview {
         let bounds = MeshData.bounds(of: points)
         return MeshData(vertices: points, normals: Array(repeating: SIMD3(0, 1, 0), count: points.count),
                         faces: faces, colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+    }
+
+    static func objectMesh() -> MeshData {
+        let bounds = UprightMeasurementBounds(center: SIMD3(0, 0.65, 0), right: SIMD3(1, 0, 0), front: SIMD3(0, 0, 1), size: SIMD3(1.2, 1.3, 0.6))
+        let points = bounds.corners() + [SIMD3<Float>(-2, 0, -2), SIMD3(2, 0, -2), SIMD3(2, 0, 2), SIMD3(-2, 0, 2)]
+        let faces: [[UInt32]] = [[4, 5, 7], [4, 7, 6], [0, 2, 3], [0, 3, 1], [0, 4, 6], [0, 6, 2],
+                                [1, 3, 7], [1, 7, 5], [2, 6, 7], [2, 7, 3], [0, 1, 5], [0, 5, 4], [8, 10, 9], [8, 11, 10]]
+        let extents = MeshData.bounds(of: points)
+        return MeshProcessor.recalculateNormals(MeshData(vertices: points, normals: [], faces: faces,
+            colors: (0..<12).map { $0 < 8 ? SIMD4<Float>(0.62, 0.49, 0.34, 1) : SIMD4<Float>(0.25, 0.28, 0.3, 1) },
+            boundingBoxMin: extents.0, boundingBoxMax: extents.1, faceClassifications: Data(Array(repeating: UInt8(0), count: 12) + [2, 2])))
     }
 
     /// Exercises the production mesh pipeline and files in an isolated library.
@@ -273,11 +284,123 @@ enum DesignPreview {
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
         checkTextureQuality(check)
-        let report: [String: Any] = ["checks": count, "failures": failures]
-        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("navigation-checks.json")
-        do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
-        catch { assertionFailure("Could not write navigation test report: \(error)") }
+        checkObjects(view: view, coordinator: coordinator, check: check) {
+            let report: [String: Any] = ["checks": count, "failures": failures]
+            let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("navigation-checks.json")
+            do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
+            catch { assertionFailure("Could not write navigation test report: \(error)") }
+        }
+    }
+
+    private static func checkObjects(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator,
+                                     check: @escaping (Bool, String) -> Void, done: @escaping () -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("object-ui-check-\(UUID().uuidString)")
+        let store = StorageManager(directory: root), session = ObjectMeasurementSession()
+        func finish() { session.detach(); try? FileManager.default.removeItem(at: root); done() }
+        func idle(_ attempt: Int = 0, then: @escaping () -> Void) {
+            if !session.busy { then(); return }
+            guard attempt < 100 else { check(false, "Object worker completes without blocking main thread"); finish(); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { idle(attempt + 1, then: then) }
+        }
+        do {
+            guard let project = store.createProject(name: "Object UI fixture") else { check(false, "Object fixture project"); finish(); return }
+            let mesh = objectMesh()
+            let scan = try store.saveScan(meshData: mesh, name: "Cabinet", toProject: project, metadata: { $0.recordCaptureFrame(matrix_identity_float4x4) })
+            let node = MeshProcessor.createSceneKitNode(from: mesh)
+            let sources = ModelGeometryIndex.sources(in: node)
+            let geometry = try ObjectSceneGeometry.read(sources)
+            check(geometry.points.count == mesh.vertices.count && geometry.triangles.count == mesh.faces.count,
+                  "Native Object extraction retains exact metric vertex and face order")
+            let index = try ObjectSelectionIndex(points: geometry.points, triangles: geometry.triangles, labels: mesh.faceClassifications)
+            let selection = try index.grow(from: 0, radius: 2).selection
+            let highlight = try ObjectSceneGeometry.highlight(index: index, selection: selection)
+            check(highlight.name == "objectSelection" && highlight.geometry?.elements.first?.primitiveCount == selection.ids.count &&
+                  !selection.ids.contains(12) && !selection.ids.contains(13),
+                  "Object highlight contains only selected triangles, not the floor")
+            coordinator.parent.objects.active = true; coordinator.parent.objects.mode = .add; coordinator.updateObjectGestures()
+            check(coordinator.objectPaint?.isEnabled == true && coordinator.cameraController?.selectionEditing == true,
+                  "Object paint mode replaces only one-finger orbit")
+            check(view.gestureRecognizers?.contains { ($0 as? UIPanGestureRecognizer)?.minimumNumberOfTouches == 2 && $0.isEnabled } ?? false,
+                  "Object paint keeps two-finger navigation available")
+            coordinator.parent.objects.active = false; coordinator.parent.objects.mode = .select; coordinator.updateObjectGestures()
+            // Actual hit under the overlay must resolve to model geometry.
+            let old = view.pointOfView?.simdTransform
+            node.simdPosition = SIMD3(20, 0, 0); highlight.simdPosition = SIMD3(20, 0, 0)
+            view.scene?.rootNode.addChildNode(node); view.scene?.rootNode.addChildNode(highlight)
+            coordinator.cameraController?.set(yaw: 0, pitch: 0, target: SIMD3(20, 0.65, 0), distance: 3, animated: false)
+            SCNTransaction.flush(); _ = view.snapshot()
+            let target = SIMD3<Float>(20, 0.65, 0.3), pixel = view.projectPoint(SCNVector3(target.x, target.y, target.z))
+            let hit = coordinator.surfacePointForFocus(at: CGPoint(x: CGFloat(pixel.x), y: CGFloat(pixel.y)))
+            check(hit.map { simd_distance($0, target) < 0.005 } ?? false, "Object overlay does not intercept surface picking")
+            node.removeFromParentNode(); highlight.removeFromParentNode(); node.simdPosition = .zero
+            if let old { view.pointOfView?.simdTransform = old; coordinator.cameraController?.syncFromCamera() }
+            session.prepare(sources: ModelGeometryIndex.sources(in: node), store: store, scan: scan, project: project)
+            idle {
+                check(session.ready && session.writable, "Object session prepares verified model and writable storage")
+                guard session.ready else { finish(); return }
+                session.active = true
+                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                idle {
+                    guard let draft = session.draft else { check(false, "Object tap produces a draft"); finish(); return }
+                    check(abs(draft.bounds.size.x - 1.2) < 0.0001 && abs(draft.bounds.size.y - 1.3) < 0.0001 && abs(draft.bounds.size.z - 0.6) < 0.0001,
+                          "Object tap selects cabinet with correct overall extents")
+                    session.save()
+                    idle {
+                        do {
+                            let document = try store.loadAutomaticMeasurements(for: scan, in: project)
+                            check(document?.regions.first?.selection == draft.selection && !session.dirty,
+                                  "Save persists exact selected surfaces and clears unsaved state")
+                            session.newObject(); session.open(draft)
+                            idle {
+                                check(session.draft == draft && !session.dirty, "Reopening restores reviewed bounds and exact object selection")
+                                session.rotateFront()
+                                idle {
+                                    check(session.draft.map { abs($0.bounds.size.x - 0.6) < 0.0001 && abs($0.bounds.size.z - 1.2) < 0.0001 } ?? false,
+                                          "Turning object front swaps width and depth in the local frame")
+                                    session.undo()
+                                    idle {
+                                        check(session.draft?.bounds == draft.bounds, "Object undo restores prior orientation and extents")
+                                        session.mode = .remove
+                                        session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                                        session.pick(point: SIMD3(0, 0.65, -0.3), normal: SIMD3(0, 0, -1), cameraFront: SIMD3(0, 0, 1))
+                                        idle {
+                                            check(session.draft?.selection?.ids.count == (draft.selection?.ids.count ?? 0) - 4,
+                                                  "Coalesced paint removes front and final rear stroke without unbounded work")
+                                            session.undo()
+                                            idle {
+                                                session.undo()
+                                                idle {
+                                                    check(session.draft?.selection == draft.selection, "Undo restores exact surfaces after both paint samples")
+                                                    finishEdits()
+                                                }
+                                            }
+                                        }
+                                        func finishEdits() {
+                                            session.adjust(name: "Reviewed cabinet", size: SIMD3(1.25, 1.3, 0.6))
+                                            check(session.draft?.dimensions.first { $0.axis == .width }?.evidence == .adjusted && session.dirty,
+                                                  "Edited object bounds are explicitly adjusted, never measured")
+                                            for aligned in ["front", "side", "top"] {
+                                                coordinator.alignObject(view: aligned, bounds: draft.bounds)
+                                                let direction = aligned == "side" ? draft.bounds.right : draft.bounds.front
+                                                let camera = view.pointOfView?.simdTransform
+                                                let axis = aligned == "top" ? SIMD3<Float>(0, 1, 0) : direction
+                                                check(camera.map { simd_dot(SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z), axis) > 0.999 } ?? false,
+                                                      "Object \(aligned) view aligns orthographically to selection axes")
+                                            }
+                                            session.deleteDraft()
+                                            idle {
+                                                check(session.saved.isEmpty && session.draft == nil, "Delete removes only the saved object result")
+                                                finish()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch { check(false, "Object native persistence: \(error)"); finish() }
+                    }
+                }
+            }
+        } catch { check(false, "Object native fixture: \(error)"); finish() }
     }
 
     private static func checkTextureQuality(_ check: (Bool, String) -> Void) {
@@ -553,7 +676,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "object", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
