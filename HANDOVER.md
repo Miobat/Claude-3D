@@ -187,3 +187,42 @@ a recorded range sphere; postprocessing preserves observed positions.
 Lightweight recovery retains sampled vertex colour (not the temporary photo
 atlas). Required scan metadata commits with the first library write. Native
 Metal / recovery / navigation checks now gate every release branch.
+
+## 13. Automatic measurement foundation (not the selection UI yet)
+
+Branch `codex/automatic-measurements` starts from the exact published
+`codex/texture-quality-polish` tip `7a709d2`, including capture-trust-recovery.
+No integration branches have been merged and no TestFlight release is requested.
+
+- `MeshData.faceClassifications` is optional packed Data, one byte per kept
+  triangle. Capture, cleanup, vertex welding, component filtering, clustering,
+  colour changes, scene transforms and recovery retain/remap it. Conflicting
+  labels on collapsed duplicate faces become unknown. Point conversion drops it.
+- New mesh saves write `<base>_surfaces.json` before publishing the scan in the
+  library. It contains labels and hashes of BOTH the exported model and native
+  viewer; a changed/reordered reconstruction must never reuse that mapping.
+  Legacy / point-cloud / photogrammetry scans use shape-only analysis.
+- `StorageCore/AutomaticMeasurementCore.swift` (A10045/B10045) defines upright
+  selection bounds and a separate versioned `<base>_automatic-measurements.json`
+  contract. It is NOT an object detector. Bounds follow the object's bottom/top,
+  not the floor, and preserve supported protrusions rather than trimming 1%.
+- Every dimension has explicit evidence: observed span, partial, confirmed flush
+  to wall assumption, adjusted, or unavailable. Bounds alone cannot prove a
+  complete object. Unknown depth has no numeric value; wall depth requires
+  explicit confirmation. Metric results reject estimated/unverified scale.
+- Results bind to model bytes, native viewer bytes (when present), and the world
+  transform. Stale, corrupt, or newer files throw and cannot be silently replaced.
+  Only explicit reviewed replacement can supersede stale results. Heavy hashing
+  must run on a worker queue when the UI is connected.
+- Both sidecars participate in move/delete/duplicate/reconstruction retention.
+  Valid version-1 duplication rebinds the model hash after OBJ material-reference
+  renaming; unknown future or already-stale data is retained without reinterpretation.
+- Existing manual `_measurements.json` and its enum types are unchanged. Older
+  app versions can still open manual measurements, but do not manage the new
+  companions: use the updated app for moving/duplicating scans with automatic data.
+
+Next: tapped-object region growing, connected-noise rejection, highlight and
+add/remove selection corrections, evidence-backed dimensions and aligned
+front/side/top views. Then multi-height room boundaries and plan export; finally
+a separate RoomPlan capture trial. Do not promise centimetre field accuracy until
+repeat scans have been checked against physical measurements on LiDAR hardware.

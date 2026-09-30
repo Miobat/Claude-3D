@@ -54,6 +54,123 @@ enum DesignPreview {
                         faces: faces, colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
     }
 
+    /// Exercises the production mesh pipeline and files in an isolated library.
+    static func automaticMeasurementChecks(check: (Bool, String) -> Void) {
+        do {
+            let vertices: [SIMD3<Float>] = [SIMD3(0, 1, 0), SIMD3(1, 1, 0), SIMD3(0, 2, 0),
+                                          SIMD3(0, 1.001, 0), SIMD3(10, 1, 0)]
+            let mesh = MeshData(vertices: vertices, normals: Array(repeating: SIMD3(0, 0, 1), count: 5),
+                faces: [[0, 1, 2], [0, 3, 1], [4, 4, 4]], colors: [],
+                boundingBoxMin: SIMD3(0, 1, 0), boundingBoxMax: SIMD3(10, 2, 0),
+                faceClassifications: Data([4, 1, 3]))
+            let cleaned = MeshProcessor.removeDegenerateTriangles(mesh)
+            check(cleaned.faceClassifications == Data([4, 1]), "Degenerate-face removal remaps labels")
+            let welded = MeshProcessor.weldNearbyVertices(cleaned, threshold: 0.005)
+            check(welded.faceClassifications == Data([4]), "Welding drops collapsed triangle's label")
+            let connected = MeshProcessor.removeSmallComponents(welded, minVertices: 3)
+            check(connected.faceClassifications == Data([4]) && connected.vertexCount == 3,
+                  "Component removal preserves kept surface label")
+            let clustered = MeshProcessor.clusterVertices(mesh, cellSize: 0.01, preservePositions: true)
+            check(clustered.faceClassifications == Data([4]), "Detail clustering remaps labels")
+            let duplicate = MeshData(vertices: Array(vertices.prefix(3)), normals: [],
+                faces: [[0, 1, 2], [1, 2, 0]], colors: [], boundingBoxMin: .zero,
+                boundingBoxMax: SIMD3(1, 2, 0), faceClassifications: Data([1, 4]))
+            check(MeshProcessor.clusterVertices(duplicate, cellSize: 0.01).faceClassifications == Data([0]),
+                  "Collapsed duplicate triangles with conflicting labels become unknown")
+            check(MeshProcessor.recalculateNormals(connected).faceClassifications == Data([4]), "Normal rebuild retains labels")
+            check(MeshProcessor.smoothNormals(MeshProcessor.recalculateNormals(connected)).faceClassifications == Data([4]),
+                  "Normal smoothing retains labels")
+            check(MeshProcessor.smoothVertexPositions(connected).faceClassifications == Data([4]), "Position smoothing retains labels")
+            check(MeshProcessor.makeUniformGrey(connected).faceClassifications == Data([4]), "No-colour mode retains labels")
+            check(connected.transformed(by: matrix_identity_float4x4).faceClassifications == Data([4]), "Scene frame retains labels")
+            check(MeshProcessor.voxelDownsamplePoints(connected, leafSize: 0.01).faceClassifications == nil,
+                  "Point conversion does not misapply triangle labels to points")
+            let baked = BakedTexture(atlasImage: UIImage(), cornerUVs: [.zero, SIMD2(1, 0), SIMD2(0, 1)], atlasSize: 1)
+            check(MeshProcessor.createTexturedNode(from: connected, baked: baked).geometry?.elements.first?.primitiveCount == 1,
+                  "Textured viewer retains source face order / count")
+            let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+            let restored = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(mesh))
+            check(restored.faceClassifications == mesh.faceClassifications, "Recovery checkpoint retains face labels")
+            let invalid = MeshData(vertices: mesh.vertices, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax, faceClassifications: Data([4]))
+            do { _ = try encoder.encode(invalid); check(false, "Reject checkpoint label / face mismatch") }
+            catch { check(true, "Reject checkpoint label / face mismatch") }
+
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("automatic-check-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Semantic / measurement fixture") else {
+                check(false, "Automatic fixture project created"); return
+            }
+            let scan = try store.saveScan(meshData: connected, name: "Labelled surface", toProject: project,
+                metadata: { $0.recordCaptureFrame(matrix_identity_float4x4) })
+            let labels = try store.loadSurfaceLabels(for: scan, in: project)
+            check(labels?.classifications == Data([4]) && labels?.category(at: 0) == .table,
+                  "Saved labels bind to model and native viewer")
+            let legacyScan = try store.saveScan(meshData: MeshData(vertices: connected.vertices, normals: [],
+                faces: connected.faces, colors: [], boundingBoxMin: connected.boundingBoxMin,
+                boundingBoxMax: connected.boundingBoxMax), name: "Shape-only legacy", toProject: project,
+                metadata: { $0.modelScale = 2 })
+            check(try store.loadSurfaceLabels(for: legacyScan, in: project) == nil, "Absent legacy labels use shape-only fallback")
+            do { _ = try store.automaticMeasurementRevision(for: legacyScan, in: project)
+                check(false, "Unverified scale cannot produce automatic metric dimensions")
+            } catch { check(true, "Unverified scale cannot produce automatic metric dimensions") }
+            let manual = ScanMeasurement(kind: .distance, points: [SIMD3(0, 1, 0), SIMD3(1, 1, 0)])
+            try store.saveMeasurements([manual], for: scan, in: project)
+            let frame = try UprightMeasurementBounds.fit(points: connected.vertices, front: SIMD3(0, 0, 1))
+            let document = AutomaticMeasurementDocument(revision: try store.automaticMeasurementRevision(for: scan, in: project),
+                regions: [AutomaticMeasuredRegion(name: "Observed face", kind: .object, bounds: frame, dimensions: [
+                    AutomaticDimension(axis: .width, metres: 1, evidence: .partial),
+                    AutomaticDimension(axis: .height, metres: 1, evidence: .partial),
+                    AutomaticDimension(axis: .depth, metres: nil, evidence: .unavailable)
+                ])])
+            try store.saveAutomaticMeasurements(document, for: scan, in: project)
+            check(try store.loadAutomaticMeasurements(for: scan, in: project) == document, "Automatic selections save / reload")
+            check(store.loadMeasurements(for: scan, in: project) == [manual], "Automatic data leaves manual measurements readable")
+            let directory = store.getScanFileURL(scan: scan, project: project).deletingLastPathComponent()
+            let base = (scan.fileName as NSString).deletingPathExtension
+            let autoURL = directory.appendingPathComponent(base + AutomaticMeasurementDocument.suffix)
+            let original = try Data(contentsOf: autoURL)
+            for bytes in [Data(#"{"version":2,"regions":[{"kind":"future"}]}"#.utf8), Data("broken".utf8)] {
+                try bytes.write(to: autoURL, options: .atomic)
+                do { _ = try store.loadAutomaticMeasurements(for: scan, in: project); check(false, "Unreadable automatic data reported") }
+                catch { check(true, "Unreadable automatic data reported") }
+                do { try store.saveAutomaticMeasurements(document, for: scan, in: project); check(false, "Unreadable automatic data cannot be overwritten") }
+                catch { check(try Data(contentsOf: autoURL) == bytes, "Unreadable automatic data cannot be overwritten") }
+            }
+            try original.write(to: autoURL, options: .atomic)
+            guard let copy = store.duplicateScan(scan, from: project, to: project) else {
+                check(false, "Duplicate semantic scan created"); return
+            }
+            check(try store.loadSurfaceLabels(for: copy, in: project)?.classifications == Data([4]), "Duplicate retains correctly rebound labels")
+            let copyDocument = try store.loadAutomaticMeasurements(for: copy, in: project)
+            check(copyDocument?.regions == document.regions, "Duplicate retains automatic regions after OBJ reference rename")
+
+            var movedFrame = matrix_identity_float4x4; movedFrame.columns.3.x = 0.1
+            try store.updateScan(scan.id, in: project) { $0.modelTransform = StorageManager.array(of: movedFrame) }
+            guard let shifted = store.projects.first?.scans.first(where: { $0.id == scan.id }) else {
+                check(false, "Shifted fixture exists"); return
+            }
+            do { _ = try store.loadAutomaticMeasurements(for: shifted, in: project); check(false, "Alignment change invalidates dimensions") }
+            catch { check(true, "Alignment change invalidates dimensions") }
+            do { try store.saveAutomaticMeasurements(document, for: shifted, in: project); check(false, "Stale results cannot be saved") }
+            catch { check(try Data(contentsOf: autoURL) == original, "Stale results cannot be saved") }
+            try store.updateScan(scan.id, in: project) { $0.modelTransform = nil }
+            guard let destination = store.createProject(name: "Moved semantic fixture") else {
+                check(false, "Move fixture project created"); return
+            }
+            check(store.moveScan(scan, from: project, to: destination), "Move includes automatic / semantic sidecars")
+            check(try store.loadSurfaceLabels(for: scan, in: destination)?.classifications == Data([4]) &&
+                  store.loadAutomaticMeasurements(for: scan, in: destination)?.regions == document.regions,
+                  "Moved semantic / automatic data remain valid")
+            let newDirectory = store.getScanFileURL(scan: scan, project: destination).deletingLastPathComponent()
+            store.deleteScan(scan, from: destination)
+            check(!FileManager.default.fileExists(atPath: newDirectory.appendingPathComponent(base + SurfaceLabelDocument.suffix).path) &&
+                  !FileManager.default.fileExists(atPath: newDirectory.appendingPathComponent(base + AutomaticMeasurementDocument.suffix).path),
+                  "Delete removes both registered measurement companions")
+        } catch { check(false, "Automatic measurement foundation fixtures: \(error)") }
+    }
+
     /// Runs against the real SceneKit camera / hit tester, not just the pure
     /// maths helpers. The CI script requires this report and rejects failures.
     static func navigationChecks(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator) {
@@ -62,6 +179,7 @@ enum DesignPreview {
         var failures: [String] = []
         var count = 0
         func check(_ condition: Bool, _ name: String) { count += 1; if !condition { failures.append(name) } }
+        automaticMeasurementChecks(check: check)
         let old = camera.simdTransform
         let extent: Float = 6
         rig.frame(center: .zero, extent: extent)

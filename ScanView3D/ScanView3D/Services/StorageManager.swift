@@ -178,6 +178,9 @@ class StorageManager: ObservableObject {
         baked: BakedTexture? = nil,
         metadata: ((inout Scan) -> Void)? = nil
     ) throws -> Scan {
+        guard meshData.faceClassifications == nil || meshData.faceClassifications?.count == meshData.faceCount else {
+            throw AutomaticMeasurementError.invalidDocument
+        }
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
         let fileName = "\(scanId.uuidString).\(fileExtension)"
@@ -243,7 +246,19 @@ class StorageManager: ObservableObject {
         }
         let scene = SCNScene()
         scene.rootNode.addChildNode(scnNode)
-        scene.write(to: scnURL, delegate: nil)
+        guard scene.write(to: scnURL, delegate: nil) else { throw CocoaError(.fileWriteUnknown) }
+
+        // Commit semantic metadata before adding the scan to the library. OBJ/PLY
+        // and native viewer builders preserve the kept triangle order, including
+        // textured per-corner expansion. Never use this map on a new HQ topology.
+        if let labels = meshData.faceClassifications {
+            let document = SurfaceLabelDocument(modelSHA256: try measurementSHA256(fileURL),
+                                                viewerSHA256: try measurementSHA256(scnURL),
+                                                faceCount: meshData.faceCount, classifications: labels)
+            try document.validate()
+            try JSONEncoder().encode(document).write(
+                to: scanDir.appendingPathComponent(scanId.uuidString + SurfaceLabelDocument.suffix), options: .atomic)
+        }
 
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
@@ -343,6 +358,106 @@ class StorageManager: ObservableObject {
                 _ = try JSONDecoder().decode([ScanMeasurement].self, from: Data(contentsOf: url))
             }
             try JSONEncoder().encode(measurements).write(to: url, options: .atomic)
+        }
+    }
+
+    // MARK: - Automatic measurement foundation
+
+    private func measurementSidecar(_ suffix: String, scan: Scan, project: Project) -> URL {
+        let base = (scan.fileName as NSString).deletingPathExtension
+        return scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(base + suffix)
+    }
+
+    /// Stream hashes without the export cancellation state. Call expensive reads
+    /// on a worker queue when the selection UI is added; no whole-model Data copy.
+    private func measurementSHA256(_ url: URL) throws -> String {
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        var hash = SHA256()
+        while let bytes = try input.read(upToCount: 1 << 20), !bytes.isEmpty { hash.update(data: bytes) }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func boundedMeasurementData(_ url: URL, maximumBytes: Int) throws -> Data {
+        let count = (try fileManager.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? maximumBytes + 1
+        guard count <= maximumBytes else { throw AutomaticMeasurementError.invalidDocument }
+        let bytes = try Data(contentsOf: url)
+        guard bytes.count <= maximumBytes else { throw AutomaticMeasurementError.invalidDocument }
+        return bytes
+    }
+
+    func loadSurfaceLabels(for scan: Scan, in project: Project) throws -> SurfaceLabelDocument? {
+        let url = measurementSidecar(SurfaceLabelDocument.suffix, scan: scan, project: project)
+        guard fileManager.fileExists(atPath: url.path) else { return nil } // legacy / point-cloud / HQ
+        let document = try JSONDecoder().decode(SurfaceLabelDocument.self,
+            from: boundedMeasurementData(url, maximumBytes: 24_000_000))
+        try document.validate()
+        let viewer = measurementSidecar(".scn", scan: scan, project: project)
+        guard document.faceCount == scan.faceCount,
+              document.modelSHA256 == (try measurementSHA256(getScanFileURL(scan: scan, project: project))),
+              fileManager.fileExists(atPath: viewer.path), document.viewerSHA256 == (try measurementSHA256(viewer)) else {
+            throw AutomaticMeasurementError.staleModel
+        }
+        return document
+    }
+
+    /// Estimated bounding-box scale is not a calibration. Only metric LiDAR or
+    /// camera-pose-aligned reconstruction can start automatic dimensions today.
+    func automaticMeasurementRevision(for scan: Scan, in project: Project) throws -> MeasurementModelRevision {
+        guard scan.hasKnownScale, scan.scaleStatus == .lidarMetric || scan.scaleStatus == .cameraPoseAligned else {
+            throw AutomaticMeasurementError.unverifiedScale
+        }
+        let viewer = measurementSidecar(".scn", scan: scan, project: project)
+        let revision = MeasurementModelRevision(
+            modelSHA256: try measurementSHA256(getScanFileURL(scan: scan, project: project)),
+            worldTransform: try scan.validatedModelTransform(),
+            viewerSHA256: fileManager.fileExists(atPath: viewer.path) ? try measurementSHA256(viewer) : nil)
+        try revision.validate()
+        return revision
+    }
+
+    /// Throws on stale, corrupt, or newer data; nil means genuinely absent. The
+    /// UI must not turn a failed load into an empty selection that overwrites it.
+    func loadAutomaticMeasurements(for scan: Scan, in project: Project) throws -> AutomaticMeasurementDocument? {
+        let url = measurementSidecar(AutomaticMeasurementDocument.suffix, scan: scan, project: project)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let document = try AutomaticMeasurementDocument.decode(boundedMeasurementData(url, maximumBytes: 4_000_000))
+        try document.validate(for: automaticMeasurementRevision(for: scan, in: project))
+        return document
+    }
+
+    func saveAutomaticMeasurements(_ document: AutomaticMeasurementDocument, for scan: Scan, in project: Project,
+                                   replacingStaleResults: Bool = false) throws {
+        let snapshot: Scan = try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            guard let current = projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scan.id }),
+                  current.fileName == scan.fileName else { throw StorageFailure.missingItem }
+            return current
+        }
+        // Model hashing runs on the caller's worker queue, not inside the main
+        // thread library commit. A changed model/alignment is rechecked below.
+        try document.validate(for: automaticMeasurementRevision(for: snapshot, in: project))
+        let url = measurementSidecar(AutomaticMeasurementDocument.suffix, scan: snapshot, project: project)
+        let previous: Data? = fileManager.fileExists(atPath: url.path)
+            ? try boundedMeasurementData(url, maximumBytes: 4_000_000) : nil
+        if let previous {
+            let existing = try AutomaticMeasurementDocument.decode(previous)
+            guard existing.revision == document.revision || replacingStaleResults else {
+                throw AutomaticMeasurementError.staleModel
+            }
+        }
+        let bytes = try document.encoded()
+        try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            guard let current = projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scan.id }),
+                  current.fileName == snapshot.fileName, current.scaleStatus == snapshot.scaleStatus,
+                  try current.validatedModelTransform() == snapshot.validatedModelTransform() else {
+                throw AutomaticMeasurementError.staleModel
+            }
+            let latest: Data? = fileManager.fileExists(atPath: url.path)
+                ? try boundedMeasurementData(url, maximumBytes: 4_000_000) : nil
+            guard latest == previous else { throw StorageFailure.missingItem } // concurrent selection edit
+            try bytes.write(to: url, options: .atomic)
         }
     }
 
@@ -516,7 +631,8 @@ class StorageManager: ObservableObject {
     /// bundle zip, and the folder of kept High-Quality photos.
     private func companionFiles(of scan: Scan) -> [String] {
         let base = (scan.fileName as NSString).deletingPathExtension
-        var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json"]
+        var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json",
+                     base + SurfaceLabelDocument.suffix, base + AutomaticMeasurementDocument.suffix]
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
         if let p = scan.captureFolderName { names.append(p); names.append(p + PoseFile.suffix) }
@@ -604,6 +720,48 @@ class StorageManager: ObservableObject {
         }
         _ = copyExtra("\(oldBase).scn", as: "\(newBase).scn")
         _ = copyExtra("\(oldBase)_measurements.json", as: "\(newBase)_measurements.json")
+        // A duplicate must not silently lose automatic results / semantic labels.
+        // OBJ material references are renamed during copying, changing the byte
+        // hash but not geometry. Rebind ONLY validated, current version-1 data.
+        // Unknown future versions and already-stale data remain byte-for-byte.
+        do {
+            for suffix in [SurfaceLabelDocument.suffix, AutomaticMeasurementDocument.suffix] {
+                let source = sourceDir.appendingPathComponent(oldBase + suffix)
+                if fileManager.fileExists(atPath: source.path) {
+                    let destination = destDir.appendingPathComponent(newBase + suffix)
+                    try fileManager.copyItem(at: source, to: destination)
+                    struct Header: Decodable { let version: Int }
+                    let bytes = try boundedMeasurementData(source, maximumBytes: 24_000_000)
+                    guard try JSONDecoder().decode(Header.self, from: bytes).version == 1 else { continue }
+                    let oldModelHash = try measurementSHA256(sourceDir.appendingPathComponent(scan.fileName))
+                    let newModelHash = try measurementSHA256(copied.model)
+                    let oldViewer = sourceDir.appendingPathComponent(oldBase + ".scn")
+                    let newViewer = destDir.appendingPathComponent(newBase + ".scn")
+                    let oldViewerHash = fileManager.fileExists(atPath: oldViewer.path) ? try measurementSHA256(oldViewer) : nil
+                    let newViewerHash = fileManager.fileExists(atPath: newViewer.path) ? try measurementSHA256(newViewer) : nil
+                    guard oldViewerHash == newViewerHash else { throw AutomaticMeasurementError.staleModel }
+                    if suffix == SurfaceLabelDocument.suffix {
+                        var document = try JSONDecoder().decode(SurfaceLabelDocument.self, from: bytes)
+                        try document.validate()
+                        if document.modelSHA256 == oldModelHash && document.viewerSHA256 == oldViewerHash {
+                            document.modelSHA256 = newModelHash
+                            try JSONEncoder().encode(document).write(to: destination, options: .atomic)
+                        }
+                    } else {
+                        var document = try AutomaticMeasurementDocument.decode(bytes)
+                        let expected = MeasurementModelRevision(modelSHA256: oldModelHash,
+                            worldTransform: try scan.validatedModelTransform(), viewerSHA256: oldViewerHash)
+                        if document.revision == expected {
+                            document.revision.modelSHA256 = newModelHash
+                            try document.encoded().write(to: destination, options: .atomic)
+                        }
+                    }
+                }
+            }
+        } catch {
+            report(error, action: "Duplicate measurement metadata")
+            return nil
+        }
 
         var newScan = Scan(
             name: "\(scan.name) (Copy)",
