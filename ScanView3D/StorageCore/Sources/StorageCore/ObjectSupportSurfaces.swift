@@ -182,16 +182,25 @@ enum ObjectSupportSurfaces {
             if let floor, f.horizontal, abs(f.height - floor.height) < 0.06 { kind = .floor }
             else if let floor, f.horizontal, f.height - floor.height > 2.1, f.area > 4 { kind = .ceiling }
             else if abs(f.normal.y) < 0.18,
-                    (f.area > 4 && size.x > 2.5 && size.y > 2) ||
+                    (f.area > 3 && size.x > 2.5 && size.y > 1.5) ||
                     (f.wallFraction > 0.65 && f.area > 0.6 && size.x > 1.2 && size.y > 0.6) {
                 // ARKit sometimes calls a TV front "wall" too. A smaller
                 // parallel patch just off a larger wall is a projection, not
                 // another structural boundary that should swallow the object.
                 let projected = fits.contains { other in
-                    abs(simd_dot(f.normal, other.normal)) > 0.995 && other.area > f.area * 1.5 &&
-                    abs(f.offset - other.offset) > 0.008 && abs(f.offset - other.offset) < 0.25 &&
-                    other.low.x <= f.low.x && other.high.x >= f.high.x &&
-                    other.low.y <= f.low.y && other.high.y >= f.high.y
+                    let centre = f.normal * f.offset + f.u * ((f.low.x + f.high.x) * 0.5) + f.v * ((f.low.y + f.high.y) * 0.5)
+                    let distance = abs(simd_dot(centre, other.normal) - other.offset)
+                    guard abs(simd_dot(f.normal, other.normal)) > 0.995, other.area > f.area * 1.5,
+                          distance > 0.008, distance < 0.25 else { return false }
+                    // Compare in the other fit's basis. Canonical normals can
+                    // change sign around 45°; raw u/v bounds are not comparable.
+                    return [SIMD2(f.low.x,f.low.y), SIMD2(f.high.x,f.low.y),
+                            SIMD2(f.low.x,f.high.y), SIMD2(f.high.x,f.high.y)].allSatisfy { corner in
+                        let p = f.normal * f.offset + f.u * corner.x + f.v * corner.y
+                        let q = SIMD2(simd_dot(p, other.u), simd_dot(p, other.v))
+                        return q.x >= other.low.x - 0.02 && q.x <= other.high.x + 0.02 &&
+                            q.y >= other.low.y - 0.02 && q.y <= other.high.y + 0.02
+                    }
                 }
                 if projected { continue }
                 kind = .wall

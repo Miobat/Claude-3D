@@ -122,7 +122,7 @@ final class ObjectMeasurementSession: ObservableObject {
                     selection = try index.brush(previous?.selection, at: point, radius: brush, adding: mode == .add)
                     limited = true
                 }
-                var region = try selection.map { try index.region(selection: $0, front: mode == .select ? front : (previous?.bounds.front ?? front), partial: limited, automaticOrientation: mode == .select) }
+                var region = try selection.map { try index.region(selection: $0, front: mode == .select ? front : (previous?.bounds.front ?? front), partial: limited, automaticOrientation: mode == .select || previous == nil) }
                 if mode != .select, let old = previous { region?.id = old.id; region?.name = old.name; region?.createdAt = old.createdAt }
                 let node = try region?.selection.map { try ObjectSceneGeometry.highlight(index: index, selection: $0) }
                 let wall = region.flatMap(index.wallDepth)
@@ -138,7 +138,7 @@ final class ObjectMeasurementSession: ObservableObject {
                     self.publish()
                     self.continuePaint()
                 }
-            } catch { self.fail(error, token: token, rejectedPick: mode == .select) }
+            } catch { self.fail(error, token: token, rejectedPick: mode == .select, prefix: mode == .part ? "Part not added. " : "") }
         }
     }
 
@@ -149,6 +149,7 @@ final class ObjectMeasurementSession: ObservableObject {
 
     func missedPick() {
         guard active, ready, !busy, mode == .select else { return }
+        busy = true
         fail(ObjectSelectionError.noSurface, token: generation, rejectedPick: true)
     }
 
@@ -195,7 +196,8 @@ final class ObjectMeasurementSession: ObservableObject {
                     self.draft = result; self.highlight = node; self.busy = false; self.dirty = !opening
                     self.wallDepth = wall
                     self.partial = result.dimensions.contains { $0.evidence == .partial }
-                    self.message = opening ? "Saved result — observed surfaces, not hidden geometry." : "Front direction changed. Review width and depth."
+                    self.message = opening ? "Saved result — observed surfaces, not hidden geometry." :
+                        (refit ? "Front direction changed. Review width and depth." : "Previous selection restored.")
                     self.publish()
                 }
             } catch { self.fail(error, token: token) }
@@ -274,10 +276,10 @@ final class ObjectMeasurementSession: ObservableObject {
             } catch { self?.fail(error, token: token) }
         }
     }
-    private func fail(_ error: Error, token: UUID, rejectedPick: Bool = false) {
+    private func fail(_ error: Error, token: UUID, rejectedPick: Bool = false, prefix: String = "") {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.generation == token else { return }
-            self.busy = false; self.message = error.localizedDescription
+            self.busy = false; self.message = prefix + error.localizedDescription
             self.pendingPaint = nil
             if rejectedPick {
                 // A rejected tap must never leave an old box looking like a

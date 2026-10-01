@@ -284,7 +284,7 @@ struct ScannerView: View {
 
     @ViewBuilder private var photoLegendItems: some View {
         Label("Green dots · photo candidate", systemImage: "circle.grid.3x3.fill").foregroundStyle(FieldStyle.mint)
-        Label("Amber lines · needs photo", systemImage: "line.3.diagonal").foregroundStyle(.orange)
+        Label("Amber lines · needs photo", systemImage: "line.diagonal").foregroundStyle(.orange)
     }
 
     // MARK: - Top Status Bar

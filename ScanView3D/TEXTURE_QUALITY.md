@@ -1,5 +1,10 @@
 # Texture quality and capture feedback — second upgrade batch
 
+Overlay wording/UI was subsequently updated in HANDOVER.md §16: green dots mean
+saved photo candidates, not certified sharpness. Local exposure patches now gate
+the live mask as well as the whole-frame motion/lighting estimate. Final texture
+diagnostics remain distinct from live coverage and from mesh retention.
+
 Branch: `codex/texture-quality-polish`, based on `codex/capture-trust-recovery`
 at `b823cfb`. Depends on the first batch; do not replace it with old `main`.
 Development pushes validate only. The owner subsequently requested publication;

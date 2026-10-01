@@ -319,6 +319,8 @@ enum DesignPreview {
                                      check: @escaping (Bool, String) -> Void, done: @escaping () -> Void) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("object-ui-check-\(UUID().uuidString)")
         let store = StorageManager(directory: root), session = ObjectMeasurementSession()
+        var renderedRegion: AutomaticMeasuredRegion?, renderedHighlight: SCNNode?
+        session.render = { renderedRegion = $0; renderedHighlight = $1 }
         func finish() { session.detach(); try? FileManager.default.removeItem(at: root); done() }
         func idle(_ attempt: Int = 0, then: @escaping () -> Void) {
             if !session.busy { then(); return }
@@ -402,10 +404,28 @@ enum DesignPreview {
                                                     idle {
                                                         check(session.draft == nil && session.wallDepth == nil && !session.dirty && session.canUndo,
                                                               "Rejected object tap clears stale box and Save state but keeps Undo")
+                                                        check(renderedRegion == nil && renderedHighlight == nil, "Rejected tap clears the actual renderer overlay")
                                                         session.undo()
                                                         idle {
                                                             check(session.draft?.selection == draft.selection, "Undo recovers the prior selection after a rejected tap")
-                                                            finishEdits()
+                                                            session.mode = .part
+                                                            session.pick(point: SIMD3(0,0.65,0.3), normal: SIMD3(0,0,1), cameraFront: SIMD3(0,0,1))
+                                                            idle {
+                                                                check(session.draft?.selection == draft.selection && session.draft?.dimensions.first?.evidence == .partial,
+                                                                      "Add part session unions exact IDs and marks review as Partial")
+                                                                session.undo()
+                                                                idle {
+                                                                    session.mode = .select; session.missedPick()
+                                                                    idle {
+                                                                        check(session.draft == nil && renderedHighlight == nil, "Tap on missing geometry clears stale measurement")
+                                                                        session.undo()
+                                                                        idle {
+                                                                            check(session.draft?.selection == draft.selection, "Missed-tap Undo preserves source IDs")
+                                                                            finishEdits()
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }

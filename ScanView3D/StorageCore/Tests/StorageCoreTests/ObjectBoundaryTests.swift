@@ -44,20 +44,22 @@ final class ObjectBoundaryTests: XCTestCase {
     }
 
     func testThinTVIsNotAbsorbedIntoWallPlaneEvenWithWallLabel() throws {
-        for depth: Float in [0.015, 0.018, 0.025, 0.04] {
+        for angle: Float in [0, 0.78, 0.80, 1.4] { for depth: Float in [0.015, 0.018, 0.025, 0.04] {
             var mesh = Mesh()
-            mesh.quad(SIMD3(-0.6,1,depth), SIMD3(0.6,1,depth), SIMD3(0.6,1.7,depth), SIMD3(-0.6,1.7,depth))
+            mesh.quad(SIMD3(-0.7,1,depth), SIMD3(0.7,1,depth), SIMD3(0.7,1.7,depth), SIMD3(-0.7,1.7,depth))
             mesh.wallWithOpening()
+            let rotation = simd_quatf(angle: angle, axis: SIMD3<Float>(0,1,0))
+            mesh.points = mesh.points.map { rotation.act($0) + SIMD3(2,0,-1) }
             for labels: Data? in [nil, Data(repeating: SurfaceCategory.wall.rawValue, count: mesh.faces.count)] {
                 let index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces, labels: labels)
                 let result = try index.grow(from: 0)
                 XCTAssertEqual(result.selection.ids, [0, 1], "TV at \(depth) m must remain separate from wall")
-                let region = try index.region(selection: result.selection, front: SIMD3(0,0,1), partial: false, automaticOrientation: true)
-                XCTAssertEqual(region.bounds.size.x, 1.2, accuracy: 0.001)
+                let region = try index.region(selection: result.selection, front: rotation.act(SIMD3(0,0,1)), partial: false, automaticOrientation: true)
+                XCTAssertEqual(region.bounds.size.x, 1.4, accuracy: 0.001)
                 XCTAssertEqual(region.bounds.size.y, 0.7, accuracy: 0.001)
                 XCTAssertNil(region.dimensions.first { $0.axis == .depth }?.metres, "One captured front is not physical TV depth")
             }
-        }
+        } }
     }
 
     func testSemanticWallPatchWorksWithoutFullRoomHeight() throws {
@@ -69,6 +71,16 @@ final class ObjectBoundaryTests: XCTestCase {
         XCTAssertTrue(index.supportPlanes.contains { $0.kind == .wall })
         XCTAssertTrue(try index.grow(from: 0).selection.ids.allSatisfy { $0 < 12 })
         XCTAssertThrowsError(try index.grow(from: 12))
+    }
+
+    func testLegacyWallWithMissingTopIsStillBackground() throws {
+        var mesh = Mesh()
+        mesh.quad(SIMD3(-0.7,1,0.025), SIMD3(0.7,1,0.025), SIMD3(0.7,1.7,0.025), SIMD3(-0.7,1.7,0.025))
+        mesh.quad(SIMD3(-1.7,0.3,0), SIMD3(1.7,0.3,0), SIMD3(1.7,2.1,0), SIMD3(-1.7,2.1,0))
+        let index = try mesh.index()
+        XCTAssertTrue(index.supportPlanes.contains { $0.kind == .wall })
+        XCTAssertEqual(try index.grow(from: 0).selection.ids, [0, 1])
+        XCTAssertThrowsError(try index.grow(from: 2))
     }
 
     func testBrokenLampStemJoinsAlignedEndsButNotNearbyObject() throws {

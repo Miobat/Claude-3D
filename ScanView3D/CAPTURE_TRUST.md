@@ -1,5 +1,10 @@
 # Capture trust / recovery — first upgrade batch
 
+Current overlay/cleanup behaviour is documented in HANDOVER.md §16. Shape is
+accepted depth (blue), not guaranteed final mesh. Green dots indicate retained
+photo candidates with motion/local-exposure checks; amber hatching asks for
+another photo. The historical mint/grid wording below describes the earlier batch.
+
 Based on Claude's `487d5c4` updates. TestFlight publication is a separate,
 explicit action; pushes to `codex/capture-trust-recovery` only validate.
 
@@ -71,3 +76,22 @@ backed by the existing runtime low-memory pause guard.
 Next work: better texture selection / seam treatment / quality diagnostics, then
 the broader capture and review interface polish. This batch does not implement
 TSDF reconstruction or claim survey-grade precision.
+
+## Preserve / TV / lamp acceptance (October 2026)
+
+1. Save a wall, TV and thin lamp with Preserve. Compare captured/cleaned/saved
+   face counts and area in Info → Mesh retention. No detail thinning should occur.
+2. Save original as copy; verify the existing model/measurements are unchanged,
+   the copy has vertex colour, correct scale and all pre-cleanup surfaces.
+3. Select the TV front and side. Confirm only the TV is highlighted. A single
+   flat front has unknown physical depth, even when Out from wall is available.
+4. Select the lamp from its stem/shade. Check small aligned breaks show Partial.
+   Use Add part for separate captured pieces; neighboring furniture must stay out.
+5. Tap the wall or a hole after a successful selection. Old dimensions/highlight
+   must clear; Undo must recover the previous draft, including unsaved edits.
+6. Switch Shape/Photos/Combined/Off. Range blur remains; unknown/out-of-range
+   pixels never receive captured/photo marks. Green candidates require a saved
+   image; clipped/dark patches should ask for another photo. Revisit the area.
+7. Repeat in portrait/landscape and large text. Check sustained phone frame rate,
+   thermals, memory and original-save disk use on iPhone 16 Pro. Simulator fixtures
+   do not establish any of those device/optical properties.
