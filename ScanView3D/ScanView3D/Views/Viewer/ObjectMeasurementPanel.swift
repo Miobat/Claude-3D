@@ -122,6 +122,7 @@ struct ObjectMeasurementPanel: View {
                 }.fixedSize(horizontal: false, vertical: true)
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(.white).padding(12).fieldPanel().padding(.horizontal, 8)
         .accessibilityIdentifier("objectMeasurementPanel")
         .sheet(isPresented: $showingEdit) {
@@ -144,28 +145,41 @@ struct ObjectMeasurementPanel: View {
         }
     }
 
-    private var selectionControls: some View {
-        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
-        return layout {
+    @ViewBuilder private var selectionControls: some View {
+        // Keep a real stack with its full intrinsic height. AnyLayout could
+        // collapse these controls when a large-text result became an error.
+        if typeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) { modeMenu; Spacer(minLength: 0); undoButton }
+                if session.mode != .part { addPartButton }
+            }.fixedSize(horizontal: false, vertical: true)
+        } else {
             HStack(spacing: 4) {
-            Menu {
-                ForEach(ObjectMeasurementSession.Mode.allCases, id: \.self) { mode in
-                    Button { session.mode = mode } label: { Label(mode.rawValue, systemImage: mode.icon) }
-                }
-            } label: {
-                Label(session.mode.rawValue, systemImage: session.mode.icon)
-                    .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
-                    .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
-            }.disabled(!session.ready || session.busy).accessibilityLabel("Selection tool: " + session.mode.rawValue)
-                if typeSize.isAccessibilitySize { Spacer(minLength: 0); undoButton }
+                modeMenu
+                if session.mode != .part { addPartButton }
+                Spacer(minLength: 0)
+                undoButton
             }
-            if session.mode != .part {
-                Button { session.mode = .part } label: { Label("Add part", systemImage: "plus") }
-                    .font(.caption.weight(.semibold)).padding(.horizontal, 8).frame(minHeight: 44)
-                    .disabled(!session.ready || session.busy)
-            }
-            if !typeSize.isAccessibilitySize { Spacer(minLength: 0); undoButton }
         }
+    }
+
+    private var modeMenu: some View {
+        Menu {
+            ForEach(ObjectMeasurementSession.Mode.allCases, id: \.self) { mode in
+                Button { session.mode = mode } label: { Label(mode.rawValue, systemImage: mode.icon) }
+            }
+        } label: {
+            Label(session.mode.rawValue, systemImage: session.mode.icon)
+                .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
+                .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+        }
+        .disabled(!session.ready || session.busy).accessibilityLabel("Selection tool: " + session.mode.rawValue)
+    }
+
+    private var addPartButton: some View {
+        Button { session.mode = .part } label: { Label("Add part", systemImage: "plus") }
+            .font(.caption.weight(.semibold)).padding(.horizontal, 8).frame(minHeight: 44)
+            .disabled(!session.ready || session.busy)
     }
 
     private var statusMessage: some View {
