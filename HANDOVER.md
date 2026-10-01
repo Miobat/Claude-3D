@@ -36,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10049`/`B10049`). Deleting a file = remove those 4 lines too.
+(currently `A10050`/`B10050`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -258,3 +258,33 @@ Remaining plan: room outlines from multiple slices/planes, drawing exports, and 
 separate RoomPlan capture trial. Tilted-object frames are not implemented here.
 Physical accuracy still needs iPhone/tape tests.
 Development pushes validate only; TestFlight publication remains an explicit action.
+
+## 15. Automatic object boundaries
+
+`codex/object-surface-boundaries` improves the Object tool after phone feedback.
+There is no user-set selection reach. Robust plane fitting identifies broad floor,
+wall and ceiling patches in meshes and point clouds; corroborated floor labels
+can support smaller floor patches. Exact source geometry then supplies the connected
+deviation from those planes, retaining measured coordinates and IDs.
+
+- Mesh connectivity includes small surface gaps (2 cm), including vertices meeting
+  triangle interiors. Symmetric component joining makes the result independent of
+  whether a seat or a leg was tapped. A bounding-volume tree bounds surface queries.
+- Cloud connectivity uses observed point spacing, with a 7.5 cm maximum gap;
+  detected background points cannot connect otherwise separate objects.
+- An upright minimum-area footprint chooses the box orientation automatically.
+  The camera chooses the equivalent Front direction, not the box angle or size.
+- `AutomaticMeasuredRegion.wallProjection` is optional and backwards compatible.
+  It records front-to-wall distance separately from observed depth. If only a front
+  face is captured, the display box and third card show "Out from wall"; any hidden
+  gap is included. Confirmed flush contact remains a separate explicit assumption.
+- Saved selections, paint corrections and manual dimensions retain their existing
+  contracts. Editing extents clears the wall projection; refitting recomputes it.
+- A10049/B10049 registers ObjectSupportSurfaces.swift. New geometric regressions
+  cover noisy floors, chairs, separate nearby objects, missing wall patches,
+  cloud boundaries and orientation; native UI checks include a 3.8 m cabinet.
+
+This is geometric segmentation, not semantic recognition of individual furniture.
+Touching objects and genuinely missing surfaces may still need Add/Remove. Plane
+sampling never removes points from the final selection or dimension fit. Existing
+working limits and explicit failure behaviour are retained.

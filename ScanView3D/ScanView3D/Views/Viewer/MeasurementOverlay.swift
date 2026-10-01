@@ -283,15 +283,17 @@ final class MeasurementOverlayScene: SKScene {
         removeAllChildren()
 
         if let region {
-            let corners = region.bounds.corners().map(project)
+            let corners = region.displayBounds.corners().map(project)
             for i in 0..<8 { for bit in [1, 2, 4] where i & bit == 0 {
                 if let a = corners[i], let b = corners[i | bit] { line([a, b], color: .systemMint, width: 1.5, dashed: true) }
             } }
             for (axis, end) in [(AutomaticDimension.Axis.width, 1), (.height, 2), (.depth, 4)] {
-                guard let dimension = region.dimensions.first(where: { $0.axis == axis }), let value = dimension.metres,
+                guard let dimension = region.dimensions.first(where: { $0.axis == axis }) else { continue }
+                let wall = axis == .depth && region.usesWallProjectionForDisplay ? region.wallProjection : nil
+                guard let value = wall?.metres ?? dimension.metres,
                       let a = corners[0], let b = corners[end], hypot(a.x - b.x, a.y - b.y) > 30 else { continue }
-                let prefix = dimension.evidence == .adjusted ? "Edited " : (dimension.evidence == .partial ? "Partial " :
-                    (dimension.evidence == .assumedFlushToWall ? "Wall " : ""))
+                let prefix = wall != nil ? "Out from wall " : (dimension.evidence == .adjusted ? "Edited " : (dimension.evidence == .partial ? "Partial " :
+                    (dimension.evidence == .assumedFlushToWall ? "Wall " : "")))
                 label(prefix + regionUnit.format(meters: value), at: CGPoint(x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 + 12), color: .systemMint)
             }
         }

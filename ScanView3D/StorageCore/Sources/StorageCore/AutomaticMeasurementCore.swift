@@ -183,6 +183,12 @@ struct AutomaticDimension: Codable, Equatable {
 /// A reviewed selection's data contract. Detectors must supply evidence separately:
 /// a bounding box alone cannot prove that any dimension is complete.
 struct AutomaticMeasuredRegion: Codable, Equatable, Identifiable {
+    /// Distance from the observed front to a fitted background wall. This is a
+    /// separate quantity: it includes any unseen air gap behind the object.
+    struct WallProjection: Codable, Equatable {
+        let metres: Float
+        let wallPoint: SIMD3<Float>
+    }
     enum Kind: String, Codable { case object, room }
     var id = UUID()
     var name: String
@@ -191,10 +197,30 @@ struct AutomaticMeasuredRegion: Codable, Equatable, Identifiable {
     var dimensions: [AutomaticDimension]
     var createdAt = Date()
     var selection: AutomaticRegionSelection? = nil
+    var wallProjection: WallProjection? = nil
+
+    var usesWallProjectionForDisplay: Bool {
+        wallProjection != nil && dimensions.first(where: { $0.axis == .depth })?.metres == nil
+    }
+    var displayBounds: UprightMeasurementBounds {
+        guard usesWallProjectionForDisplay, let wallProjection else { return bounds }
+        var result = bounds
+        result.center -= bounds.front * ((wallProjection.metres - bounds.size.z) * 0.5)
+        result.size.z = wallProjection.metres
+        return result
+    }
 
     func validate() throws {
         try bounds.validate()
         try selection?.validate()
+        if let projection = wallProjection {
+            let p = projection.wallPoint
+            let expected = bounds.center + bounds.front * (bounds.size.z * 0.5 - projection.metres)
+            guard projection.metres.isFinite, projection.metres > bounds.size.z,
+                  projection.metres <= bounds.size.z + 1.5,
+                  p.x.isFinite, p.y.isFinite, p.z.isFinite,
+                  simd_distance(p, expected) < 0.001 else { throw AutomaticMeasurementError.invalidDocument }
+        }
         guard name.count <= 200, createdAt.timeIntervalSince1970.isFinite, dimensions.count == 3,
               Set(dimensions.map(\.axis)).count == 3 else { throw AutomaticMeasurementError.invalidDocument }
         for dimension in dimensions {

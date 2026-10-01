@@ -229,7 +229,7 @@ struct ModelViewerView: View {
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
-            if DesignPreview.screen == "object" { activeTool = .measure; measuringObjects = true }
+            if DesignPreview.screen?.hasPrefix("object") == true { activeTool = .measure; measuringObjects = true }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
             if DesignPreview.screen == "quality" {
@@ -254,13 +254,14 @@ struct ModelViewerView: View {
         }
         #if DEBUG && targetEnvironment(simulator)
         .onChange(of: objects.ready) { _, ready in
-            if ready, DesignPreview.screen == "object" {
-                objects.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+            if ready, DesignPreview.screen?.hasPrefix("object") == true {
+                let point = DesignPreview.screen == "object-wall" ? SIMD3<Float>(0,1.5,0.6) : SIMD3<Float>(0,0.65,0.3)
+                objects.pick(point: point, normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
             }
         }
         .onChange(of: objects.draft) { _, region in
-            if DesignPreview.screen == "object", let region {
-                objects.alignView?("front", region.bounds)
+            if DesignPreview.screen?.hasPrefix("object") == true, let region {
+                objects.alignView?("front", region.displayBounds)
             }
         }
         #endif

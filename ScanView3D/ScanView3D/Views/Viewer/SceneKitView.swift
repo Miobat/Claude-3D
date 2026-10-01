@@ -534,7 +534,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             let expectedPitch: Float = preset == "top" ? -.pi / 2 : 0
             // A freely orbited camera is no longer an aligned preset.
             guard abs(yawDifference) < 0.01, abs(rig.pitch - expectedPitch) < 0.01 else { objectPresetView = nil; return }
-            alignObject(view: preset, bounds: region.bounds)
+            alignObject(view: preset, bounds: region.displayBounds)
         }
 
         func pickingProjection(in view: SCNView) -> simd_float4x4? {
