@@ -17,8 +17,6 @@ struct ObjectMeasurementPanel: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(session.draft?.name ?? "Select an object").font(.headline)
-                    Text(session.message).font(.caption).foregroundStyle(.white.opacity(0.8))
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 4)
                 if session.busy { ProgressView().tint(FieldStyle.mint).accessibilityLabel("Analysing selection") }
@@ -36,12 +34,14 @@ struct ObjectMeasurementPanel: View {
                     .font(.caption).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
             }
             selectionControls
+            if session.draft == nil { statusMessage }
             if let region = session.draft {
                 if typeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 8) { dimensionCards(region) }
                 } else {
                     HStack(alignment: .top, spacing: 6) { dimensionCards(region) }
                 }
+                statusMessage
                 Text("Scanned surfaces only. Hidden parts may extend beyond these spans.")
                     .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
                 if let wall = region.wallProjection {
@@ -145,7 +145,9 @@ struct ObjectMeasurementPanel: View {
     }
 
     private var selectionControls: some View {
-        HStack(spacing: 4) {
+        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 4))
+        return layout {
+            HStack(spacing: 4) {
             Menu {
                 ForEach(ObjectMeasurementSession.Mode.allCases, id: \.self) { mode in
                     Button { session.mode = mode } label: { Label(mode.rawValue, systemImage: mode.icon) }
@@ -155,15 +157,24 @@ struct ObjectMeasurementPanel: View {
                     .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
                     .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
             }.disabled(!session.ready || session.busy).accessibilityLabel("Selection tool: " + session.mode.rawValue)
+                if typeSize.isAccessibilitySize { Spacer(minLength: 0); undoButton }
+            }
             if session.mode != .part {
                 Button { session.mode = .part } label: { Label("Add part", systemImage: "plus") }
                     .font(.caption.weight(.semibold)).padding(.horizontal, 8).frame(minHeight: 44)
                     .disabled(!session.ready || session.busy)
             }
-            Spacer(minLength: 0)
-            Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
-                .disabled(!session.canUndo).accessibilityLabel("Undo object selection change")
+            if !typeSize.isAccessibilitySize { Spacer(minLength: 0); undoButton }
         }
+    }
+
+    private var statusMessage: some View {
+        Text(session.message).font(.caption).foregroundStyle(.white.opacity(0.8))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+    private var undoButton: some View {
+        Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+            .disabled(!session.canUndo).accessibilityLabel("Undo object selection change")
     }
 
     @ViewBuilder private func dimensionCards(_ region: AutomaticMeasuredRegion) -> some View {

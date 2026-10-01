@@ -18,7 +18,7 @@ private struct MeshRetentionSheet: View {
                     Section("Surface retention · " + report.cleanup) {
                         stage("Captured before cleanup", report.captured)
                         stage("After cleanup", report.cleaned)
-                        stage("Saved after detail thinning", report.saved)
+                        stage("Saved mesh", report.saved)
                         LabeledContent("Surface area removed", value: report.removedAreaFraction.formatted(.percent.precision(.fractionLength(1))))
                     }
                     Section {
@@ -663,7 +663,10 @@ struct ModelViewerView: View {
                         }
                     }
                 }
-                .frame(height: min(measurePanelHeight, compact ? 230 : (measuringObjects ? 320 : 290)))
+                // Object results need a stable viewport. A ScrollView preference
+                // can report its initial 200 pt proposal instead of full content,
+                // clipping the dimension cards even on a tall phone.
+                .frame(height: measuringObjects ? (compact ? 230 : 320) : min(measurePanelHeight, compact ? 230 : 290))
                 .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 
