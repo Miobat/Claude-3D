@@ -233,8 +233,10 @@ enum ObjectSupportSurfaces {
 enum ObjectFootprint {
     static func front(points: [SIMD3<Float>], preferred: SIMD3<Float>) -> SIMD3<Float> {
         guard let origin = points.first else { return preferred }
-        let sorted = Set(points.map { SIMD2($0.x - origin.x, $0.z - origin.z) }).sorted {
-            $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x
+        let projected: [SIMD2<Float>] = points.map { p in SIMD2<Float>(p.x - origin.x, p.z - origin.z) }
+        let unique = Set<SIMD2<Float>>(projected)
+        let sorted: [SIMD2<Float>] = unique.sorted { a, b in
+            a.x == b.x ? a.y < b.y : a.x < b.x
         }
         guard sorted.count > 1 else { return preferred }
         func turn(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD2<Float>) -> Float {
