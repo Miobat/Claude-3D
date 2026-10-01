@@ -43,9 +43,17 @@ struct ObjectMeasurementPanel: View {
                 }
                 Text("Scanned surfaces only. Hidden parts may extend beyond these spans.")
                     .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
-                if let wall = session.wallDepth {
+                if let wall = region.wallProjection {
+                    if !region.usesWallProjectionForDisplay {
+                        Label("Out from wall · " + unit.format(meters: wall.metres), systemImage: "arrow.left.and.right")
+                            .font(.caption.weight(.semibold)).foregroundStyle(FieldStyle.mint)
+                    }
+                    Text("Wall distance includes any gap behind the object.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
+                }
+                if session.wallDepth != nil {
                     Button { showingWall = true } label: {
-                        Label("Use wall depth · " + unit.format(meters: wall.metres), systemImage: "rectangle.dashed")
+                        Label("Set wall as object back", systemImage: "rectangle.dashed")
                             .font(.caption.weight(.semibold)).frame(minHeight: 44)
                     }.disabled(session.busy)
                         .accessibilityHint("Requires you to confirm that the object has no gap behind it")
@@ -67,13 +75,8 @@ struct ObjectMeasurementPanel: View {
                 }
             }.fixedSize(horizontal: false, vertical: true)
             if session.mode == .select {
-                HStack(spacing: 10) {
-                    Text("Reach").font(.caption)
-                    Slider(value: $session.radius, in: 0.25...5, step: 0.05).tint(FieldStyle.mint)
-                        .accessibilityLabel("Selection reach from the tapped surface")
-                        .accessibilityValue(unit.format(meters: session.radius))
-                    Text(unit.format(meters: session.radius)).font(.caption.monospacedDigit()).frame(minWidth: 55)
-                }
+                Label("Automatic boundary", systemImage: "sparkles")
+                    .font(.caption).foregroundStyle(FieldStyle.mint).fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 10) {
@@ -90,7 +93,7 @@ struct ObjectMeasurementPanel: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(["front", "side", "top"], id: \.self) { view in
-                            Button(view.capitalized) { session.alignView?(view, region.bounds) }
+                            Button(view.capitalized) { session.alignView?(view, region.displayBounds) }
                                 .font(.caption.weight(.semibold)).padding(.horizontal, 14).frame(minHeight: 44)
                                 .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
                                 .accessibilityLabel("Aligned \(view) view of selected object")
@@ -155,12 +158,13 @@ struct ObjectMeasurementPanel: View {
     @ViewBuilder private func dimensionCards(_ region: AutomaticMeasuredRegion) -> some View {
         ForEach(AutomaticDimension.Axis.allCases, id: \.self) { axis in
             let dimension = region.dimensions.first { $0.axis == axis }
+            let wall = axis == .depth && region.usesWallProjectionForDisplay ? region.wallProjection : nil
             VStack(alignment: .leading, spacing: 3) {
-                Text(axis.rawValue.capitalized).font(.caption).foregroundStyle(.white.opacity(0.7))
-                Text(dimension?.metres.map { unit.format(meters: $0) } ?? "Unknown")
+                Text(wall == nil ? axis.rawValue.capitalized : "Out from wall").font(.caption).foregroundStyle(.white.opacity(0.7))
+                Text((wall?.metres ?? dimension?.metres).map { unit.format(meters: $0) } ?? "Unknown")
                     .font(.headline.monospacedDigit()).foregroundStyle(FieldStyle.mint)
                     .minimumScaleFactor(0.8)
-                Text(evidence(dimension?.evidence)).font(.caption2).foregroundStyle(.white.opacity(0.6))
+                Text(wall == nil ? evidence(dimension?.evidence) : "Wall reference").font(.caption2).foregroundStyle(.white.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
             }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
                 .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))

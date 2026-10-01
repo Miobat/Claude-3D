@@ -15,7 +15,6 @@ final class ObjectMeasurementSession: ObservableObject {
     enum Mode: String, CaseIterable { case select = "Select", add = "Add", remove = "Remove" }
     @Published var active = false { didSet { publish() } }
     @Published var mode: Mode = .select
-    @Published var radius: Float = 1.5
     @Published var brushRadius: Float = 0.08
     @Published private(set) var draft: AutomaticMeasuredRegion?
     @Published private(set) var saved: [AutomaticMeasuredRegion] = []
@@ -71,7 +70,7 @@ final class ObjectMeasurementSession: ObservableObject {
                     self.revision = revision; self.saved = document?.regions ?? []
                     self.ready = true; self.busy = false; self.writable = loadError == nil
                     self.warning = loadError ?? warning
-                    self.message = loadError == nil ? "Tap an object to select connected surfaces." : "Review only — existing measurement file has been preserved."
+                    self.message = loadError == nil ? "Tap an object. Its boundary and size are detected automatically." : "Review only — existing measurement file has been preserved."
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -90,8 +89,12 @@ final class ObjectMeasurementSession: ObservableObject {
             return
         }
         let mode = mode, token = generation, previous = draft, work = work
-        let radius = radius, brush = brushRadius
-        let proposed = normal.flatMap { abs($0.y) < 0.5 ? $0 : nil } ?? cameraFront
+        let brush = brushRadius
+        // The footprint supplies orientation. The view chooses its equivalent
+        // Front side; an angled chair leg must not swap width and depth.
+        let cameraHorizontal = SIMD3<Float>(cameraFront.x, 0, cameraFront.z)
+        let proposed = simd_length(cameraHorizontal) > 0.001 ? cameraHorizontal :
+            (normal.flatMap { abs($0.y) < 0.5 ? $0 : nil } ?? SIMD3(0,0,1))
         let horizontal = SIMD3<Float>(proposed.x, 0, proposed.z)
         let front = simd_length(horizontal) > 0.001 ? simd_normalize(horizontal) : SIMD3(0, 0, 1)
         busy = true
@@ -101,13 +104,13 @@ final class ObjectMeasurementSession: ObservableObject {
                 var selection: AutomaticRegionSelection?, limited = false
                 if mode == .select {
                     guard let seed = index.nearest(to: point) else { throw ObjectSelectionError.noSurface }
-                    let result = try index.grow(from: seed, radius: radius, cancelled: work.cancelled)
-                    selection = result.selection; limited = result.touchesLimit
+                    let result = try index.grow(from: seed, cancelled: work.cancelled)
+                    selection = result.selection; limited = result.touchesLimit || result.bridgedGap
                 } else {
                     selection = try index.brush(previous?.selection, at: point, radius: brush, adding: mode == .add)
                     limited = true
                 }
-                var region = try selection.map { try index.region(selection: $0, front: mode == .select ? front : (previous?.bounds.front ?? front), partial: limited) }
+                var region = try selection.map { try index.region(selection: $0, front: mode == .select ? front : (previous?.bounds.front ?? front), partial: limited, automaticOrientation: mode == .select) }
                 if mode != .select, let old = previous { region?.id = old.id; region?.name = old.name; region?.createdAt = old.createdAt }
                 let node = try region?.selection.map { try ObjectSceneGeometry.highlight(index: index, selection: $0) }
                 let wall = region.flatMap(index.wallDepth)
@@ -118,7 +121,8 @@ final class ObjectMeasurementSession: ObservableObject {
                     self.wallDepth = wall
                     self.dirty = true; self.busy = false
                     self.message = region == nil ? "Selection cleared. Tap an object to start again." :
-                        (limited ? "Partial selection — review the highlighted surfaces." : "Review the highlighted surfaces before saving.")
+                        (mode != .select ? "Selection adjusted. Review the highlighted surfaces." :
+                            (limited ? "Boundary crosses a small scan gap. Review the highlighted object." : "Boundary detected. Review the highlighted object."))
                     self.publish()
                     self.continuePaint()
                 }
@@ -185,6 +189,7 @@ final class ObjectMeasurementSession: ObservableObject {
         guard var result = draft, !busy, !name.isEmpty, name.count <= 200,
               size.x.isFinite, size.y.isFinite, size.z.isFinite, size.x > 0, size.y > 0, size.z >= 0 else { return }
         let old = result.bounds.size
+        result.wallProjection = nil
         result.name = name
         // Keep lower/rear/left datum fixed when changing an overall extent.
         result.bounds.center += result.bounds.right * ((size.x - old.x) * 0.5)
@@ -234,7 +239,7 @@ final class ObjectMeasurementSession: ObservableObject {
     func newObject() {
         guard !busy else { return }
         draft = nil; highlight = nil; wallDepth = nil; undoStack.removeAll(); dirty = false; mode = .select
-        message = "Tap an object to select connected surfaces."; publish()
+        message = "Tap an object. Its boundary and size are detected automatically."; publish()
     }
 
     private func persist(_ list: [AutomaticMeasuredRegion], message: String, clear: Bool = false) {

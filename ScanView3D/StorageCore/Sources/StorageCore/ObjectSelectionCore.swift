@@ -67,11 +67,13 @@ final class ObjectSelectionIndex {
     let triangles: [SIMD3<UInt32>]
     let normals: [SIMD3<Float>]
     let structural: Set<Int>
+    let supportPlanes: [ObjectSupportPlane]
     let geometrySHA256: String
-    private let welded: [Int]
-    private let incidents: [[Int]]
+    private let meshComponents: [Int]
+    private let componentGaps: [Bool]
     private let cells: [SIMD3<Int32>: [Int]]
-    private let pointCell: Float = 0.04
+    private let connectionDistance: Float
+    private let proximity: ObjectTriangleProximity
     var kind: AutomaticRegionSelection.Kind { triangles.isEmpty ? .points : .triangles }
 
     init(points: [SIMD3<Float>], triangles: [SIMD3<UInt32>], labels: Data? = nil,
@@ -99,12 +101,13 @@ final class ObjectSelectionIndex {
         for t in triangles { word(t.x); word(t.y); word(t.z) }
         digest.update(data: buffer)
         geometrySHA256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        let cellSize: Float = triangles.isEmpty ? 0.08 : 0.02
         var weldMap: [SIMD3<Int32>: [Int]] = [:], representatives: [SIMD3<Float>] = [], remap: [Int] = []
         var buckets: [SIMD3<Int32>: [Int]] = [:]
         for (i, p) in points.enumerated() {
             if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
             if triangles.isEmpty {
-                buckets[Self.cell(p, size: 0.04), default: []].append(i)
+                buckets[Self.cell(p, size: cellSize), default: []].append(i)
                 continue
             }
             // Neighbor buckets avoid seams caused by a quantization boundary.
@@ -116,14 +119,31 @@ final class ObjectSelectionIndex {
                 }
             } } }
             if let match { remap.append(match) }
-            else { remap.append(representatives.count); weldMap[key, default: []].append(representatives.count); representatives.append(p) }
+            else {
+                remap.append(representatives.count); weldMap[key, default: []].append(representatives.count); representatives.append(p)
+            }
         }
-        welded = remap; cells = buckets
+        cells = buckets
+        if triangles.isEmpty {
+            var spacings: [Float] = []
+            for i in stride(from: 0, to: points.count, by: max(1, points.count / 768)) {
+                if cancelled() { throw ObjectSelectionError.cancelled }
+                let p = points[i], key = Self.cell(p, size: cellSize)
+                var nearest: Float = cellSize * cellSize
+                for z in -1...1 { for y in -1...1 { for x in -1...1 {
+                    for j in buckets[key &+ SIMD3(Int32(x), Int32(y), Int32(z))] ?? [] where j != i {
+                        let d = simd_distance_squared(p, points[j])
+                        if d > 0.000001 { nearest = min(nearest, d) }
+                    }
+                } } }
+                if nearest < cellSize * cellSize { spacings.append(sqrt(nearest)) }
+            }
+            spacings.sort()
+            connectionDistance = spacings.isEmpty ? 0.045 : min(0.075, max(0.012, spacings[spacings.count / 2] * 1.8))
+        } else { connectionDistance = cellSize }
         var incident = [[Int]](repeating: [], count: representatives.count)
         var faceNormals: [SIMD3<Float>] = []
-        struct PlaneKey: Hashable { let normal: SIMD3<Int32>; let offset: Int32 }
-        struct Plane { var area: Float = 0; var wallArea: Float = 0; var ids: [Int] = []; var low: SIMD3<Float>; var high: SIMD3<Float> }
-        var planes: [PlaneKey: Plane] = [:], rejected = Set<Int>()
+        var rejected = Set<Int>()
         for (i, t) in triangles.enumerated() {
             if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
             let a = points[Int(t.x)], b = points[Int(t.y)], c = points[Int(t.z)]
@@ -131,35 +151,65 @@ final class ObjectSelectionIndex {
             let n = length > 1e-9 ? cross / length : .zero
             faceNormals.append(n)
             for v in Set([remap[Int(t.x)], remap[Int(t.y)], remap[Int(t.z)]]) { incident[v].append(i) }
-            let category = labels.flatMap { SurfaceCategory(rawValue: $0[$0.startIndex + i]) } ?? .unknown
-            // A mislabeled vertical cabinet front cannot become a floor.
-            if abs(n.y) > 0.85 && (category == .floor || category == .ceiling) { rejected.insert(i) }
-            guard length > 1e-9 else { rejected.insert(i); continue }
-            let dominant = abs(n.x) > abs(n.y) ? (abs(n.x) > abs(n.z) ? n.x : n.z) : (abs(n.y) > abs(n.z) ? n.y : n.z)
-            let canonical = dominant < 0 ? -n : n
-            let k = PlaneKey(normal: SIMD3(Int32((canonical.x * 12).rounded()), Int32((canonical.y * 12).rounded()), Int32((canonical.z * 12).rounded())),
-                             offset: Int32((simd_dot(canonical, a) / 0.04).rounded()))
-            // Remove before appending: otherwise the dictionary retains the
-            // array buffer and every coplanar triangle causes a full CoW copy.
-            var plane = planes.removeValue(forKey: k) ?? Plane(low: a, high: a)
-            plane.area += length * 0.5
-            if category == .wall { plane.wallArea += length * 0.5 }
-            plane.ids.append(i); plane.low = simd_min(plane.low, simd_min(a, simd_min(b, c)))
-            plane.high = simd_max(plane.high, simd_max(a, simd_max(b, c)))
-            planes[k] = plane
+            if length <= 1e-9 { rejected.insert(i) }
         }
-        // A disconnected point below the room must not disable floor rejection.
-        let minY = planes.values.filter { $0.area > 1.5 && abs(faceNormals[$0.ids[0]].y) > 0.95 }
-            .reduce(Float.greatestFiniteMagnitude) { min($0, $1.low.y) }
-        for plane in planes.values {
-            let extent = plane.high - plane.low
-            let n = faceNormals[plane.ids[0]]
-            let floor = abs(n.y) > 0.95 && plane.area > 1.5 && plane.high.y < minY + 0.04
-            let wall = abs(n.y) < 0.2 && plane.area > 4 && max(extent.x, extent.z) > 2.5 &&
-                (plane.wallArea / plane.area > 0.5 || extent.y > 2)
-            if floor || wall { rejected.formUnion(plane.ids) }
+        let supports = try ObjectSupportSurfaces.detect(points: points, triangles: triangles, normals: faceNormals, labels: labels, cancelled: cancelled)
+        supportPlanes = supports
+        if triangles.isEmpty {
+            for (id, p) in points.enumerated() {
+                if id % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+                if supports.contains(where: { abs($0.distance(p)) <= $0.tolerance && $0.containsProjection(p) }) { rejected.insert(id) }
+            }
+        } else {
+            for (id, t) in triangles.enumerated() {
+                if id % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+                let a = points[Int(t.x)], b = points[Int(t.y)], c = points[Int(t.z)], center = (a + b + c) / 3
+                for plane in supports where plane.containsProjection(center) {
+                    // Keep upright sides down to their contact edge. Only the
+                    // coplanar background face stops growing at that edge.
+                    let distances = [abs(plane.distance(a)), abs(plane.distance(b)), abs(plane.distance(c))]
+                    if abs(plane.distance(center)) <= plane.tolerance &&
+                        distances.max()! <= plane.tolerance * 2 && abs(simd_dot(plane.normal, faceNormals[id])) > 0.5 {
+                        rejected.insert(id); break
+                    }
+                }
+            }
         }
-        incidents = incident; normals = faceNormals; structural = rejected
+        normals = faceNormals; structural = rejected
+        var parents = Array(triangles.indices), sizes = Array(repeating: 1, count: triangles.count)
+        var gaps = Array(repeating: false, count: triangles.count)
+        func root(_ id: Int) -> Int {
+            var node = id
+            while parents[node] != node { parents[node] = parents[parents[node]]; node = parents[node] }
+            return node
+        }
+        func join(_ a: Int, _ b: Int, gap: Bool = false) {
+            var a = root(a), b = root(b)
+            guard a != b else { return }
+            if sizes[a] < sizes[b] { swap(&a, &b) }
+            parents[b] = a; sizes[a] += sizes[b]; gaps[a] = gaps[a] || gaps[b] || gap
+        }
+        for (i, faces) in incident.enumerated() {
+            if i % 4096 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+            let kept = faces.filter { !rejected.contains($0) }
+            if let first = kept.first { for other in kept.dropFirst() { join(first, other) } }
+        }
+        let topology = triangles.indices.map { rejected.contains($0) ? -1 : root($0) }
+        let tree = try ObjectTriangleProximity(points: points, triangles: triangles, components: topology, cancelled: cancelled)
+        var checked = Set<Int>()
+        if !triangles.isEmpty {
+            for vertex in points.indices where checked.insert(remap[vertex]).inserted {
+                if vertex % 1024 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+                guard let face = incident[remap[vertex]].first(where: { !rejected.contains($0) }) else { continue }
+                for other in tree.nearby(points[vertex], radius: connectionDistance, excludingComponent: topology[face])
+                    where !rejected.contains(other) {
+                    join(face, other, gap: simd_distance_squared(points[vertex], tree.closest(points[vertex], triangle: other)) > 0.006 * 0.006)
+                }
+            }
+        }
+        meshComponents = triangles.indices.map { rejected.contains($0) ? -1 : root($0) }
+        componentGaps = triangles.indices.map { gaps[root($0)] }
+        proximity = tree
     }
 
     func nearest(to p: SIMD3<Float>, maximumDistance: Float = 0.12) -> Int? {
@@ -169,43 +219,56 @@ final class ObjectSelectionIndex {
                 .flatMap { simd_distance(points[$0], p) <= maximumDistance ? $0 : nil }
         }
         var best: Int?, distance = maximumDistance * maximumDistance
-        for i in triangles.indices {
+        for i in proximity.nearby(p, radius: maximumDistance) {
             let d = simd_distance_squared(p, closestPoint(p, triangle: i))
             if d < distance { distance = d; best = i }
         }
         return best
     }
 
-    struct Result { let selection: AutomaticRegionSelection; let touchesLimit: Bool }
-    func grow(from seed: Int, radius: Float, cancelled: () -> Bool = { false }) throws -> Result {
-        guard radius.isFinite, radius >= 0.1, radius <= 5,
+    struct Result { let selection: AutomaticRegionSelection; let touchesLimit: Bool; var bridgedGap = false }
+    func grow(from seed: Int, radius: Float? = nil, cancelled: () -> Bool = { false }) throws -> Result {
+        guard radius.map({ $0.isFinite && $0 >= 0.1 && $0 <= 5 }) ?? true,
               seed >= 0, seed < (triangles.isEmpty ? points.count : triangles.count) else { throw ObjectSelectionError.noSurface }
         guard !structural.contains(seed) else { throw ObjectSelectionError.structuralSurface }
-        let origin = position(seed), r2 = radius * radius
+        let origin = position(seed), r2 = radius.map { $0 * $0 }
+        if !triangles.isEmpty {
+            var ids: [Int] = [], clipped = false
+            for id in triangles.indices {
+                if id % 1024 == 0, cancelled() { throw ObjectSelectionError.cancelled }
+                guard meshComponents[id] == meshComponents[seed] else { continue }
+                if let r2, !vertexIDs(id).allSatisfy({ simd_distance_squared(points[$0], origin) <= r2 }) { clipped = true; continue }
+                ids.append(id)
+                guard ids.count <= Self.maximumSelection else { throw ObjectSelectionError.tooLarge }
+            }
+            guard !ids.isEmpty else { throw ObjectSelectionError.emptySelection }
+            return Result(selection: try identifiedSelection(ids), touchesLimit: clipped, bridgedGap: componentGaps[seed])
+        }
+        let cellSize: Float = 0.08
         var visited = Set([seed]), queue = [seed], head = 0, selected: [Int] = [], clipped = false
+        // Remove discovered cloud points from search buckets. Dense repeated
+        // observations must not cause quadratic neighbor scans.
+        var remainingCells = cells
         while head < queue.count {
             if head % 1024 == 0, cancelled() { throw ObjectSelectionError.cancelled }
             let id = queue[head]; head += 1
             guard !structural.contains(id) else { continue }
             let vertices = vertexIDs(id)
-            guard vertices.allSatisfy({ simd_distance_squared(points[$0], origin) <= r2 }) else { clipped = true; continue }
+            if let r2, !vertices.allSatisfy({ simd_distance_squared(points[$0], origin) <= r2 }) { clipped = true; continue }
             selected.append(id)
             guard selected.count <= Self.maximumSelection else { throw ObjectSelectionError.tooLarge }
-            if triangles.isEmpty {
-                let key = Self.cell(points[id], size: pointCell)
-                for z in -1...1 { for y in -1...1 { for x in -1...1 {
-                    for next in cells[key &+ SIMD3(Int32(x), Int32(y), Int32(z))] ?? []
-                        where !visited.contains(next) && simd_distance_squared(points[next], points[id]) <= 0.045 * 0.045 {
-                        visited.insert(next); queue.append(next)
+            let key = Self.cell(points[id], size: cellSize)
+            for z in -1...1 { for y in -1...1 { for x in -1...1 {
+                    let neighborKey = key &+ SIMD3(Int32(x), Int32(y), Int32(z))
+                    guard let pending = remainingCells.removeValue(forKey: neighborKey) else { continue }
+                    var rest: [Int] = []
+                    for next in pending where !visited.contains(next) && !structural.contains(next) {
+                        if simd_distance_squared(points[next], points[id]) <= connectionDistance * connectionDistance {
+                            visited.insert(next); queue.append(next)
+                        } else { rest.append(next) }
                     }
-                } } }
-            } else {
-                for vertex in vertices {
-                    for next in incidents[welded[vertex]] where !visited.contains(next) {
-                        visited.insert(next); queue.append(next)
-                    }
-                }
-            }
+                    if !rest.isEmpty { remainingCells[neighborKey] = rest }
+            } } }
         }
         guard !selected.isEmpty else { throw ObjectSelectionError.emptySelection }
         return Result(selection: try identifiedSelection(selected), touchesLimit: clipped)
@@ -217,7 +280,8 @@ final class ObjectSelectionIndex {
         guard Self.finite(p), radius.isFinite, (0.005...0.5).contains(radius) else { throw AutomaticMeasurementError.invalidGeometry }
         if let selection { try validate(selection) }
         var ids = Set(selection?.ids ?? [])
-        for i in 0..<(triangles.isEmpty ? points.count : triangles.count) {
+        let candidates = triangles.isEmpty ? Array(points.indices) : proximity.nearby(p, radius: radius)
+        for i in candidates {
             let q = triangles.isEmpty ? points[i] : closestPoint(p, triangle: i)
             if simd_distance_squared(q, p) <= radius * radius {
                 if adding { ids.insert(i) } else { ids.remove(i) }
@@ -240,10 +304,11 @@ final class ObjectSelectionIndex {
         return result
     }
 
-    func region(selection: AutomaticRegionSelection, front: SIMD3<Float>, partial: Bool, name: String = "Object") throws -> AutomaticMeasuredRegion {
+    func region(selection: AutomaticRegionSelection, front: SIMD3<Float>, partial: Bool, name: String = "Object", automaticOrientation: Bool = false) throws -> AutomaticMeasuredRegion {
         try validate(selection)
         let vertices = Set(selection.ids.flatMap(vertexIDs)).sorted().map { points[$0] }
-        let bounds = try UprightMeasurementBounds.fit(points: vertices, front: front)
+        let direction = automaticOrientation ? ObjectFootprint.front(points: vertices, preferred: front) : front
+        let bounds = try UprightMeasurementBounds.fit(points: vertices, front: direction)
         let dimensions = AutomaticDimension.Axis.allCases.enumerated().map { i, axis in
             let span = bounds.size[i]
             // Thin/noisy front-only capture is not a usable physical depth.
@@ -251,8 +316,11 @@ final class ObjectSelectionIndex {
             return AutomaticDimension(axis: axis, metres: unavailable ? nil : span,
                 evidence: unavailable ? .unavailable : (partial || triangles.isEmpty ? .partial : .observedSpan))
         }
-        let result = AutomaticMeasuredRegion(name: name, kind: .object, bounds: bounds,
+        var result = AutomaticMeasuredRegion(name: name, kind: .object, bounds: bounds,
                                               dimensions: dimensions, selection: selection)
+        if let wall = wallDepth(for: result) {
+            result.wallProjection = AutomaticMeasuredRegion.WallProjection(metres: wall.metres, wallPoint: wall.wallPoint)
+        }
         try result.validate(); return result
     }
 
@@ -268,13 +336,13 @@ final class ObjectSelectionIndex {
     func wallDepth(for region: AutomaticMeasuredRegion) -> WallDepthCandidate? {
         let bounds = region.bounds, frontFace = bounds.center + bounds.front * bounds.size.z * 0.5
         var candidate: WallDepthCandidate?
-        for id in structural where id < normals.count && abs(normals[id].y) < 0.2 && abs(simd_dot(normals[id], bounds.front)) > 0.97 {
-            let point = position(id)
-            let depth = simd_dot(frontFace - point, bounds.front)
+        for plane in supportPlanes where plane.kind == .wall && abs(simd_dot(plane.normal, bounds.front)) > 0.97 {
+            let depth = plane.distance(frontFace) / simd_dot(plane.normal, bounds.front)
             guard depth > bounds.size.z + 0.01, depth <= bounds.size.z + 1.5 else { continue }
             let projected = frontFace - bounds.front * depth
-            let wallPoint = closestPoint(projected, triangle: id)
-            guard simd_distance(wallPoint, projected) < 0.15 else { continue }
+            guard plane.containsProjection(projected),
+                  plane.containsProjection(projected + bounds.right * bounds.size.x * 0.5),
+                  plane.containsProjection(projected - bounds.right * bounds.size.x * 0.5) else { continue }
             if candidate == nil || depth < candidate!.metres { candidate = WallDepthCandidate(metres: depth, wallPoint: projected) }
         }
         return candidate
@@ -284,6 +352,7 @@ final class ObjectSelectionIndex {
         guard confirmed else { throw AutomaticMeasurementError.unconfirmedWall }
         guard let candidate = wallDepth(for: region) else { throw AutomaticMeasurementError.invalidGeometry }
         var result = region
+        result.wallProjection = nil
         let extensionDepth = candidate.metres - result.bounds.size.z
         result.bounds.center -= result.bounds.front * extensionDepth * 0.5
         result.bounds.size.z = candidate.metres
@@ -305,22 +374,6 @@ final class ObjectSelectionIndex {
 
     // Ericson's closest-point triangle regions; handles zero-area faces too.
     private func closestPoint(_ p: SIMD3<Float>, triangle id: Int) -> SIMD3<Float> {
-        let t = triangles[id], a = points[Int(t.x)], b = points[Int(t.y)], c = points[Int(t.z)]
-        let ab = b - a, ac = c - a, ap = p - a
-        let d1 = simd_dot(ab, ap), d2 = simd_dot(ac, ap)
-        if d1 <= 0 && d2 <= 0 { return a }
-        let bp = p - b, d3 = simd_dot(ab, bp), d4 = simd_dot(ac, bp)
-        if d3 >= 0 && d4 <= d3 { return b }
-        let vc = d1 * d4 - d3 * d2
-        if vc <= 0 && d1 >= 0 && d3 <= 0 { return a + ab * (d1 / max(d1 - d3, 1e-12)) }
-        let cp = p - c, d5 = simd_dot(ab, cp), d6 = simd_dot(ac, cp)
-        if d6 >= 0 && d5 <= d6 { return c }
-        let vb = d5 * d2 - d1 * d6
-        if vb <= 0 && d2 >= 0 && d6 <= 0 { return a + ac * (d2 / max(d2 - d6, 1e-12)) }
-        let va = d3 * d6 - d5 * d4
-        if va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0 { return b + (c - b) * ((d4 - d3) / max((d4 - d3) + (d5 - d6), 1e-12)) }
-        let sum = va + vb + vc
-        guard abs(sum) > 1e-12 else { return a }
-        return a + ab * (vb / sum) + ac * (vc / sum)
+        proximity.closest(p, triangle: id)
     }
 }

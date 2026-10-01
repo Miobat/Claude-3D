@@ -20,7 +20,9 @@ enum DesignPreview {
         let store = StorageManager(directory: root)
         guard !empty else { return store }
         if let site = store.createProject(name: "Coastal path · Demo") {
-            _ = try? store.saveScan(meshData: screen == "object" ? objectMesh() : terrain(), name: screen == "object" ? "Cabinet · Demo" : "Rocky shoreline", toProject: site, metadata: {
+            let object = screen?.hasPrefix("object") == true
+            let mesh = screen == "object-wall" ? wallObjectMesh() : (object ? objectMesh() : terrain())
+            _ = try? store.saveScan(meshData: mesh, name: object ? "Cabinet · Demo" : "Rocky shoreline", toProject: site, metadata: {
                 if screen == "quality" {
                     $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
                         atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
@@ -54,8 +56,8 @@ enum DesignPreview {
                         faces: faces, colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
     }
 
-    static func objectMesh() -> MeshData {
-        let bounds = UprightMeasurementBounds(center: SIMD3(0, 0.65, 0), right: SIMD3(1, 0, 0), front: SIMD3(0, 0, 1), size: SIMD3(1.2, 1.3, 0.6))
+    static func objectMesh(width: Float = 1.2) -> MeshData {
+        let bounds = UprightMeasurementBounds(center: SIMD3(0, 0.65, 0), right: SIMD3(1, 0, 0), front: SIMD3(0, 0, 1), size: SIMD3(width, 1.3, 0.6))
         let points = bounds.corners() + [SIMD3<Float>(-2, 0, -2), SIMD3(2, 0, -2), SIMD3(2, 0, 2), SIMD3(-2, 0, 2)]
         let faces: [[UInt32]] = [[4, 5, 7], [4, 7, 6], [0, 2, 3], [0, 3, 1], [0, 4, 6], [0, 6, 2],
                                 [1, 3, 7], [1, 7, 5], [2, 6, 7], [2, 7, 3], [0, 1, 5], [0, 5, 4], [8, 10, 9], [8, 11, 10]]
@@ -63,6 +65,21 @@ enum DesignPreview {
         return MeshProcessor.recalculateNormals(MeshData(vertices: points, normals: [], faces: faces,
             colors: (0..<12).map { $0 < 8 ? SIMD4<Float>(0.62, 0.49, 0.34, 1) : SIMD4<Float>(0.25, 0.28, 0.3, 1) },
             boundingBoxMin: extents.0, boundingBoxMax: extents.1, faceClassifications: Data(Array(repeating: UInt8(0), count: 12) + [2, 2])))
+    }
+
+    static func wallObjectMesh() -> MeshData {
+        var points: [SIMD3<Float>] = [], faces: [[UInt32]] = []
+        func quad(_ x0: Float, _ x1: Float, _ y0: Float, _ y1: Float, _ z: Float) {
+            let i = UInt32(points.count)
+            points += [SIMD3(x0,y0,z), SIMD3(x1,y0,z), SIMD3(x1,y1,z), SIMD3(x0,y1,z)]
+            faces += [[i,i+1,i+2], [i,i+2,i+3]]
+        }
+        quad(-0.6,0.6,1,2,0.6)
+        quad(-2,-0.8,0,3,0); quad(0.8,2,0,3,0); quad(-0.8,0.8,0,0.7,0); quad(-0.8,0.8,2.3,3,0)
+        let bounds = MeshData.bounds(of: points)
+        return MeshProcessor.recalculateNormals(MeshData(vertices: points, normals: [], faces: faces,
+            colors: points.indices.map { $0 < 4 ? SIMD4<Float>(0.62,0.49,0.34,1) : SIMD4<Float>(0.25,0.28,0.3,1) },
+            boundingBoxMin: bounds.0, boundingBoxMax: bounds.1))
     }
 
     /// Exercises the production mesh pipeline and files in an isolated library.
@@ -304,7 +321,7 @@ enum DesignPreview {
         }
         do {
             guard let project = store.createProject(name: "Object UI fixture") else { check(false, "Object fixture project"); finish(); return }
-            let mesh = objectMesh()
+            let mesh = objectMesh(width: 3.8)
             let scan = try store.saveScan(meshData: mesh, name: "Cabinet", toProject: project, metadata: { $0.recordCaptureFrame(matrix_identity_float4x4) })
             let node = MeshProcessor.createSceneKitNode(from: mesh)
             let sources = ModelGeometryIndex.sources(in: node)
@@ -312,7 +329,7 @@ enum DesignPreview {
             check(geometry.points.count == mesh.vertices.count && geometry.triangles.count == mesh.faces.count,
                   "Native Object extraction retains exact metric vertex and face order")
             let index = try ObjectSelectionIndex(points: geometry.points, triangles: geometry.triangles, labels: mesh.faceClassifications)
-            let selection = try index.grow(from: 0, radius: 2).selection
+            let selection = try index.grow(from: 0).selection
             let highlight = try ObjectSceneGeometry.highlight(index: index, selection: selection)
             check(highlight.name == "objectSelection" && highlight.geometry?.elements.first?.primitiveCount == selection.ids.count &&
                   !selection.ids.contains(12) && !selection.ids.contains(13),
@@ -339,11 +356,11 @@ enum DesignPreview {
                 check(session.ready && session.writable, "Object session prepares verified model and writable storage")
                 guard session.ready else { finish(); return }
                 session.active = true
-                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(1, 0, 0), cameraFront: SIMD3(0, 0, 1))
                 idle {
                     guard let draft = session.draft else { check(false, "Object tap produces a draft"); finish(); return }
-                    check(abs(draft.bounds.size.x - 1.2) < 0.0001 && abs(draft.bounds.size.y - 1.3) < 0.0001 && abs(draft.bounds.size.z - 0.6) < 0.0001,
-                          "Object tap selects cabinet with correct overall extents")
+                    check(abs(draft.bounds.size.x - 3.8) < 0.0001 && abs(draft.bounds.size.y - 1.3) < 0.0001 && abs(draft.bounds.size.z - 0.6) < 0.0001,
+                          "Object tap finds the entire 3.8 m cabinet and ignores a misleading local face normal")
                     session.save()
                     idle {
                         do {
@@ -355,7 +372,7 @@ enum DesignPreview {
                                 check(session.draft == draft && !session.dirty, "Reopening restores reviewed bounds and exact object selection")
                                 session.rotateFront()
                                 idle {
-                                    check(session.draft.map { abs($0.bounds.size.x - 0.6) < 0.0001 && abs($0.bounds.size.z - 1.2) < 0.0001 } ?? false,
+                                    check(session.draft.map { abs($0.bounds.size.x - 0.6) < 0.0001 && abs($0.bounds.size.z - 3.8) < 0.0001 } ?? false,
                                           "Turning object front swaps width and depth in the local frame")
                                     session.undo()
                                     idle {
@@ -676,7 +693,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "object", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "object", "object-wall", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
