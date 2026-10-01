@@ -50,15 +50,31 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
         if (z > 0 && all(previousUV >= 0) && all(previousUV <= 1)) {
             float committedDepth = accepted.sample(nearestSampler, previousUV).r;
             if (committedDepth > 0 && abs(committedDepth - z) < 0.035 + z * 0.012) {
-                float3 grid = abs(fract(world.xyz * 10.0 + 0.5) - 0.5);
-                float line = 1.0 - smoothstep(0.012, 0.038, min(grid.x, min(grid.y, grid.z)));
                 float edge = smoothstep(0.0, 0.018, u.parameters.x - distance);
                 float photoDepth = photographed.sample(nearestSampler, previousUV).r;
-                bool needsPhoto = u.parameters.y > 1.5 &&
-                    !(photoDepth > 0 && abs(photoDepth - z) < 0.035 + z * 0.012);
-                float3 ink = needsPhoto ? mix(float3(0.10, 0.42, 1.0), float3(0.4, 0.7, 1.0), line)
-                    : mix(float3(0.04, 0.84, 0.66), float3(0.45, 1.0, 0.86), line);
-                color.rgb = mix(color.rgb, ink, (0.40 + line * 0.16) * edge);
+                bool photoMode = u.parameters.y > 1.5;
+                bool hasPhoto = photoDepth > 0 && abs(photoDepth - z) < 0.035 + z * 0.012;
+                // Screen-space symbols sit ON the reprojected surface mask.
+                // Unlike the old 3D grid they cannot shimmer from sub-pixel
+                // world lines or flood a flat wall when one coordinate is fixed.
+                float scale = max(1.0, min(size.x, size.y) / 390.0);
+                float2 screen = (float2(gid) + 0.5) / scale;
+                float2 cell = fract(screen / 16.0) * 16.0 - 8.0;
+                float dotMark = 1.0 - smoothstep(1.1, 2.1, length(cell));
+                float stripe = abs(fract((screen.x + screen.y) / 16.0) - 0.5) * 16.0;
+                float hatch = 1.0 - smoothstep(0.65, 1.65, stripe);
+                float3 ink = float3(0.12, 0.52, 1.0);
+                float alpha = 0.24;
+                if (photoMode && hasPhoto) {
+                    ink = float3(0.10, 0.94, 0.67); alpha = 0.25 + dotMark * 0.5;
+                } else if (photoMode) {
+                    // Combined keeps shape blue, with amber hatching for the
+                    // missing photo. Photos view makes the same need explicit.
+                    ink = mix(u.parameters.y > 2.5 ? float3(0.72, 0.42, 0.06) : ink,
+                              float3(1.0, 0.68, 0.16), hatch);
+                    alpha = (u.parameters.y > 2.5 ? 0.25 : 0.18) + hatch * 0.4;
+                }
+                color.rgb = mix(color.rgb, ink, alpha * edge);
             }
         }
     }

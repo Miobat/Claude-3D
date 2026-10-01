@@ -50,7 +50,7 @@ enum ObjectSelectionError: LocalizedError {
         switch self {
         case .tooLarge: return "This geometry exceeds the Object tool's safe working limit. Use a smaller scan or manual measurement; no geometry was silently discarded."
         case .noSurface: return "Tap a scanned surface on the object."
-        case .structuralSurface: return "That surface looks like a floor, ceiling or large wall. Tap the object itself, or use Add to include it deliberately."
+        case .structuralSurface: return "The scan does not separate this surface from the wall or floor. Try a captured side or edge, or paint with Add. Missing object geometry cannot be measured automatically."
         case .emptySelection: return "The selection is empty. Tap an object to start again."
         case .cancelled: return "Selection cancelled."
         }
@@ -169,7 +169,7 @@ final class ObjectSelectionIndex {
                     // coplanar background face stops growing at that edge.
                     let distances = [abs(plane.distance(a)), abs(plane.distance(b)), abs(plane.distance(c))]
                     if abs(plane.distance(center)) <= plane.tolerance &&
-                        distances.max()! <= plane.tolerance * 2 && abs(simd_dot(plane.normal, faceNormals[id])) > 0.5 {
+                        distances.max()! <= plane.tolerance * 1.5 && abs(simd_dot(plane.normal, faceNormals[id])) > 0.5 {
                         rejected.insert(id); break
                     }
                 }
@@ -196,14 +196,42 @@ final class ObjectSelectionIndex {
         }
         let topology = triangles.indices.map { rejected.contains($0) ? -1 : root($0) }
         let tree = try ObjectTriangleProximity(points: points, triangles: triangles, components: topology, cancelled: cancelled)
+        // A longer bridge is allowed only off the END of a thin, elongated
+        // component (e.g. a broken lamp stem). It never joins through a wall,
+        // or laterally across the gap between two bulky neighboring objects.
+        var lows: [Int: SIMD3<Float>] = [:], highs: [Int: SIMD3<Float>] = [:]
+        for (id, t) in triangles.enumerated() where topology[id] >= 0 {
+            let component = topology[id]
+            for v in [t.x, t.y, t.z] {
+                let p = points[Int(v)]
+                lows[component] = simd_min(lows[component] ?? p, p)
+                highs[component] = simd_max(highs[component] ?? p, p)
+            }
+        }
+        func continuesThinPart(_ component: Int, toward q: SIMD3<Float>) -> Bool {
+            guard let lo = lows[component], let hi = highs[component] else { return false }
+            let size = hi - lo, axis = (0..<3).max { size[$0] < size[$1] }!
+            let u = (axis + 1) % 3, v = (axis + 2) % 3
+            guard size[axis] >= 0.12, max(size[u], size[v]) <= 0.065,
+                  size[axis] > 3 * max(size[u], size[v]) else { return false }
+            let centre = (hi + lo) * 0.5
+            return (q[axis] < lo[axis] || q[axis] > hi[axis]) &&
+                abs(q[u] - centre[u]) <= max(0.015, size[u] * 0.75) &&
+                abs(q[v] - centre[v]) <= max(0.015, size[v] * 0.75)
+        }
         var checked = Set<Int>()
         if !triangles.isEmpty {
             for vertex in points.indices where checked.insert(remap[vertex]).inserted {
                 if vertex % 1024 == 0, cancelled() { throw ObjectSelectionError.cancelled }
                 guard let face = incident[remap[vertex]].first(where: { !rejected.contains($0) }) else { continue }
-                for other in tree.nearby(points[vertex], radius: connectionDistance, excludingComponent: topology[face])
+                for other in tree.nearby(points[vertex], radius: 0.06, excludingComponent: topology[face])
                     where !rejected.contains(other) {
-                    join(face, other, gap: simd_distance_squared(points[vertex], tree.closest(points[vertex], triangle: other)) > 0.006 * 0.006)
+                    let q = tree.closest(points[vertex], triangle: other)
+                    let distance = simd_distance_squared(points[vertex], q)
+                    guard distance <= connectionDistance * connectionDistance ||
+                        continuesThinPart(topology[face], toward: q) ||
+                        continuesThinPart(topology[other], toward: points[vertex]) else { continue }
+                    join(face, other, gap: distance > 0.006 * 0.006)
                 }
             }
         }
@@ -288,6 +316,12 @@ final class ObjectSelectionIndex {
             }
         }
         return ids.isEmpty ? nil : try identifiedSelection(Array(ids))
+    }
+
+    func addingPart(_ part: AutomaticRegionSelection, to selection: AutomaticRegionSelection?) throws -> AutomaticRegionSelection {
+        try validate(part)
+        if let selection { try validate(selection) }
+        return try identifiedSelection(Array(Set((selection?.ids ?? []) + part.ids)))
     }
 
     func validate(_ selection: AutomaticRegionSelection) throws {

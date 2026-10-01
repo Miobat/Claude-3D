@@ -30,6 +30,7 @@ enum ObjectSupportSurfaces {
         let normal: SIMD3<Float>
         let weight: Float
         var floorHint: Bool = false
+        var wallHint: Bool = false
         var center: SIMD3<Float> { (a + b + c) / 3 }
     }
     private struct Fit {
@@ -38,6 +39,7 @@ enum ObjectSupportSurfaces {
         let low: SIMD2<Float>, high: SIMD2<Float>
         let area: Float
         let floorFraction: Float
+        let wallFraction: Float
         var horizontal: Bool { abs(normal.y) > 0.94 }
         var height: Float { offset / normal.y }
     }
@@ -80,7 +82,8 @@ enum ObjectSupportSurfaces {
                 let t = triangles[i], a = points[Int(t.x)], b = points[Int(t.y)], c = points[Int(t.z)]
                 let area = simd_length(simd_cross(b - a, c - a)) * 0.5
                 samples.append(Sample(a: a, b: b, c: c, normal: normals[i], weight: area * Float(forced.contains(i) ? 1 : step),
-                                      floorHint: labels.map { $0[$0.startIndex + i] == SurfaceCategory.floor.rawValue } ?? false))
+                                      floorHint: labels.map { $0[$0.startIndex + i] == SurfaceCategory.floor.rawValue } ?? false,
+                                      wallHint: labels.map { $0[$0.startIndex + i] == SurfaceCategory.wall.rawValue } ?? false))
             }
         }
         guard !samples.isEmpty else { return [] }
@@ -99,7 +102,7 @@ enum ObjectSupportSurfaces {
                 let n = canonical(n)
                 guard abs(n.y) > 0.94 || abs(n.y) < 0.18 else { return }
                 let d = simd_dot(n, p)
-                if !candidates.contains(where: { simd_dot($0.0, n) > 0.999 && abs($0.1 - d) < 0.012 }) {
+                if !candidates.contains(where: { simd_dot($0.0, n) > 0.999 && abs($0.1 - d) < 0.004 }) {
                     candidates.append((n, d))
                 }
             }
@@ -126,16 +129,21 @@ enum ObjectSupportSurfaces {
             for (j, candidate) in candidates.enumerated() {
                 if j % 16 == 0, cancelled() { throw ObjectSelectionError.cancelled }
                 var score: Float = 0
-                for id in remaining where supports(samples[id], candidate.0, candidate.1, 0.025) { score += samples[id].weight }
+                // A thin TV can stand only 15–25 mm off a wall. A 25 mm
+                // uniform inlier band merged the two planes before selection.
+                for id in remaining where supports(samples[id], candidate.0, candidate.1, cloud ? 0.018 : 0.012) {
+                    let residual = abs(simd_dot(samples[id].center, candidate.0) - candidate.1)
+                    score += samples[id].weight * max(0.1, 1 - residual / 0.025)
+                }
                 if score > bestScore { best = candidate; bestScore = score }
             }
             guard let best else { break }
-            var inliers = remaining.filter { supports(samples[$0], best.0, best.1, 0.025) }
+            var inliers = remaining.filter { supports(samples[$0], best.0, best.1, cloud ? 0.018 : 0.012) }
             guard inliers.count >= (cloud ? 12 : 1) else { break }
             let refined = fit(samples: samples, ids: inliers, fallback: best.0)
             let n = canonical(refined.0), d = simd_dot(n, refined.1)
             let residuals = inliers.map { abs(simd_dot(samples[$0].center, n) - d) }.sorted()
-            let tolerance = min(Float(0.025), max(Float(0.012), residuals[residuals.count * 4 / 5] * 2))
+            let tolerance = min(Float(0.02), max(Float(0.006), residuals[residuals.count * 4 / 5] * 2.5))
             inliers = remaining.filter { supports(samples[$0], n, d, tolerance) }
             let used = Set(inliers)
             remaining.removeAll { used.contains($0) }
@@ -143,10 +151,11 @@ enum ObjectSupportSurfaces {
             let u = abs(n.y) > 0.94 ? simd_normalize(simd_cross(SIMD3<Float>(0, 0, 1), n)) : simd_normalize(simd_cross(SIMD3<Float>(0, 1, 0), n))
             let v = simd_cross(n, u)
             var low = SIMD2<Float>(repeating: .greatestFiniteMagnitude), high = -low, area: Float = 0
-            var tiles = Set<SIMD2<Int32>>(), floorWeight: Float = 0
+            var tiles = Set<SIMD2<Int32>>(), floorWeight: Float = 0, wallWeight: Float = 0
             for id in inliers {
                 let s = samples[id]; area += s.weight
                 if s.floorHint { floorWeight += s.weight }
+                if s.wallHint { wallWeight += s.weight }
                 for p in [s.a, s.b, s.c] {
                     let q = SIMD2(simd_dot(p, u), simd_dot(p, v))
                     low = simd_min(low, q); high = simd_max(high, q)
@@ -155,7 +164,7 @@ enum ObjectSupportSurfaces {
             }
             if cloud { area = Float(tiles.count) * 0.15 * 0.15 }
             fits.append(Fit(normal: n, offset: d, tolerance: tolerance, u: u, v: v, low: low, high: high, area: area,
-                            floorFraction: floorWeight / max(area, 0.001)))
+                            floorFraction: floorWeight / max(area, 0.001), wallFraction: wallWeight / max(area, 0.001)))
         }
         // A broad lower horizontal plane is the floor, not the lowest stray
         // vertex. Furniture tops above it do not become support boundaries.
@@ -172,7 +181,30 @@ enum ObjectSupportSurfaces {
             let kind: ObjectSupportPlane.Kind
             if let floor, f.horizontal, abs(f.height - floor.height) < 0.06 { kind = .floor }
             else if let floor, f.horizontal, f.height - floor.height > 2.1, f.area > 4 { kind = .ceiling }
-            else if abs(f.normal.y) < 0.18, f.area > 4, size.x > 2.5, size.y > 2 { kind = .wall }
+            else if abs(f.normal.y) < 0.18,
+                    (f.area > 3 && size.x > 2.5 && size.y > 1.5) ||
+                    (f.wallFraction > 0.65 && f.area > 0.6 && size.x > 1.2 && size.y > 0.6) {
+                // ARKit sometimes calls a TV front "wall" too. A smaller
+                // parallel patch just off a larger wall is a projection, not
+                // another structural boundary that should swallow the object.
+                let projected = fits.contains { other in
+                    let centre = f.normal * f.offset + f.u * ((f.low.x + f.high.x) * 0.5) + f.v * ((f.low.y + f.high.y) * 0.5)
+                    let distance = abs(simd_dot(centre, other.normal) - other.offset)
+                    guard abs(simd_dot(f.normal, other.normal)) > 0.995, other.area > f.area * 1.5,
+                          distance > 0.008, distance < 0.25 else { return false }
+                    // Compare in the other fit's basis. Canonical normals can
+                    // change sign around 45°; raw u/v bounds are not comparable.
+                    return [SIMD2(f.low.x,f.low.y), SIMD2(f.high.x,f.low.y),
+                            SIMD2(f.low.x,f.high.y), SIMD2(f.high.x,f.high.y)].allSatisfy { corner in
+                        let p = f.normal * f.offset + f.u * corner.x + f.v * corner.y
+                        let q = SIMD2(simd_dot(p, other.u), simd_dot(p, other.v))
+                        return q.x >= other.low.x - 0.02 && q.x <= other.high.x + 0.02 &&
+                            q.y >= other.low.y - 0.02 && q.y <= other.high.y + 0.02
+                    }
+                }
+                if projected { continue }
+                kind = .wall
+            }
             else { continue }
             result.append(ObjectSupportPlane(kind: kind, normal: f.normal, offset: f.offset, tolerance: f.tolerance,
                                              u: f.u, v: f.v, low: f.low, high: f.high))

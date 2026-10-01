@@ -214,6 +214,9 @@ class TextureMapper {
             let depth = TextureMapper.copyDepth(depthBuffer)
             let quality = TextureFrameQuality.measure(luma: Self.sampleLuma(pixelBuffer), blurPixels: Float(blurPixels))
             let storedSharp = sharp && quality.permitsSharpCoverage
+            let checkedPhotoDepth = storedSharp ? photoDepth.map { sensor in
+                sensor.restrictingPhotoCoverage(to: Self.photoPatchMask(pixelBuffer, width: sensor.width, height: sensor.height))
+            } : nil
             let written = self.writeJPEG(pixelBuffer, maxWidth: maxWidth, to: url)
             if written {
                 let frame = CapturedFrame(id: id, imageURL: url, transform: transform, intrinsics: intrinsics,
@@ -249,7 +252,7 @@ class TextureMapper {
                         self.lastKeptTime = now
                     }
                     onCountChanged?(count, storedSharp)
-                    onStored?(id, photoDepth, retainedPhotos)
+                    onStored?(id, checkedPhotoDepth, retainedPhotos)
                 }
             }
         }
@@ -274,6 +277,26 @@ class TextureMapper {
         }
         values.sort()
         return values.isEmpty ? 0.5 : Double(values[values.count / 4])
+    }
+
+    private static func photoPatchMask(_ buffer: CVPixelBuffer, width: Int, height: Int) -> [UInt8] {
+        guard CVPixelBufferGetPlaneCount(buffer) > 0 else { return [] }
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return [] }
+        let w = CVPixelBufferGetWidthOfPlane(buffer, 0), h = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let videoRange = CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        var luma = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let sy = min(h - 1, Int((Float(y) + 0.5) * Float(h) / Float(height)))
+            let row = base.advanced(by: sy * stride).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<width {
+                let sx = min(w - 1, Int((Float(x) + 0.5) * Float(w) / Float(width)))
+                luma[y * width + x] = videoRange ? UInt8(clamping: (Int(row[sx]) - 16) * 255 / 219) : row[sx]
+            }
+        }
+        return PhotoPatchQuality.mask(luma: luma, width: width, height: height)
     }
 
     private static func sampleLuma(_ buffer: CVPixelBuffer) -> [UInt8] {

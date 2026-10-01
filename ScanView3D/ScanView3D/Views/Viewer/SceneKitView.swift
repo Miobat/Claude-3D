@@ -479,7 +479,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         func updateObjectGestures() {
-            let editing = parent.objects.active && parent.objects.mode != .select
+            let editing = parent.objects.active && parent.objects.mode.isPainting
             cameraController?.selectionEditing = editing
             objectPaint?.isEnabled = editing
         }
@@ -493,7 +493,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         func objectPick(at location: CGPoint) {
-            guard parent.objects.active, let view = sceneView, let hit = surfaceHit(at: location, in: view) else { return }
+            guard parent.objects.active, let view = sceneView else { return }
+            guard let hit = surfaceHit(at: location, in: view) else { parent.objects.missedPick(); return }
             let m = view.pointOfView?.simdWorldTransform ?? matrix_identity_float4x4
             let normal = parent.objects.mode == .select ? surfacePlane(at: hit.point, fallbackNormal: hit.normal).normal : hit.normal
             parent.objects.pick(point: hit.point, normal: normal, cameraFront: SIMD3(m.columns.2.x, 0, m.columns.2.z))

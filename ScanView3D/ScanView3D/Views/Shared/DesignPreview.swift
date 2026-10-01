@@ -22,10 +22,15 @@ enum DesignPreview {
         if let site = store.createProject(name: "Coastal path · Demo") {
             let object = screen?.hasPrefix("object") == true
             let mesh = screen == "object-wall" ? wallObjectMesh() : (object ? objectMesh() : terrain())
-            _ = try? store.saveScan(meshData: mesh, name: object ? "Cabinet · Demo" : "Rocky shoreline", toProject: site, metadata: {
+            _ = try? store.saveScan(meshData: mesh, name: object ? "Cabinet · Demo" : "Rocky shoreline", toProject: site,
+                originalMesh: screen == "retention" ? mesh : nil, metadata: {
                 if screen == "quality" {
                     $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
                         atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
+                }
+                if screen == "retention" {
+                    $0.meshRetention = MeshRetentionReport(cleanup: "Preserve", captured: mesh.retentionStage,
+                        cleaned: mesh.retentionStage, saved: mesh.retentionStage)
                 }
             })
             _ = try? store.saveScan(meshData: terrain(), name: "North slope", toProject: site, format: .ply)
@@ -300,6 +305,7 @@ enum DesignPreview {
 
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
+        checkMeshRetention(check)
         checkTextureQuality(check)
         checkObjects(view: view, coordinator: coordinator, check: check) {
             let report: [String: Any] = ["checks": count, "failures": failures]
@@ -313,6 +319,8 @@ enum DesignPreview {
                                      check: @escaping (Bool, String) -> Void, done: @escaping () -> Void) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("object-ui-check-\(UUID().uuidString)")
         let store = StorageManager(directory: root), session = ObjectMeasurementSession()
+        var renderedRegion: AutomaticMeasuredRegion?, renderedHighlight: SCNNode?
+        session.render = { renderedRegion = $0; renderedHighlight = $1 }
         func finish() { session.detach(); try? FileManager.default.removeItem(at: root); done() }
         func idle(_ attempt: Int = 0, then: @escaping () -> Void) {
             if !session.busy { then(); return }
@@ -339,6 +347,9 @@ enum DesignPreview {
                   "Object paint mode replaces only one-finger orbit")
             check(view.gestureRecognizers?.contains { ($0 as? UIPanGestureRecognizer)?.minimumNumberOfTouches == 2 && $0.isEnabled } ?? false,
                   "Object paint keeps two-finger navigation available")
+            coordinator.parent.objects.mode = .part; coordinator.updateObjectGestures()
+            check(coordinator.objectPaint?.isEnabled == false && coordinator.cameraController?.selectionEditing == false,
+                  "Add part uses taps and keeps one-finger orbit available")
             coordinator.parent.objects.active = false; coordinator.parent.objects.mode = .select; coordinator.updateObjectGestures()
             // Actual hit under the overlay must resolve to model geometry.
             let old = view.pointOfView?.simdTransform
@@ -388,7 +399,35 @@ enum DesignPreview {
                                                 session.undo()
                                                 idle {
                                                     check(session.draft?.selection == draft.selection, "Undo restores exact surfaces after both paint samples")
-                                                    finishEdits()
+                                                    session.mode = .select
+                                                    session.pick(point: SIMD3(1.5,0,1.5), normal: SIMD3(0,1,0), cameraFront: SIMD3(0,0,1))
+                                                    idle {
+                                                        check(session.draft == nil && session.wallDepth == nil && !session.dirty && session.canUndo,
+                                                              "Rejected object tap clears stale box and Save state but keeps Undo")
+                                                        check(renderedRegion == nil && renderedHighlight == nil, "Rejected tap clears the actual renderer overlay")
+                                                        session.undo()
+                                                        idle {
+                                                            check(session.draft?.selection == draft.selection, "Undo recovers the prior selection after a rejected tap")
+                                                            session.mode = .part
+                                                            session.pick(point: SIMD3(0,0.65,0.3), normal: SIMD3(0,0,1), cameraFront: SIMD3(0,0,1))
+                                                            idle {
+                                                                check(session.draft?.selection == draft.selection && session.draft?.dimensions.first?.evidence == .partial,
+                                                                      "Add part session unions exact IDs and marks review as Partial")
+                                                                session.undo()
+                                                                idle {
+                                                                    session.mode = .select; session.missedPick()
+                                                                    idle {
+                                                                        check(session.draft == nil && renderedHighlight == nil, "Tap on missing geometry clears stale measurement")
+                                                                        session.undo()
+                                                                        idle {
+                                                                            check(session.draft?.selection == draft.selection, "Missed-tap Undo preserves source IDs")
+                                                                            finishEdits()
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -573,7 +612,8 @@ enum DesignPreview {
         func unchanged(_ i: Int) -> Bool {
             simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
         }
-        check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
+        check(result[8 * 16 + 1].z > result[8 * 16 + 1].y && result[8 * 16 + 1].y > reference[8 * 16 + 1].y + 0.05,
+              "Committed in-range surface gets visible blue shape coverage")
         let outside = 8 * 16 + 5
         let original = SIMD3(reference[outside].x, reference[outside].y, reference[outside].z)
         let grey = simd_dot(original, SIMD3<Float>(0.2126, 0.7152, 0.0722))
@@ -587,12 +627,12 @@ enum DesignPreview {
 
         // Fast colour mode: geometry alone is blue; only a retained, saved
         // sharp photo is allowed to turn it mint. Test the production kernel.
-        for hasPhoto in [false, true] {
+        for mode: Float in [2, 3] { for hasPhoto in [false, true] {
             guard let photo = texture(.r32Float), let cmd = queue.makeCommandBuffer(),
                   let enc = cmd.makeComputeCommandEncoder() else { check(false, "Photo coverage command"); return }
             let photoDepths = hasPhoto ? committed : [Float](repeating: 0, count: 256)
             photoDepths.withUnsafeBytes { photo.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
-            uniforms.parameters = SIMD4(1.5, 2, 16, 16)
+            uniforms.parameters = SIMD4(1.5, mode, 16, 16)
             enc.setComputePipelineState(pipeline)
             enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
             enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3); enc.setTexture(photo, index: 4)
@@ -602,9 +642,65 @@ enum DesignPreview {
             var pixels = [SIMD4<Float>](repeating: .zero, count: 256)
             pixels.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
             let p = pixels[8 * 16 + 1]
-            check(cmd.status == .completed && (hasPhoto ? simd_distance(p, result[8 * 16 + 1]) < 0.0001 : p.z > p.y && p.y < result[8 * 16 + 1].y - 0.08),
-                  "Fast coverage \(hasPhoto ? "mint with photo" : "blue without photo"): \(p)")
-        }
+            check(cmd.status == .completed && (hasPhoto ? p.y > result[8 * 16 + 1].y + 0.05 : p.y < result[8 * 16 + 1].y + 0.04),
+                  "Photo coverage mode \(mode), \(hasPhoto ? "green candidate" : "needs photo"): \(p)")
+            check(simd_distance(pixels[8 * 16 + 13], reference[8 * 16 + 13]) < 0.00001,
+                  "Photo mode \(mode) cannot mark uncaptured geometry")
+        } }
+    }
+
+    private static func checkMeshRetention(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("retention-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            var mesh = wallObjectMesh()
+            // A TV front only 18 mm off the wall, mislabelled as wall by ARKit.
+            let points = mesh.vertices.enumerated().map { i, p in i < 4 ? SIMD3(p.x, p.y, Float(0.018)) : p }
+            let bounds = MeshData.bounds(of: points)
+            mesh = MeshData(vertices: points, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                boundingBoxMin: bounds.0, boundingBoxMax: bounds.1,
+                faceClassifications: Data(repeating: SurfaceCategory.wall.rawValue, count: mesh.faceCount))
+            let coloured = mesh.replacingColors(Array(repeating: SIMD4<Float>(0.3,0.4,0.5,1), count: points.count))
+            check(coloured.faceClassifications == mesh.faceClassifications, "Camera recolouring retains floor/wall labels")
+            let preserved = MeshProcessor.postProcess(coloured, level: .quick, preservePositions: true)
+            check(preserved.vertices == mesh.vertices && preserved.faces == mesh.faces,
+                  "Preserve cleanup keeps sparse wall triangles and thin object geometry exactly")
+            let balanced = MeshProcessor.postProcess(coloured, level: .standard, preservePositions: true)
+            check(balanced.faceCount == mesh.faceCount, "Balanced cleanup no longer deletes large sparse wall components")
+            let index = try ObjectSelectionIndex(points: preserved.vertices, triangles: preserved.faces.map { SIMD3($0[0],$0[1],$0[2]) }, labels: preserved.faceClassifications)
+            check(try index.grow(from: 0).selection.ids == [0,1], "Recolour → cleanup → Object keeps thin TV separate from wall")
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Original recovery"), let destination = store.createProject(name: "Move target") else {
+                check(false, "Original fixture project creation"); return
+            }
+            let report = MeshRetentionReport(cleanup: "Preserve", captured: mesh.retentionStage, cleaned: preserved.retentionStage, saved: preserved.retentionStage)
+            let scan = try store.saveScan(meshData: preserved, name: "Thin TV", toProject: project, originalMesh: mesh) {
+                $0.meshRetention = report; $0.recordCaptureFrame(matrix_identity_float4x4); $0.latitude = 59.9
+            }
+            let reloaded = StorageManager(directory: root).projects.first { $0.id == project.id }?.scans.first
+            check(reloaded?.originalMeshSHA256 == scan.originalMeshSHA256 && reloaded?.meshRetention == report,
+                  "Original hash and retention report survive library reload")
+            let copy = try store.saveOriginalCopy(of: scan, in: project)
+            check(copy.id != scan.id && copy.faceCount == mesh.faceCount && copy.latitude == scan.latitude && copy.sceneFrame == scan.sceneFrame,
+                  "Restore creates a separate metric copy with capture reference intact")
+            check(copy.textureQuality == nil && copy.originalMeshSHA256 == nil, "Original copy does not claim a baked photo atlas or inherited measurements")
+            check(try store.loadSurfaceLabels(for: copy, in: project)?.classifications == mesh.faceClassifications,
+                  "Restored original retains semantic labels")
+            guard let duplicate = store.duplicateScan(scan, from: project, to: project) else { check(false, "Duplicate original fixture"); return }
+            check(duplicate.originalMeshSHA256 == scan.originalMeshSHA256 && duplicate.meshRetention == report,
+                  "Duplicate retains original and cleanup report")
+            check(store.moveScan(duplicate, from: project, to: destination), "Move carries original mesh to destination")
+            let movedCopy = try store.saveOriginalCopy(of: duplicate, in: destination)
+            check(movedCopy.faceCount == mesh.faceCount, "Moved original remains restorable")
+            let originalURL = store.getScanFileURL(scan: duplicate, project: destination).deletingLastPathComponent()
+                .appendingPathComponent((duplicate.fileName as NSString).deletingPathExtension + "_original.mesh")
+            try Data("corrupt".utf8).write(to: originalURL, options: .atomic)
+            let count = store.projects.reduce(0) { $0 + $1.scans.count }
+            do { _ = try store.saveOriginalCopy(of: duplicate, in: destination); check(false, "Reject corrupt original") }
+            catch { check(store.projects.reduce(0) { $0 + $1.scans.count } == count, "Corrupt original creates no misleading copy") }
+            store.deleteScan(duplicate, from: destination)
+            check(!FileManager.default.fileExists(atPath: originalURL.path), "Deleting a scan removes its original companion")
+        } catch { check(false, "Mesh retention fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {
@@ -693,7 +789,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "object", "object-wall", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "object", "object-wall", "object-rejected", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }

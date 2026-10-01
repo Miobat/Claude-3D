@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10050 /* MeshRetention.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10050; };
 		A10049 /* ObjectSupportSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10049; };
 		A10046 /* ObjectSelectionCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10046; };
 		A10047 /* ObjectMeasurement.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10047; };
@@ -57,6 +58,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10050 /* MeshRetention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/MeshRetention.swift; sourceTree = "<group>"; };
 		B10049 /* ObjectSupportSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ObjectSupportSurfaces.swift; sourceTree = "<group>"; };
 		B10046 /* ObjectSelectionCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ObjectSelectionCore.swift; sourceTree = "<group>"; };
 		B10047 /* ObjectMeasurement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectMeasurement.swift; sourceTree = "<group>"; };
@@ -130,6 +132,7 @@
 				B10045 /* AutomaticMeasurementCore.swift */,
 				B10046 /* ObjectSelectionCore.swift */,
 				B10049 /* ObjectSupportSurfaces.swift */,
+				B10050 /* MeshRetention.swift */,
 				B10031 /* CaptureSafety.swift */,
 				B10033 /* CoordinateContract.swift */,
 				B10034 /* AlignedUSDZ.swift */,
@@ -362,6 +365,7 @@
 				A10045 /* AutomaticMeasurementCore.swift in Sources */,
 				A10046 /* ObjectSelectionCore.swift in Sources */,
 				A10049 /* ObjectSupportSurfaces.swift in Sources */,
+				A10050 /* MeshRetention.swift in Sources */,
 				A10047 /* ObjectMeasurement.swift in Sources */,
 				A10048 /* ObjectMeasurementPanel.swift in Sources */,
 			A10029 /* LocationProvider.swift in Sources */,

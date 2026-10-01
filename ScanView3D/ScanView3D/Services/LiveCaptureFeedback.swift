@@ -9,7 +9,7 @@ struct CaptureDepthFrame {
     let width: Int
     let height: Int
     let depth: [Float]
-    let confidence: [UInt8]
+    private(set) var confidence: [UInt8]
     let cameraToWorld: simd_float4x4
     let intrinsics: SIMD4<Float> // fx, fy, cx, cy in depth pixels
     let timestamp: TimeInterval
@@ -61,6 +61,12 @@ struct CaptureDepthFrame {
         let pixels = depth.indices.map { accepts($0, range: range) ? UInt8(255) : 0 }
         return PhotoRangeMask(width: width, height: height, pixels: Data(pixels), rangeMetres: range).eroded()
     }
+
+    func restrictingPhotoCoverage(to mask: [UInt8]) -> CaptureDepthFrame {
+        var result = self
+        for i in confidence.indices where mask.count != confidence.count || mask[i] == 0 { result.confidence[i] = 0 }
+        return result
+    }
 }
 
 struct AcceptedDepthFrame {
@@ -108,7 +114,7 @@ final class LiveCaptureFeedback {
 
     // Each texture is immutable after publication to the render thread.
     func update(frame: ARFrame, accepted: AcceptedDepthFrame?, viewport: CGSize,
-                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool) {
+                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool, mode: CaptureOverlayMode = .combined) {
         guard let sensor = CaptureDepthFrame(frame), let current = texture(sensor.depth, width: sensor.width, height: sensor.height) else {
             lock.lock(); state = nil; lock.unlock(); return
         }
@@ -116,6 +122,11 @@ final class LiveCaptureFeedback {
             acceptedTexture = texture(accepted.depth, width: accepted.frame.width, height: accepted.frame.height)
             photoTexture = accepted.photoDepth.flatMap { texture($0, width: accepted.frame.width, height: accepted.frame.height) }
             acceptedTime = accepted.frame.timestamp
+        }
+        if accepted == nil {
+            // Start/reset can keep the same ARSession instance. Do not project
+            // the previous scan's texture using the new camera's pose.
+            acceptedTexture = nil; photoTexture = nil; acceptedTime = -1
         }
         let previous = accepted?.frame ?? sensor
         let t = frame.displayTransform(for: orientation, viewportSize: viewport).inverted()
@@ -127,11 +138,13 @@ final class LiveCaptureFeedback {
         var reliable = false
         if case .normal = frame.camera.trackingState { reliable = true }
         let needsPhotoMask = accepted?.photoDepth != nil
-        let canShowCoverage = showCoverage && reliable && acceptedTexture != nil && (!needsPhotoMask || photoTexture != nil)
+        let coverage = mode.shaderValue(hasPhotos: needsPhotoMask,
+            hasGeometry: showCoverage && accepted != nil && acceptedTexture != nil,
+            trackingReliable: reliable, photoMaskReady: photoTexture != nil)
         let uniforms = Uniforms(cameraToWorld: sensor.cameraToWorld,
             worldToAcceptedCamera: previous.cameraToWorld.inverse, displayToImage: displayToImage,
             intrinsics: sensor.intrinsics, acceptedIntrinsics: normalizedK,
-            parameters: SIMD4(range, canShowCoverage ? (needsPhotoMask ? 2 : 1) : 0,
+            parameters: SIMD4(range, coverage,
                 Float(sensor.width), Float(sensor.height)))
         let newState = State(current: current, accepted: acceptedTexture ?? current,
                              photographed: photoTexture ?? current, uniforms: uniforms)

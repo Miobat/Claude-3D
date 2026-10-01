@@ -288,3 +288,52 @@ This is geometric segmentation, not semantic recognition of individual furniture
 Touching objects and genuinely missing surfaces may still need Add/Remove. Plane
 sampling never removes points from the final selection or dimension fit. Existing
 working limits and explicit failure behaviour are retained.
+
+## 16. Preserve surfaces, photo feedback, thin objects
+
+`codex/scan-retention-photo-feedback` starts from published `090d93d`, not main.
+Phone recordings showed High Quality cleanup discarding sparse walls; the user
+confirmed Quick gave substantially fewer holes. This change does not fill holes
+with invented geometry or relax capture range/confidence filtering.
+
+- Fast saves default to **Preserve** (the `.quick` enum case): only degenerate
+  faces are removed and normals rebuilt. No weld, component deletion or detail
+  clustering. Balanced/Strong retain physically large components even with few
+  vertices. Strong is explicitly not a scan-quality setting.
+- New Fast scans keep `<base>_original.mesh`, a packed binary MeshData before
+  cleanup but AFTER capture acceptance, transformed into the same saved frame.
+  Optional `Scan.originalMeshSHA256` verifies it; `meshRetention` records face
+  counts and physical area before cleanup, after cleanup and after thinning.
+  Info → Mesh retention can save an original as a NEW scan, with vertex colour
+  and labels, not the photo atlas/measurements. Duplicate/move/delete include
+  this companion; reconstruction replacement clears active original/report and
+  retains old files through its existing recovery list. Old scans stay readable.
+- Fast camera recolouring now uses `MeshData.replacingColors` so classifications
+  survive. Previously that constructor silently dropped the floor/wall labels.
+- Tighter robust support-plane fitting separates thin wall projections from the
+  wall; corroborated wall labels also support incomplete-height wall patches.
+  A smaller parallel face just in front of a larger wall is not itself a wall
+  boundary, even when ARKit labels it wall. This is geometry, not TV recognition.
+- Existing 2 cm gap joins remain. Up to 6 cm is allowed only at the aligned end
+  of an elongated narrow component (lamp stem); such results remain Partial.
+  Add part explicitly unions a tapped component with the current selection.
+  Paint +/− remain available. Rejected/missed Select taps clear stale boxes and
+  Save state; the old selection can be recovered with Undo.
+- Shape/Photos/Combined/Off modes replace the world grid with subtle shape tint,
+  green photo-candidate dots and amber missing-photo hatching. Symbols are stable
+  screen-space marks clipped to the existing reprojected depth evidence. Range
+  blur remains in Off. Shape is accepted depth, NOT guaranteed final triangles.
+  Starting/resetting a scan with no accepted depth clears cached textures, so
+  prior-session marks cannot flash onto the new camera view.
+- Green requires a retained written JPEG, low estimated motion blur, and local
+  exposure checks in the corresponding depth patch. It does not certify focus,
+  fine texture resolution or measurement accuracy. Plain low-texture walls are
+  not classified as blurred just for being plain. Technical HUD stats are in
+  Capture details; high-capacity/recovery/tracking warnings remain visible.
+- A10050/B10050 registers MeshRetention.swift. New pure and native regressions
+  cover thin TVs, broken lamp stems, partial labelled walls, local photo masks,
+  original-copy lifecycle/corruption, metadata retention and failed-pick UI.
+
+On-device acceptance is still required: the exact TV/lamp may have no separable
+depth geometry (especially reflective screens/thin metal). Use Preserve, capture
+their sides slowly, then test Select/Add part; do not claim unknown physical depth.

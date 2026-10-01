@@ -11,26 +11,26 @@ class MeshProcessor {
     // MARK: - Post-Processing Pipeline
 
     /// Full post-processing pipeline to clean up raw scan data
-    static func postProcess(_ meshData: MeshData, level: ProcessingLevel = .standard, preservePositions: Bool = false) -> MeshData {
+    static func postProcess(_ meshData: MeshData, level: ProcessingLevel = .quick, preservePositions: Bool = false) -> MeshData {
         var result = meshData
 
         switch level {
         case .quick:
             result = removeDegenerateTriangles(result)
-            result = weldNearbyVertices(result, threshold: 0.005)
-            result = removeSmallComponents(result, minVertices: 30)
+            // Preserve every nondegenerate surface, including detached lamp
+            // pieces and sparse walls. Do not weld thin geometry out of existence.
             result = recalculateNormals(result)
         case .standard:
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.01)
-            result = removeSmallComponents(result, minVertices: 80)
+            result = removeSmallComponents(result, minVertices: 80, preserveSurfaces: true)
             if !preservePositions { result = smoothVertexPositions(result, iterations: 1, factor: 0.3) }
             result = recalculateNormals(result)
             result = smoothNormals(result)
         case .high:
             result = removeDegenerateTriangles(result)
             result = weldNearbyVertices(result, threshold: 0.015)
-            result = removeSmallComponents(result, minVertices: 150)
+            result = removeSmallComponents(result, minVertices: 150, preserveSurfaces: true)
             if !preservePositions { result = smoothVertexPositions(result, iterations: 3, factor: 0.4) }
             result = recalculateNormals(result)
             result = smoothNormals(result)
@@ -40,15 +40,15 @@ class MeshProcessor {
     }
 
     enum ProcessingLevel: String, CaseIterable {
-        case quick = "Quick"
-        case standard = "Standard"
-        case high = "High Quality"
+        case quick = "Preserve"
+        case standard = "Balanced"
+        case high = "Strong"
 
         var description: String {
             switch self {
-            case .quick: return "Light cleanup, fastest"
-            case .standard: return "Clean mesh, remove debris, smooth"
-            case .high: return "Aggressive cleanup, very smooth surfaces"
+            case .quick: return "Recommended. Keeps all valid surfaces and thin details; no detail thinning. Larger files."
+            case .standard: return "Merges nearby vertices and removes physically small debris. May lose fine detail."
+            case .high: return "Strong cleanup, not higher scan quality. Can remove thin details and create gaps."
             }
         }
 
@@ -193,7 +193,7 @@ class MeshProcessor {
     // MARK: - Remove Small Disconnected Components
 
     /// Remove small floating mesh fragments
-    static func removeSmallComponents(_ meshData: MeshData, minVertices: Int = 8) -> MeshData {
+    static func removeSmallComponents(_ meshData: MeshData, minVertices: Int = 8, preserveSurfaces: Bool = false) -> MeshData {
         let vertexCount = meshData.vertices.count
         guard vertexCount > 0 else { return meshData }
 
@@ -241,10 +241,22 @@ class MeshProcessor {
             currentComponent += 1
         }
 
-        // Find components large enough to keep
-        let keepComponents = Set(componentSizes.enumerated()
-            .filter { $0.element >= minVertices }
-            .map { $0.offset })
+        var areas = [Float](repeating: 0, count: currentComponent)
+        var lows = [SIMD3<Float>](repeating: SIMD3(repeating: .greatestFiniteMagnitude), count: currentComponent)
+        var highs = lows.map { -$0 }
+        for (i, p) in meshData.vertices.enumerated() {
+            let id = componentId[i]
+            lows[id] = simd_min(lows[id], p); highs[id] = simd_max(highs[id], p)
+        }
+        for face in meshData.faces where face.count == 3 && face.allSatisfy({ Int($0) < vertexCount }) {
+            let a = meshData.vertices[Int(face[0])], b = meshData.vertices[Int(face[1])], c = meshData.vertices[Int(face[2])]
+            areas[componentId[Int(face[0])]] += simd_length(simd_cross(b - a, c - a)) * 0.5
+        }
+        let keepComponents = Set(componentSizes.indices.filter { id in
+            componentSizes[id] >= minVertices || (preserveSurfaces &&
+                MeshRetentionPolicy.keepComponent(vertices: componentSizes[id], minimumVertices: minVertices,
+                    area: areas[id], extent: highs[id] - lows[id]))
+        })
 
         // Build vertex remap for kept vertices
         var vertexRemap = [Int](repeating: -1, count: vertexCount)

@@ -176,6 +176,7 @@ class StorageManager: ObservableObject {
         toProject project: Project,
         format: ExportFormat = .obj,
         baked: BakedTexture? = nil,
+        originalMesh: MeshData? = nil,
         metadata: ((inout Scan) -> Void)? = nil
     ) throws -> Scan {
         guard meshData.faceClassifications == nil || meshData.faceClassifications?.count == meshData.faceCount else {
@@ -263,6 +264,15 @@ class StorageManager: ObservableObject {
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
+        // Fail the save (and retain the recovery checkpoint) if the original
+        // cannot be preserved. Never report a recoverable save without its file.
+        if let originalMesh {
+            let url = scanDir.appendingPathComponent(scanId.uuidString + "_original.mesh")
+            let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+            try encoder.encode(originalMesh).write(to: url, options: .atomic)
+            scan.originalMeshSHA256 = try measurementSHA256(url)
+        }
+
         metadata?(&scan)
         try addScan(scan, to: project)
         return scan
@@ -318,6 +328,28 @@ class StorageManager: ObservableObject {
         metadata?(&scan)
         try addScan(scan, to: project)
         return scan
+    }
+
+    /// New library item; never replaces geometry or measurements of the source.
+    /// This is the accepted pre-cleanup mesh, not unfiltered/out-of-range AR data.
+    func saveOriginalCopy(of scan: Scan, in project: Project) throws -> Scan {
+        guard let hash = scan.originalMeshSHA256, MeasurementModelRevision.validHash(hash) else {
+            throw StorageFailure.missingItem
+        }
+        let url = getScanFileURL(scan: scan, project: project).deletingLastPathComponent()
+            .appendingPathComponent((scan.fileName as NSString).deletingPathExtension + "_original.mesh")
+        guard try measurementSHA256(url) == hash else { throw CocoaError(.fileReadCorruptFile) }
+        let bytes = try boundedMeasurementData(url, maximumBytes: 512_000_000)
+        let mesh = try PropertyListDecoder().decode(MeshData.self, from: bytes)
+        return try saveScan(meshData: mesh, name: scan.name + " · Original", toProject: project) {
+            $0.sceneFrame = scan.sceneFrame; $0.coordinateProvenance = scan.coordinateProvenance
+            $0.modelScale = scan.modelScale; $0.modelTransform = scan.modelTransform
+            $0.northAligned = scan.northAligned; $0.latitude = scan.latitude; $0.longitude = scan.longitude
+            $0.altitude = scan.altitude; $0.locationAccuracy = scan.locationAccuracy
+            $0.locationTimestamp = scan.locationTimestamp; $0.verticalLocationAccuracy = scan.verticalLocationAccuracy
+            $0.locationReducedAccuracy = scan.locationReducedAccuracy; $0.locationReference = scan.locationReference
+            $0.notes = "Original captured mesh before cleanup. Range/confidence filtering still applies. Vertex colour only; photo atlas and measurements are not copied."
+        }
     }
 
     /// Change stored details of a saved scan.
@@ -511,6 +543,7 @@ class StorageManager: ObservableObject {
                 updated.modelTransform = modelTransform.map(StorageManager.array(of:))
                 updated.coordinateProvenance = provenance
                 updated.textureQuality = nil // A new reconstruction has different surfaces/photos.
+                updated.meshRetention = nil; updated.originalMeshSHA256 = nil
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
                     throw StorageFailure.missingItem
@@ -633,6 +666,7 @@ class StorageManager: ObservableObject {
         let base = (scan.fileName as NSString).deletingPathExtension
         var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json",
                      base + SurfaceLabelDocument.suffix, base + AutomaticMeasurementDocument.suffix]
+        if scan.originalMeshSHA256 != nil { names.append(base + "_original.mesh") }
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
         if let p = scan.captureFolderName { names.append(p); names.append(p + PoseFile.suffix) }
@@ -674,6 +708,7 @@ class StorageManager: ObservableObject {
             // The primary model and all explicitly registered companions are required.
             let required = [current.fileName] + [current.textureFileName, current.splatBundleName, current.captureFolderName].compactMap { $0 }
                 + (current.retainedReconstructionFiles ?? [])
+                + (current.originalMeshSHA256 == nil ? [] : [(current.fileName as NSString).deletingPathExtension + "_original.mesh"])
             guard required.allSatisfy({ fileManager.fileExists(atPath: sourceDir.appendingPathComponent($0).path) }) else {
                 throw StorageFailure.missingItem
             }
@@ -772,6 +807,15 @@ class StorageManager: ObservableObject {
         )
         newScan.hasTexture = scan.hasTexture
         newScan.textureQuality = scan.textureQuality
+        newScan.meshRetention = scan.meshRetention
+        if let hash = scan.originalMeshSHA256 {
+            do {
+                let source = sourceDir.appendingPathComponent(oldBase + "_original.mesh")
+                guard try measurementSHA256(source) == hash else { throw CocoaError(.fileReadCorruptFile) }
+                try fileManager.copyItem(at: source, to: destDir.appendingPathComponent(newBase + "_original.mesh"))
+                newScan.originalMeshSHA256 = hash
+            } catch { report(error, action: "Duplicate original mesh"); return nil }
+        }
         newScan.hasColor = scan.hasColor
         newScan.boundingBoxMin = scan.boundingBoxMin
         newScan.boundingBoxMax = scan.boundingBoxMax

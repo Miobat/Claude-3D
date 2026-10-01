@@ -43,7 +43,7 @@ struct ScannerView: View {
     @State private var showingNewProjectDialog = false
     @State private var newProjectName = ""
     @State private var exportFormat: StorageManager.ExportFormat = .obj
-    @State private var processingLevel: MeshProcessor.ProcessingLevel = .standard
+    @State private var processingLevel: MeshProcessor.ProcessingLevel = .quick
     @State private var isSaving = false
     @State private var savingProgress = ""
     /// The combined scan, built once in the background when the user taps Stop.
@@ -55,7 +55,8 @@ struct ScannerView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @State private var showingError = false
     @State private var errorMessage = ""
-    @State private var showMeshOverlay = true
+    @State private var overlayMode: CaptureOverlayMode = .combined
+    @State private var showingCaptureDetails = false
     @State private var savedScan: Scan?
     @State private var savedProject: Project?
     @State private var showingSavedScan = false
@@ -66,7 +67,7 @@ struct ScannerView: View {
             SimulatorScanView(scanner: scanner)
                 .ignoresSafeArea()
             #else
-            ARScannerViewRepresentable(scanner: scanner, showMeshOverlay: $showMeshOverlay, previewRange: settings.rangeValue)
+            ARScannerViewRepresentable(scanner: scanner, overlayMode: overlayMode, previewRange: settings.rangeValue)
                 .ignoresSafeArea()
             #endif
 
@@ -204,7 +205,7 @@ struct ScannerView: View {
     }
 
     @ViewBuilder private var statusMessages: some View {
-        if settings.alignToNorth, scanner.isScanning {
+        if settings.alignToNorth, scanner.isScanning, showingCaptureDetails {
             Text(location.status).font(.caption).foregroundStyle(.white).padding(10).fieldPanel()
         }
         if !scanner.isScanning, !recovery.drafts.isEmpty {
@@ -225,9 +226,10 @@ struct ScannerView: View {
                     .padding(.horizontal, 16)
             }
             coverageLegend
+            if scanner.scanCapacityPercent >= 75 && !showingCaptureDetails { scanCapacityGauge }
             if settings.captureMode == .fast && settings.captureTexture {
                 VStack(spacing: 5) {
-                    Text("\(scanner.sharpTextureFrameCount) sharp · \(max(0, scanner.capturedFrameCount - scanner.sharpTextureFrameCount)) soft photos kept")
+                    Text("\(scanner.sharpTextureFrameCount) clear photo candidates kept")
                         .font(.caption.weight(.medium)).foregroundStyle(.white)
                     if let issue = scanner.textureCaptureIssue {
                         Text(issue).font(.caption2).foregroundStyle(.orange)
@@ -238,33 +240,51 @@ struct ScannerView: View {
                 .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
                 .accessibilityElement(children: .combine)
             }
-            scanCapacityGauge
-            scanningInfoBar
-            if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
-                (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
-                    .font(.caption2).foregroundStyle(.white.opacity(0.7))
-                    .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
-            }
+            DisclosureGroup("Capture details", isExpanded: $showingCaptureDetails) {
+                VStack(spacing: 8) {
+                    scanCapacityGauge
+                    scanningInfoBar
+                    captureCounts.font(.caption).foregroundStyle(.white.opacity(0.7))
+                    if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
+                        (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
+                            .font(.caption2).foregroundStyle(.white.opacity(0.7))
+                    }
+                    Text("Shape marks accepted depth observations, not guaranteed saved triangles. Photo marks saved, low-motion, locally exposed candidates—not final texture resolution.")
+                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
+                }.padding(.top, 8)
+            }.font(.caption).tint(FieldStyle.mint).padding(.horizontal, 16)
         }
         .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
     }
 
     private var coverageLegend: some View {
-        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6)) : AnyLayout(HStackLayout(spacing: 12))
-        return layout {
-            if settings.captureMode == .fast && settings.captureTexture {
-                Label("Shape", systemImage: "cube.transparent.fill").foregroundStyle(.cyan)
-                Label("Photo", systemImage: "photo.fill").foregroundStyle(FieldStyle.mint)
-            } else {
-                Label("Captured", systemImage: "cube.transparent.fill").foregroundStyle(FieldStyle.mint)
+        let hasPhotos = settings.captureMode == .fast && settings.captureTexture
+        return VStack(spacing: 7) {
+            Picker("Live overlay", selection: $overlayMode) {
+                ForEach(CaptureOverlayMode.allCases.filter { hasPhotos || $0 == .shape || $0 == .off }, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }.pickerStyle(.segmented).accessibilityIdentifier("captureOverlayMode")
+                .onAppear { if !hasPhotos && overlayMode != .off { overlayMode = .shape } }
+            if overlayMode != .off {
+                if hasPhotos && overlayMode != .shape {
+                    ViewThatFits {
+                        HStack(spacing: 12) { photoLegendItems }
+                        VStack(alignment: .leading, spacing: 5) { photoLegendItems }
+                    }
+                } else {
+                    Label("Blue · observed depth", systemImage: "cube.transparent.fill").foregroundStyle(.cyan)
+                }
             }
-            Label("Out of range", systemImage: "aqi.medium").foregroundStyle(.white.opacity(0.7))
+            Text("Blurred = out of range · \(String(format: "%.1f", settings.rangeValue)) m")
+                .foregroundStyle(.white.opacity(0.65))
         }
         .font(.caption2.weight(.medium)).padding(.horizontal, 12)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(settings.captureMode == .fast && settings.captureTexture
-            ? "Blue means captured shape. Mint means shape with a saved sharp photo. Blurred areas are out of range."
-            : "Mint means captured shape. Blurred areas are out of range.")
+    }
+
+    @ViewBuilder private var photoLegendItems: some View {
+        Label("Green dots · photo candidate", systemImage: "circle.grid.3x3.fill").foregroundStyle(FieldStyle.mint)
+        Label("Amber lines · needs photo", systemImage: "line.diagonal").foregroundStyle(.orange)
     }
 
     // MARK: - Top Status Bar
@@ -283,12 +303,6 @@ struct ScannerView: View {
                 Text(scanner.isScanning ? scanner.scanProgress : (typeSize.isAccessibilitySize ? "Ready to scan" : "Capture your world"))
                     .font(scanner.isScanning ? .subheadline.weight(.medium) : (typeSize.isAccessibilitySize ? .headline : .title2.weight(.semibold)))
                     .foregroundStyle(.white)
-                if scanner.isScanning {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) { captureCounts }
-                        VStack(alignment: .leading, spacing: 4) { captureCounts }
-                    }.font(.caption).foregroundStyle(.white.opacity(0.8)).monospacedDigit()
-                }
             }
             Spacer(minLength: 0)
             #if targetEnvironment(simulator)
@@ -298,10 +312,10 @@ struct ScannerView: View {
             }
             #else
             if scanner.isScanning {
-                Button { showMeshOverlay.toggle() } label: {
-                    FieldIcon(symbol: "square.grid.3x3", selected: showMeshOverlay)
+                Button { overlayMode = overlayMode == .off ? (settings.captureMode == .fast && settings.captureTexture ? .combined : .shape) : .off } label: {
+                    FieldIcon(symbol: "square.grid.3x3", selected: overlayMode != .off)
                 }
-                .accessibilityLabel(showMeshOverlay ? "Hide mesh overlay" : "Show mesh overlay")
+                .accessibilityLabel(overlayMode == .off ? "Show capture overlay" : "Hide capture overlay")
             }
             #endif
         }
@@ -446,7 +460,7 @@ struct ScannerView: View {
                     Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
                         .accessibilityLabel("Capture range in metres")
                 } header: { Text("Range") } footer: {
-                    Text("Distance from the phone. Blurred areas are out of range. With Fast colour capture, blue means captured shape and mint adds a saved sharp photo. Other modes use mint for captured shape. Unknown depth is not captured.")
+                    Text("Distance from the phone. Blurred areas are out of range. Shape shows accepted depth in blue. Photos adds green dots for saved photo candidates and amber lines where another photo is needed. Photo quality is estimated from motion and exposure; check the saved texture too. Unknown depth is not captured.")
                 }
                 if settings.captureMode.usesDetail {
                     Section {
@@ -760,6 +774,8 @@ struct ScannerView: View {
                         .pickerStyle(.segmented)
                         Text(processingLevel.description)
                             .font(.caption).foregroundColor(.secondary)
+                        Label("Original captured mesh kept for recovery", systemImage: "arrow.uturn.backward.circle")
+                            .font(.caption).foregroundStyle(.secondary)
                         Picker("File type", selection: $exportFormat) {
                             Text("OBJ").tag(StorageManager.ExportFormat.obj)
                             Text("PLY").tag(StorageManager.ExportFormat.ply)
@@ -1117,10 +1133,11 @@ struct ScannerView: View {
             do {
                 // Keep observation-time positions, especially at the range edge.
                 var meshData = MeshProcessor.postProcess(rawMesh, level: level, preservePositions: true)
+                let cleanedStage = meshData.retentionStage
 
                 // DETAIL slider: simplify to about one vertex per chosen spacing, so
                 // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
-                if detailMeters > 0.005 {
+                if level != .quick && detailMeters > 0.005 {
                     meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters, preservePositions: true)
                 }
                 if !wantColor {
@@ -1135,11 +1152,15 @@ struct ScannerView: View {
 
                 // Level and square up AFTER baking (baking needs the camera-space positions).
                 let frame = SceneFrame.compute(from: meshData, keepHeading: north)
+                let report = MeshRetentionReport(cleanup: level.rawValue, captured: rawMesh.retentionStage,
+                    cleaned: cleanedStage, saved: meshData.retentionStage)
                 meshData = meshData.transformed(by: frame)
+                let original = (wantColor ? rawMesh : MeshProcessor.makeUniformGrey(rawMesh)).transformed(by: frame)
 
                 DispatchQueue.main.async { self.savingProgress = "Saving file..." }
                 let scan = try storageManager.saveScan(meshData: meshData, name: name, toProject: project,
-                                                       format: format, baked: baked) {
+                                                       format: format, baked: baked, originalMesh: original) {
+                    $0.meshRetention = report
                     $0.recordLocation(fix, compassRequested: north)
                     $0.recordCaptureFrame(frame)
                 }
