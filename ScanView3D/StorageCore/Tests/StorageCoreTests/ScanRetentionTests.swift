@@ -37,4 +37,13 @@ final class ScanRetentionTests: XCTestCase {
         XCTAssertEqual(CaptureOverlayMode.photos.shaderValue(hasPhotos: true), 3)
         XCTAssertEqual(CaptureOverlayMode.photos.shaderValue(hasPhotos: false), 1)
     }
+
+    func testResetAndUnreliableTrackingCannotReuseStaleCoverage() {
+        for mode in CaptureOverlayMode.allCases {
+            XCTAssertEqual(mode.shaderValue(hasPhotos: true, hasGeometry: false), 0)
+            XCTAssertEqual(mode.shaderValue(hasPhotos: true, trackingReliable: false), 0)
+            XCTAssertEqual(mode.shaderValue(hasPhotos: true, photoMaskReady: false), 0)
+        }
+        XCTAssertEqual(CaptureOverlayMode.shape.shaderValue(hasPhotos: false, photoMaskReady: false), 1)
+    }
 }

@@ -31,8 +31,8 @@ enum MeshRetentionPolicy {
 /// Values are shared with the Metal shader; range blur remains active in Off.
 enum CaptureOverlayMode: String, CaseIterable {
     case combined = "Combined", shape = "Shape", photos = "Photos", off = "Off"
-    func shaderValue(hasPhotos: Bool) -> Float {
-        if self == .off { return 0 }
+    func shaderValue(hasPhotos: Bool, hasGeometry: Bool = true, trackingReliable: Bool = true, photoMaskReady: Bool = true) -> Float {
+        if self == .off || !hasGeometry || !trackingReliable || (hasPhotos && !photoMaskReady) { return 0 }
         if !hasPhotos || self == .shape { return 1 }
         return self == .photos ? 3 : 2
     }

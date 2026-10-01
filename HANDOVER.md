@@ -323,6 +323,8 @@ with invented geometry or relax capture range/confidence filtering.
   green photo-candidate dots and amber missing-photo hatching. Symbols are stable
   screen-space marks clipped to the existing reprojected depth evidence. Range
   blur remains in Off. Shape is accepted depth, NOT guaranteed final triangles.
+  Starting/resetting a scan with no accepted depth clears cached textures, so
+  prior-session marks cannot flash onto the new camera view.
 - Green requires a retained written JPEG, low estimated motion blur, and local
   exposure checks in the corresponding depth patch. It does not certify focus,
   fine texture resolution or measurement accuracy. Plain low-texture walls are

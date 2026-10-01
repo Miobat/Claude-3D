@@ -123,6 +123,11 @@ final class LiveCaptureFeedback {
             photoTexture = accepted.photoDepth.flatMap { texture($0, width: accepted.frame.width, height: accepted.frame.height) }
             acceptedTime = accepted.frame.timestamp
         }
+        if accepted == nil {
+            // Start/reset can keep the same ARSession instance. Do not project
+            // the previous scan's texture using the new camera's pose.
+            acceptedTexture = nil; photoTexture = nil; acceptedTime = -1
+        }
         let previous = accepted?.frame ?? sensor
         let t = frame.displayTransform(for: orientation, viewportSize: viewport).inverted()
         let displayToImage = simd_float3x3(SIMD3(Float(t.a), Float(t.b), 0),
@@ -133,11 +138,13 @@ final class LiveCaptureFeedback {
         var reliable = false
         if case .normal = frame.camera.trackingState { reliable = true }
         let needsPhotoMask = accepted?.photoDepth != nil
-        let canShowCoverage = showCoverage && reliable && acceptedTexture != nil && (!needsPhotoMask || photoTexture != nil)
+        let coverage = mode.shaderValue(hasPhotos: needsPhotoMask,
+            hasGeometry: showCoverage && accepted != nil && acceptedTexture != nil,
+            trackingReliable: reliable, photoMaskReady: photoTexture != nil)
         let uniforms = Uniforms(cameraToWorld: sensor.cameraToWorld,
             worldToAcceptedCamera: previous.cameraToWorld.inverse, displayToImage: displayToImage,
             intrinsics: sensor.intrinsics, acceptedIntrinsics: normalizedK,
-            parameters: SIMD4(range, canShowCoverage ? mode.shaderValue(hasPhotos: needsPhotoMask) : 0,
+            parameters: SIMD4(range, coverage,
                 Float(sensor.width), Float(sensor.height)))
         let newState = State(current: current, accepted: acceptedTexture ?? current,
                              photographed: photoTexture ?? current, uniforms: uniforms)
