@@ -90,8 +90,11 @@ final class ObjectMeasurementSession: ObservableObject {
         }
         let mode = mode, token = generation, previous = draft, work = work
         let brush = brushRadius
-        var proposed = normal.flatMap { abs($0.y) < 0.5 ? $0 : nil } ?? cameraFront
-        if simd_dot(proposed, cameraFront) < 0 { proposed = -proposed }
+        // The footprint supplies orientation. The view chooses its equivalent
+        // Front side; an angled chair leg must not swap width and depth.
+        let cameraHorizontal = SIMD3<Float>(cameraFront.x, 0, cameraFront.z)
+        let proposed = simd_length(cameraHorizontal) > 0.001 ? cameraHorizontal :
+            (normal.flatMap { abs($0.y) < 0.5 ? $0 : nil } ?? SIMD3(0,0,1))
         let horizontal = SIMD3<Float>(proposed.x, 0, proposed.z)
         let front = simd_length(horizontal) > 0.001 ? simd_normalize(horizontal) : SIMD3(0, 0, 1)
         busy = true

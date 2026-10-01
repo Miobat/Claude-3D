@@ -356,11 +356,11 @@ enum DesignPreview {
                 check(session.ready && session.writable, "Object session prepares verified model and writable storage")
                 guard session.ready else { finish(); return }
                 session.active = true
-                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(1, 0, 0), cameraFront: SIMD3(0, 0, 1))
                 idle {
                     guard let draft = session.draft else { check(false, "Object tap produces a draft"); finish(); return }
                     check(abs(draft.bounds.size.x - 3.8) < 0.0001 && abs(draft.bounds.size.y - 1.3) < 0.0001 && abs(draft.bounds.size.z - 0.6) < 0.0001,
-                          "Object tap finds the entire 3.8 m cabinet without setting a reach")
+                          "Object tap finds the entire 3.8 m cabinet and ignores a misleading local face normal")
                     session.save()
                     idle {
                         do {
