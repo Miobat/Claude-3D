@@ -9,7 +9,7 @@ struct CaptureDepthFrame {
     let width: Int
     let height: Int
     let depth: [Float]
-    let confidence: [UInt8]
+    private(set) var confidence: [UInt8]
     let cameraToWorld: simd_float4x4
     let intrinsics: SIMD4<Float> // fx, fy, cx, cy in depth pixels
     let timestamp: TimeInterval
@@ -61,6 +61,12 @@ struct CaptureDepthFrame {
         let pixels = depth.indices.map { accepts($0, range: range) ? UInt8(255) : 0 }
         return PhotoRangeMask(width: width, height: height, pixels: Data(pixels), rangeMetres: range).eroded()
     }
+
+    func restrictingPhotoCoverage(to mask: [UInt8]) -> CaptureDepthFrame {
+        var result = self
+        for i in confidence.indices where mask.count != confidence.count || mask[i] == 0 { result.confidence[i] = 0 }
+        return result
+    }
 }
 
 struct AcceptedDepthFrame {
@@ -108,7 +114,7 @@ final class LiveCaptureFeedback {
 
     // Each texture is immutable after publication to the render thread.
     func update(frame: ARFrame, accepted: AcceptedDepthFrame?, viewport: CGSize,
-                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool) {
+                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool, mode: CaptureOverlayMode = .combined) {
         guard let sensor = CaptureDepthFrame(frame), let current = texture(sensor.depth, width: sensor.width, height: sensor.height) else {
             lock.lock(); state = nil; lock.unlock(); return
         }
@@ -131,7 +137,7 @@ final class LiveCaptureFeedback {
         let uniforms = Uniforms(cameraToWorld: sensor.cameraToWorld,
             worldToAcceptedCamera: previous.cameraToWorld.inverse, displayToImage: displayToImage,
             intrinsics: sensor.intrinsics, acceptedIntrinsics: normalizedK,
-            parameters: SIMD4(range, canShowCoverage ? (needsPhotoMask ? 2 : 1) : 0,
+            parameters: SIMD4(range, canShowCoverage ? mode.shaderValue(hasPhotos: needsPhotoMask) : 0,
                 Float(sensor.width), Float(sensor.height)))
         let newState = State(current: current, accepted: acceptedTexture ?? current,
                              photographed: photoTexture ?? current, uniforms: uniforms)

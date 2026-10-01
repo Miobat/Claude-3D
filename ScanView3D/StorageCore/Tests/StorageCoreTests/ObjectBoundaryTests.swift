@@ -43,6 +43,70 @@ final class ObjectBoundaryTests: XCTestCase {
         XCTAssertEqual(region.bounds.size.z, 0.8, accuracy: 0.0001)
     }
 
+    func testThinTVIsNotAbsorbedIntoWallPlaneEvenWithWallLabel() throws {
+        for depth: Float in [0.015, 0.018, 0.025, 0.04] {
+            var mesh = Mesh()
+            mesh.quad(SIMD3(-0.6,1,depth), SIMD3(0.6,1,depth), SIMD3(0.6,1.7,depth), SIMD3(-0.6,1.7,depth))
+            mesh.wallWithOpening()
+            for labels: Data? in [nil, Data(repeating: SurfaceCategory.wall.rawValue, count: mesh.faces.count)] {
+                let index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces, labels: labels)
+                let result = try index.grow(from: 0)
+                XCTAssertEqual(result.selection.ids, [0, 1], "TV at \(depth) m must remain separate from wall")
+                let region = try index.region(selection: result.selection, front: SIMD3(0,0,1), partial: false, automaticOrientation: true)
+                XCTAssertEqual(region.bounds.size.x, 1.2, accuracy: 0.001)
+                XCTAssertEqual(region.bounds.size.y, 0.7, accuracy: 0.001)
+                XCTAssertNil(region.dimensions.first { $0.axis == .depth }?.metres, "One captured front is not physical TV depth")
+            }
+        }
+    }
+
+    func testSemanticWallPatchWorksWithoutFullRoomHeight() throws {
+        var mesh = Mesh()
+        mesh.box(center: SIMD3(0,1.3,0.18), size: SIMD3(0.5,0.6,0.3))
+        mesh.quad(SIMD3(-1.1,0.7,0), SIMD3(1.1,0.7,0), SIMD3(1.1,2,0), SIMD3(-1.1,2,0))
+        let labels = Data(repeating: 0, count: 12) + Data(repeating: SurfaceCategory.wall.rawValue, count: 2)
+        let index = try ObjectSelectionIndex(points: mesh.points, triangles: mesh.faces, labels: labels)
+        XCTAssertTrue(index.supportPlanes.contains { $0.kind == .wall })
+        XCTAssertTrue(try index.grow(from: 0).selection.ids.allSatisfy { $0 < 12 })
+        XCTAssertThrowsError(try index.grow(from: 12))
+    }
+
+    func testBrokenLampStemJoinsAlignedEndsButNotNearbyObject() throws {
+        var mesh = Mesh()
+        mesh.box(center: SIMD3(0,1.2,0.12), size: SIMD3(0.14,0.12,0.14))
+        mesh.box(center: SIMD3(0,1.485,0.15), size: SIMD3(0.018,0.4,0.018))
+        mesh.box(center: SIMD3(0,1.8,0.15), size: SIMD3(0.24,0.16,0.22))
+        let count = mesh.faces.count
+        mesh.box(center: SIMD3(0.2,1.485,0.15), size: SIMD3(0.08,0.4,0.08))
+        mesh.wallWithOpening()
+        let index = try mesh.index(), result = try index.grow(from: 0)
+        XCTAssertTrue(result.bridgedGap)
+        XCTAssertTrue(result.selection.ids.contains(12) && result.selection.ids.contains(24))
+        XCTAssertTrue(result.selection.ids.allSatisfy { $0 < count })
+        XCTAssertEqual(result.selection.ids, try index.grow(from: 24).selection.ids, "Part joining is symmetric")
+    }
+
+    func testAddPartCombinesOnlyExplicitlyTappedComponents() throws {
+        var mesh = Mesh()
+        mesh.box(center: SIMD3(0,0.3,0), size: SIMD3(0.3,0.3,0.3))
+        mesh.box(center: SIMD3(0,0.75,0), size: SIMD3(0.3,0.3,0.3))
+        mesh.floor()
+        let index = try mesh.index()
+        let first = try index.grow(from: 0).selection, second = try index.grow(from: 12).selection
+        XCTAssertTrue(first.ids.allSatisfy { $0 < 12 })
+        let added = try index.addingPart(second, to: first)
+        XCTAssertEqual(added.ids, Array(0..<24))
+        XCTAssertEqual(try index.addingPart(second, to: added), added, "Repeated taps do not duplicate source IDs")
+    }
+
+    func testTVMissingFromMeshDoesNotInventObjectOrDimensions() throws {
+        var mesh = Mesh()
+        mesh.quad(SIMD3(-2,0,0), SIMD3(2,0,0), SIMD3(2,3,0), SIMD3(-2,3,0))
+        let index = try mesh.index()
+        let seed = try XCTUnwrap(index.nearest(to: SIMD3(0,1.5,0)))
+        XCTAssertThrowsError(try index.grow(from: seed))
+    }
+
     func testNoisyFloorStopsGrowthWithoutSemanticLabels() throws {
         var mesh = Mesh()
         mesh.box(center: SIMD3(0,0.5,0), size: SIMD3(1.2,1,0.6))

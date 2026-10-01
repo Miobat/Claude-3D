@@ -35,6 +35,7 @@ struct ObjectMeasurementPanel: View {
                 Label(warning, systemImage: "exclamationmark.circle")
                     .font(.caption).foregroundStyle(.yellow).fixedSize(horizontal: false, vertical: true)
             }
+            selectionControls
             if let region = session.draft {
                 if typeSize.isAccessibilitySize {
                     VStack(alignment: .leading, spacing: 8) { dimensionCards(region) }
@@ -59,23 +60,11 @@ struct ObjectMeasurementPanel: View {
                         .accessibilityHint("Requires you to confirm that the object has no gap behind it")
                 }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(ObjectMeasurementSession.Mode.allCases, id: \.self) { mode in
-                        Button { session.mode = mode } label: {
-                            Label(mode.rawValue, systemImage: mode == .select ? "cursorarrow.rays" : (mode == .add ? "paintbrush.pointed" : "eraser"))
-                                .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
-                                .foregroundStyle(session.mode == mode ? FieldStyle.ink : .white)
-                                .background(session.mode == mode ? FieldStyle.mint : .white.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-                        }.disabled(!session.ready || session.busy)
-                        .accessibilityAddTraits(session.mode == mode ? .isSelected : [])
-                    }
-                    Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
-                        .disabled(!session.canUndo).accessibilityLabel("Undo object selection change")
-                }
-            }.fixedSize(horizontal: false, vertical: true)
             if session.mode == .select {
                 Label("Automatic boundary", systemImage: "sparkles")
+                    .font(.caption).foregroundStyle(FieldStyle.mint).fixedSize(horizontal: false, vertical: true)
+            } else if session.mode == .part {
+                Text("Tap another captured piece of the same object. Separate pieces remain a partial measurement.")
                     .font(.caption).foregroundStyle(FieldStyle.mint).fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
@@ -152,6 +141,28 @@ struct ObjectMeasurementPanel: View {
         .confirmationDialog("Discard unsaved changes and open the saved object?", isPresented: $showingOpen, titleVisibility: .visible) {
             Button("Discard and open", role: .destructive) { if let pendingOpen { session.open(pendingOpen) }; pendingOpen = nil }
             Button("Cancel", role: .cancel) { pendingOpen = nil }
+        }
+    }
+
+    private var selectionControls: some View {
+        HStack(spacing: 4) {
+            Menu {
+                ForEach(ObjectMeasurementSession.Mode.allCases, id: \.self) { mode in
+                    Button { session.mode = mode } label: { Label(mode.rawValue, systemImage: mode.icon) }
+                }
+            } label: {
+                Label(session.mode.rawValue, systemImage: session.mode.icon)
+                    .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
+                    .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+            }.disabled(!session.ready || session.busy).accessibilityLabel("Selection tool: " + session.mode.rawValue)
+            if session.mode != .part {
+                Button { session.mode = .part } label: { Label("Add part", systemImage: "plus") }
+                    .font(.caption.weight(.semibold)).padding(.horizontal, 8).frame(minHeight: 44)
+                    .disabled(!session.ready || session.busy)
+            }
+            Spacer(minLength: 0)
+            Button { session.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 44, height: 44) }
+                .disabled(!session.canUndo).accessibilityLabel("Undo object selection change")
         }
     }
 

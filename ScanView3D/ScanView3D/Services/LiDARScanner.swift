@@ -810,8 +810,7 @@ class LiDARScanner: NSObject, ObservableObject {
             var mesh = LiDARScanner.combine(anchors: anchors, evidence: evidence, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
                 let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals, fallbackColors: m.colors)
-                mesh = MeshData(vertices: m.vertices, normals: m.normals, faces: m.faces, colors: colors,
-                                boundingBoxMin: m.boundingBoxMin, boundingBoxMax: m.boundingBoxMax)
+                mesh = m.replacingColors(colors)
             }
             DispatchQueue.main.async { completion(mesh) }
         }
@@ -1580,6 +1579,21 @@ struct MeshData: Codable {
 
     var vertexCount: Int { vertices.count }
     var faceCount: Int { faces.count }
+
+    /// Changing colour must never discard the per-face floor/wall evidence.
+    func replacingColors(_ values: [SIMD4<Float>]) -> MeshData {
+        MeshData(vertices: vertices, normals: normals, faces: faces, colors: values,
+                 boundingBoxMin: boundingBoxMin, boundingBoxMax: boundingBoxMax, faceClassifications: faceClassifications)
+    }
+
+    var retentionStage: MeshRetentionReport.Stage {
+        let area = faces.reduce(Double(0)) { result, f in
+            guard f.count == 3, f.allSatisfy({ Int($0) < vertices.count }) else { return result }
+            return result + Double(simd_length(simd_cross(vertices[Int(f[1])] - vertices[Int(f[0])],
+                vertices[Int(f[2])] - vertices[Int(f[0])])) * 0.5)
+        }
+        return MeshRetentionReport.Stage(vertices: vertexCount, faces: faceCount, area: area)
+    }
 
     var dimensions: SIMD3<Float> {
         return boundingBoxMax - boundingBoxMin

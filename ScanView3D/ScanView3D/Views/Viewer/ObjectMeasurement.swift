@@ -12,7 +12,18 @@ private final class ObjectWorkToken {
 /// Worker-owned geometry; main-thread observable state. No scene traversal,
 /// hashing, growing or file I/O runs in a gesture callback.
 final class ObjectMeasurementSession: ObservableObject {
-    enum Mode: String, CaseIterable { case select = "Select", add = "Add", remove = "Remove" }
+    enum Mode: String, CaseIterable {
+        case select = "Select", part = "Add part", add = "Paint +", remove = "Paint −"
+        var isPainting: Bool { self == .add || self == .remove }
+        var icon: String {
+            switch self {
+            case .select: return "cursorarrow.rays"
+            case .part: return "square.on.square.dashed"
+            case .add: return "paintbrush.pointed"
+            case .remove: return "eraser"
+            }
+        }
+    }
     @Published var active = false { didSet { publish() } }
     @Published var mode: Mode = .select
     @Published var brushRadius: Float = 0.08
@@ -85,7 +96,7 @@ final class ObjectMeasurementSession: ObservableObject {
         guard ready else { return }
         if busy {
             // Keep just one pending paint hit: bounded work, preserved stroke end.
-            if mode != .select { pendingPaint = (point, normal, cameraFront) }
+            if mode.isPainting { pendingPaint = (point, normal, cameraFront) }
             return
         }
         let mode = mode, token = generation, previous = draft, work = work
@@ -102,10 +113,11 @@ final class ObjectMeasurementSession: ObservableObject {
             guard let self, let index = self.index else { return }
             do {
                 var selection: AutomaticRegionSelection?, limited = false
-                if mode == .select {
+                if mode == .select || mode == .part {
                     guard let seed = index.nearest(to: point) else { throw ObjectSelectionError.noSurface }
                     let result = try index.grow(from: seed, cancelled: work.cancelled)
-                    selection = result.selection; limited = result.touchesLimit || result.bridgedGap
+                    selection = mode == .part ? try index.addingPart(result.selection, to: previous?.selection) : result.selection
+                    limited = mode == .part || result.touchesLimit || result.bridgedGap
                 } else {
                     selection = try index.brush(previous?.selection, at: point, radius: brush, adding: mode == .add)
                     limited = true
@@ -126,13 +138,18 @@ final class ObjectMeasurementSession: ObservableObject {
                     self.publish()
                     self.continuePaint()
                 }
-            } catch { self.fail(error, token: token) }
+            } catch { self.fail(error, token: token, rejectedPick: mode == .select) }
         }
     }
 
     func rotateFront() {
         guard let region = draft, let selection = region.selection, !busy else { return }
         updateSelection(selection, front: region.bounds.right, previous: region)
+    }
+
+    func missedPick() {
+        guard active, ready, !busy, mode == .select else { return }
+        fail(ObjectSelectionError.noSurface, token: generation, rejectedPick: true)
     }
 
     /// Fine heading adjustment covers objects that are not parallel to room axes.
@@ -257,15 +274,26 @@ final class ObjectMeasurementSession: ObservableObject {
             } catch { self?.fail(error, token: token) }
         }
     }
-    private func fail(_ error: Error, token: UUID) {
+    private func fail(_ error: Error, token: UUID, rejectedPick: Bool = false) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.generation == token else { return }
             self.busy = false; self.message = error.localizedDescription
             self.pendingPaint = nil
+            if rejectedPick {
+                // A rejected tap must never leave an old box looking like a
+                // successful result. Keep the previous draft recoverable in Undo.
+                if self.draft != nil {
+                    self.undoStack.append(self.draft)
+                    if self.undoStack.count > 12 { self.undoStack.removeFirst() }
+                    self.message += " Previous selection is available in Undo."
+                }
+                self.draft = nil; self.highlight = nil; self.wallDepth = nil; self.dirty = false
+                self.publish()
+            }
         }
     }
     private func continuePaint() {
-        guard active, mode != .select, let hit = pendingPaint else { pendingPaint = nil; return }
+        guard active, mode.isPainting, let hit = pendingPaint else { pendingPaint = nil; return }
         pendingPaint = nil
         pick(point: hit.0, normal: hit.1, cameraFront: hit.2)
     }

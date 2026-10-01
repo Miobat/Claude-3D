@@ -2,6 +2,86 @@ import SwiftUI
 import SceneKit
 import simd
 
+private struct MeshRetentionSheet: View {
+    let scan: Scan
+    let project: Project
+    @ObservedObject var store: StorageManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var error: String?
+    @State private var originalCopy: Scan?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let report = scan.meshRetention {
+                    Section("Surface retention · " + report.cleanup) {
+                        stage("Captured before cleanup", report.captured)
+                        stage("After cleanup", report.cleaned)
+                        stage("Saved after detail thinning", report.saved)
+                        LabeledContent("Surface area removed", value: report.removedAreaFraction.formatted(.percent.precision(.fractionLength(1))))
+                    }
+                    Section {
+                        Text("These are stages of the accepted scan, not room completeness. The original already obeys capture range and confidence limits. It cannot restore surfaces the sensor did not capture.")
+                            .font(.callout)
+                        if report.removedAreaFraction > 0.05 {
+                            Label("Cleanup removed significant surface area. Compare the original before measuring thin objects.", systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                } else {
+                    Text("This scan has no cleanup report. Reports and originals are kept for new Fast scans; older holes cannot be restored from metadata.")
+                }
+                if scan.originalMeshSHA256 != nil {
+                    Section("Original captured mesh") {
+                        if let copy = originalCopy {
+                            Label("Original saved as a separate scan", systemImage: "checkmark.circle")
+                            NavigationLink("Open original copy") {
+                                ModelViewerView(scan: copy, project: project).environmentObject(store)
+                            }
+                        } else {
+                            Button { restore() } label: {
+                                HStack {
+                                    Label("Save original as copy", systemImage: "arrow.uturn.backward")
+                                    if busy { Spacer(); ProgressView() }
+                                }
+                            }.disabled(busy)
+                        }
+                        Text("Keeps the current scan and all its measurements unchanged. The copy uses captured vertex colour, without the photo atlas or measurements.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if let error { Text(error).foregroundStyle(.red) }
+            }
+            .navigationTitle("Mesh retention").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(busy) } }
+            .interactiveDismissDisabled(busy)
+        }
+    }
+
+    private func stage(_ title: String, _ stage: MeshRetentionReport.Stage) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.semibold))
+            Text("\(stage.faces.formatted()) triangles · \(String(format: "%.2f", stage.area)) m²")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }.accessibilityElement(children: .combine)
+    }
+
+    private func restore() {
+        busy = true; error = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try store.saveOriginalCopy(of: scan, in: project) }
+            DispatchQueue.main.async {
+                busy = false
+                switch result {
+                case .success(let copy): originalCopy = copy
+                case .failure(let failure): error = "Original was not restored: " + failure.localizedDescription
+                }
+            }
+        }
+    }
+}
+
 private struct MeasurePanelHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 200
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
@@ -46,6 +126,7 @@ struct ModelViewerView: View {
     // Share
     @State private var showingShareSheet = false
     @State private var showingTextureQuality = false
+    @State private var showingMeshRetention = false
     @State private var shareURL: URL?
 
     // More menu
@@ -184,6 +265,9 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        Button { showingMeshRetention = true } label: {
+                            Label("Mesh retention & original", systemImage: "square.stack.3d.up")
+                        }
                         Button { showingTextureQuality = true } label: {
                             Label("Texture quality", systemImage: "photo.badge.checkmark")
                         }
@@ -226,6 +310,9 @@ struct ModelViewerView: View {
         .sheet(isPresented: $showingTextureQuality) {
             TextureQualitySheet(report: scan.textureQuality, scanName: scan.name)
         }
+        .sheet(isPresented: $showingMeshRetention) {
+            MeshRetentionSheet(scan: scan, project: project, store: storageManager)
+        }
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
@@ -235,6 +322,9 @@ struct ModelViewerView: View {
             if DesignPreview.screen == "quality" {
                 // Let the simulator fixture apply its requested orientation first.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingTextureQuality = true }
+            }
+            if DesignPreview.screen == "retention" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingMeshRetention = true }
             }
             #endif
             session.unit = measurementUnit
@@ -262,6 +352,11 @@ struct ModelViewerView: View {
         .onChange(of: objects.draft) { _, region in
             if DesignPreview.screen?.hasPrefix("object") == true, let region {
                 objects.alignView?("front", region.displayBounds)
+                if DesignPreview.screen == "object-rejected" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        objects.pick(point: SIMD3(1.5,0,1.5), normal: SIMD3(0,1,0), cameraFront: SIMD3(0,0,1))
+                    }
+                }
             }
         }
         #endif
