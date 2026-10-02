@@ -1,9 +1,17 @@
 import SwiftUI
 import simd
 
+enum ObjectPanelLayout {
+    static func height(expanded: Bool, landscape: Bool, accessibility: Bool) -> CGFloat {
+        if expanded { return landscape ? 230 : 320 }
+        return accessibility ? 220 : 190
+    }
+}
+
 struct ObjectMeasurementPanel: View {
     @ObservedObject var session: ObjectMeasurementSession
     let unit: ScanSettings.MeasurementUnit
+    @Binding var expanded: Bool
     @State private var showingEdit = false
     @State private var showingDelete = false
     @State private var showingNew = false
@@ -14,6 +22,7 @@ struct ObjectMeasurementPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if expanded {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(session.draft?.name ?? "Select an object").font(.headline)
@@ -28,6 +37,7 @@ struct ObjectMeasurementPanel: View {
                     }.disabled(!session.writable || !session.dirty)
                         .accessibilityLabel(session.dirty ? "Save reviewed object" : "Object is saved")
                 }
+                expansionButton
             }
             if let warning = session.warning {
                 Label(warning, systemImage: "exclamationmark.circle")
@@ -121,9 +131,12 @@ struct ObjectMeasurementPanel: View {
                     }
                 }.fixedSize(horizontal: false, vertical: true)
             }
+            } else {
+                compactContent
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
-        .foregroundStyle(.white).padding(12).fieldPanel().padding(.horizontal, 8)
+        .foregroundStyle(.white).padding(expanded ? 12 : 8).fieldPanel().padding(.horizontal, 8)
         .accessibilityIdentifier("objectMeasurementPanel")
         .sheet(isPresented: $showingEdit) {
             if let region = session.draft { ObjectBoundsEditor(region: region) { name, size in session.adjust(name: name, size: size) } }
@@ -143,6 +156,65 @@ struct ObjectMeasurementPanel: View {
             Button("Discard and open", role: .destructive) { if let pendingOpen { session.open(pendingOpen) }; pendingOpen = nil }
             Button("Cancel", role: .cancel) { pendingOpen = nil }
         }
+    }
+
+    private var compactContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // One row replaces the separate title, Save and selection rows.
+            // Large text can scroll horizontally without shrinking tap targets.
+            ScrollView(.horizontal, showsIndicators: typeSize.isAccessibilitySize) {
+                HStack(spacing: 4) {
+                    modeMenu
+                    Button { session.mode = .part } label: {
+                        Image(systemName: "plus").frame(width: 44, height: 44)
+                    }.disabled(!session.ready || session.busy)
+                        .accessibilityLabel("Add part to object selection")
+                    undoButton
+                    if session.busy {
+                        ProgressView().frame(width: 44, height: 44).accessibilityLabel("Analysing selection")
+                    } else if session.draft != nil {
+                        Button { session.save() } label: {
+                            Image(systemName: session.dirty ? "checkmark" : "checkmark.circle")
+                                .frame(width: 44, height: 44)
+                                .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+                        }.disabled(!session.writable || !session.dirty)
+                            .accessibilityLabel(session.dirty ? "Save reviewed object" : "Object is saved")
+                    }
+                    expansionButton
+                }
+            }.fixedSize(horizontal: false, vertical: true)
+            if let region = session.draft {
+                if typeSize.isAccessibilitySize {
+                    ScrollView(.horizontal) {
+                        HStack(alignment: .top, spacing: 6) { dimensionCards(region) }
+                    }.fixedSize(horizontal: false, vertical: true)
+                } else {
+                    HStack(alignment: .top, spacing: 6) { dimensionCards(region) }
+                }
+                Text(session.message).font(.caption2).foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1).accessibilityLabel(session.message)
+                if session.warning != nil {
+                    Label("Review warning in details", systemImage: "exclamationmark.circle")
+                        .font(.caption2).foregroundStyle(.yellow)
+                        .accessibilityLabel(session.warning ?? "")
+                }
+            } else {
+                // Do not suppress failed-pick explanations; the compact panel
+                // remains vertically scrollable when a message is long.
+                if let warning = session.warning {
+                    Label(warning, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.yellow)
+                }
+                statusMessage
+            }
+        }
+    }
+
+    private var expansionButton: some View {
+        Button { expanded.toggle() } label: {
+            Image(systemName: expanded ? "chevron.down" : "chevron.up").frame(width: 44, height: 44)
+        }
+        .accessibilityLabel(expanded ? "Collapse object panel" : "Expand object details and tools")
+        .accessibilityIdentifier("objectPanelExpansion")
     }
 
     @ViewBuilder private var selectionControls: some View {
@@ -198,11 +270,12 @@ struct ObjectMeasurementPanel: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(wall == nil ? axis.rawValue.capitalized : "Out from wall").font(.caption).foregroundStyle(.white.opacity(0.7))
                 Text((wall?.metres ?? dimension?.metres).map { unit.format(meters: $0) } ?? "Unknown")
-                    .font(.headline.monospacedDigit()).foregroundStyle(FieldStyle.mint)
+                    .font(expanded ? .headline.monospacedDigit() : .subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(FieldStyle.mint)
                     .minimumScaleFactor(0.8)
                 Text(wall == nil ? evidence(dimension?.evidence) : "Wall reference").font(.caption2).foregroundStyle(.white.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+            }.frame(width: typeSize.isAccessibilitySize && !expanded ? 200 : nil, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(expanded ? 8 : 6)
                 .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
                 .accessibilityElement(children: .combine)
         }

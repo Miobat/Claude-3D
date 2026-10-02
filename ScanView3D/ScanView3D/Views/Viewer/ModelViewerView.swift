@@ -113,6 +113,7 @@ struct ModelViewerView: View {
     @StateObject private var session = MeasurementSession()
     @StateObject private var objects = ObjectMeasurementSession()
     @State private var measuringObjects = false
+    @State private var objectPanelExpanded = false
     @StateObject private var navigation = WalkNavigation()
     @Environment(\.scenePhase) private var scenePhase
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
@@ -317,6 +318,7 @@ struct ModelViewerView: View {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
             if DesignPreview.screen?.hasPrefix("object") == true { activeTool = .measure; measuringObjects = true }
+            if DesignPreview.screen == "object-expanded" { objectPanelExpanded = true }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
             if DesignPreview.screen == "quality" {
@@ -334,11 +336,13 @@ struct ModelViewerView: View {
             session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
         }
         .onChange(of: activeTool) { _, tool in
+            if tool != .measure { objectPanelExpanded = false }
             session.isActive = (tool == .measure && !measuringObjects)
             objects.active = (tool == .measure && measuringObjects)
             if tool == .measure { navigation.enabled = false }
         }
         .onChange(of: measuringObjects) { _, enabled in
+            if !enabled { objectPanelExpanded = false }
             session.isActive = activeTool == .measure && !enabled
             objects.active = activeTool == .measure && enabled
         }
@@ -655,7 +659,7 @@ struct ModelViewerView: View {
                             Text("Object").tag(true)
                         }.pickerStyle(.segmented).padding(.horizontal, 12)
                             .accessibilityIdentifier("measurementType")
-                        if measuringObjects { ObjectMeasurementPanel(session: objects, unit: measurementUnit) }
+                        if measuringObjects { ObjectMeasurementPanel(session: objects, unit: measurementUnit, expanded: $objectPanelExpanded) }
                         else { measurePanel }
                     }.background {
                         GeometryReader { proxy in
@@ -663,10 +667,11 @@ struct ModelViewerView: View {
                         }
                     }
                 }
-                // Object results need a stable viewport. A ScrollView preference
-                // can report its initial 200 pt proposal instead of full content,
-                // clipping the dimension cards even on a tall phone.
-                .frame(height: measuringObjects ? (compact ? 230 : 320) : min(measurePanelHeight, compact ? 230 : 290))
+                // Compact by default; full correction/help tools are opt-in.
+                // Keep the scroll viewport explicit so content measurement
+                // cannot grow the panel over the model or clip its controls.
+                .frame(height: measuringObjects ? ObjectPanelLayout.height(expanded: objectPanelExpanded,
+                    landscape: compact, accessibility: typeSize.isAccessibilitySize) : min(measurePanelHeight, compact ? 230 : 290))
                 .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 

@@ -212,6 +212,15 @@ enum DesignPreview {
         var failures: [String] = []
         var count = 0
         func check(_ condition: Bool, _ name: String) { count += 1; if !condition { failures.append(name) } }
+        check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: false) == 190,
+              "Object panel defaults to compact portrait height")
+        check(ObjectPanelLayout.height(expanded: false, landscape: true, accessibility: false) < 230,
+              "Compact object panel frees landscape viewport")
+        check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: true) < 320,
+              "Large-text compact panel remains bounded and scrollable")
+        check(ObjectPanelLayout.height(expanded: true, landscape: false, accessibility: false) == 320 &&
+              ObjectPanelLayout.height(expanded: true, landscape: true, accessibility: true) == 230,
+              "Expanded object tools retain full review viewport")
         automaticMeasurementChecks(check: check)
         let old = camera.simdTransform
         let extent: Float = 6
@@ -789,7 +798,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "object", "object-wall", "object-rejected", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "object", "object-wall", "object-rejected", "object-expanded", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }

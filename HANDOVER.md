@@ -337,3 +337,13 @@ with invented geometry or relax capture range/confidence filtering.
 On-device acceptance is still required: the exact TV/lamp may have no separable
 depth geometry (especially reflective screens/thin metal). Use Preserve, capture
 their sides slowly, then test Select/Add part; do not claim unknown physical depth.
+
+## 17. Compact Object panel
+
+`codex/compact-object-panel` starts from published `2ec66bc`. The Object panel
+defaults to 190 pt instead of 320 pt (220 pt with accessibility text), keeping
+selection, Add part, Undo, Save and dimension evidence in a compact layout.
+The chevron expands the existing review/paint/axis/saved-object tools and collapses
+them again. Leaving Object/Measure resets to compact. Large text scrolls instead
+of shrinking tap targets. No selection maths, scan storage or capture changes.
+CI covers compact and expanded portrait/landscape/large-text screenshots.

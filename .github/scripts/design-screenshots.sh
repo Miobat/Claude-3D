@@ -28,8 +28,8 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 130 and not r["failures"], "Native capture / navigation / recovery / texture / automatic measurement checks failed"' "$OUT/navigation-checks.json"
-SCREENS="scanner capture-active capture-settings viewer measure object object-wall object-rejected quality retention"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 134 and not r["failures"], "Native capture / navigation / recovery / texture / automatic measurement checks failed"' "$OUT/navigation-checks.json"
+SCREENS="scanner capture-active capture-settings viewer measure object object-wall object-rejected object-expanded quality retention"
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-system-upgrade" || "${GITHUB_HEAD_REF:-}" == "codex/design-system-upgrade" ]]; then
   SCREENS="projects library project settings scanner capture-active capture-settings viewer measure quality empty"
 fi
@@ -47,6 +47,7 @@ capture viewer viewer-large-text
 capture object object-large-text
 capture object-wall object-wall-large-text
 capture object-rejected object-rejected-large-text
+capture object-expanded object-expanded-large-text
 capture retention retention-large-text
 capture quality quality-large-text
 xcrun simctl ui "$DEVICE" content_size large
@@ -58,6 +59,7 @@ capture viewer viewer-landscape --landscape
 capture measure measure-landscape --landscape
 capture object object-landscape --landscape
 capture object-wall object-wall-landscape --landscape
+capture object-expanded object-expanded-landscape --landscape
 capture quality quality-landscape --landscape
 capture joysticks viewer-joysticks-landscape --landscape
 xcrun simctl shutdown "$DEVICE"
