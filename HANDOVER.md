@@ -36,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10037`/`B10037`). Deleting a file = remove those 4 lines too.
+(currently `A10045`/`B10045`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -57,6 +57,7 @@ and a line in the Sources build phase. Copy an existing file's lines (e.g.
 | Capture | `Services/LiDARScanner.swift` | ARKit session, anchors, range filter (walked path, `PathRangeIndex`), keyframes, HQ/Splat photos (+12 MP), white-balance lock, memory guard, `DepthPointAccumulator` (LiDAR point cloud), `PoseFile`, `MeshData` |
 | | `Services/MockLiDARScanner.swift` | Simulator stand-in (same API) |
 | | `Services/TextureMapper.swift` | Colour keyframes on disk (+ depth for occlusion), vertex colours, **photo-patch texture baking** |
+| | `StorageCore/Sources/StorageCore/TextureQuality.swift` | Photo quality scoring, bounded overlap-exposure solver, fallback palette and saved area diagnostics; see `ScanView3D/TEXTURE_QUALITY.md` |
 | Processing | `Services/MeshProcessor.swift` | Clean-up (weld, Taubin smoothing, clustering), SceneKit node builders, `PhotogrammetryProcessor` (on-device, `.poses`), `SplatExporter` |
 | | `Services/MeasurementEngine.swift` | `GeometryMath` (plane fit, RANSAC, intersections, Horn similarity), `ModelGeometryIndex` (spatial index, wall axes), `SceneFrame` (level/square-up) |
 | Storage | `Services/StorageManager.swift` | Projects JSON, scan files, companions, export/share (zips textured OBJ), CAD exports (OBJ Z-up, STL mm), measurements files |
@@ -164,14 +165,109 @@ Viewer navigation includes surface-anchored orbit, exact point-cloud picking,
 rate-adjusted joysticks, vertical control and ground-locked walk. Real LiDAR and
 photogrammetry behaviour still require the documented phone acceptance tests.
 
-## 9. Capture capacity and rollback
+## 11. Capture capacity and rollback
 
 Scan capacity is memory-based (`LiDARScanner.captureLimits`): coverage cells
-(2.5 cm, 600 000 – 3 000 000) and saved points (Points/Splat, one per point
-spacing) share one budget sized by surface area. Limits never drop below the
-previous fixed ones. Fast/HQ keep no point cells. When the budget is full the
+(2.5 cm, up to 3 000 000) and saved points (Points/Splat, one per point
+spacing, up to 4 000 000) share one budget sized by surface area. A 600 MB
+save reserve and conservative per-entry estimate take precedence over old
+fixed minimums. Fast/HQ keep no point cells. When the budget is full the
 scan pauses (no silent loss) and cannot be resumed; the user saves.
 
 Known-good build before the large-area work: commit `c662221` (tag
 `stable-before-large-area`, local only). To roll back, install that TestFlight
 build from "Previous Builds", or run the TestFlight workflow on that commit.
+
+## 12. Capture trust and recovery hardening
+
+See `ScanView3D/CAPTURE_TRUST.md`. Fast colour coverage now distinguishes shape
+(blue) from shape plus a retained sharp photo (mint). A photo is committed only
+after its JPEG write, using its own depth pose. Every kept mesh face must fit
+a recorded range sphere. (Smoothing and near low-confidence evidence: see §13.)
+Lightweight recovery retains sampled vertex colour (not the temporary photo
+atlas). Required scan metadata commits with the first library write. Native
+Metal / recovery / navigation checks now gate every release branch.
+
+## 13. Owner decisions — do not reverse without asking
+
+Decided by the owner after testing on the phone:
+- **Fast meshes keep light smoothing** (`postProcess` / `clusterVertices` without
+  `preservePositions`). Without it meshes look blocky. It moves vertices by mm.
+- **Low-confidence depth within 1.5 m creates coverage evidence** (never saved
+  points). Dark / shiny / thin objects rarely reach medium confidence; without it
+  they become holes in Fast meshes. Farther weak depth only retains old coverage.
+- Normal-size scans must behave as before any capacity / large-area work.
+- Every change must keep a way back (TestFlight previous builds; known-good commits).
+
+## 14. CI cost and timing
+
+The repo is **public**, so GitHub-hosted runners (macOS included) cost nothing;
+the concern is wall-clock time. A publishing push runs the validate job without
+its separate device/simulator compile (`compile: false`; the TestFlight archive
+compiles anyway). `codex/**` pushes and pull requests still compile. Doc-only
+changes (`ScanView3D/**/*.md`) don't trigger a build. Private repos would bill
+macOS minutes at 10× — keep this in mind before adding steps.
+
+## 15. Roadmap (agreed plans, in order)
+
+Coordinate before starting: one tool per area; merge branch by branch.
+
+### A. Save more on new scans (small, first)
+- Per-face ARKit classification (floor/wall/ceiling/table/seat/door/window),
+  stored with the scan (optional sidecar / field; old scans have none).
+- Coarse 3D occupancy grid (5–10 cm cells: seen-empty / surface / never-seen),
+  built from depth rays during capture. Needed for honest fit checks.
+
+### B. Measurement: objects and rooms
+- **Object:** Measure → Object → tap. Region-grow over connected surfaces from
+  the tap, stopping at the floor, large wall planes (RANSAC, `MeasurementEngine`)
+  and gaps; classification helps when present. Gravity-aligned box with yaw
+  only (min-area footprint rectangle); height from the floor plane; extents use
+  1st–99th percentiles. Depth against a wall = front face to wall plane. Only a
+  free-standing, front-only object reports "≥ X (partial)". Each dimension is
+  labelled measured / from wall / partial. Corrections: handles plus paint to
+  add/remove surfaces. Views (orthographic exists) align to the selection.
+- **Room:** horizontal slice at ~1.0–1.2 m → 2D outline → fitted lines →
+  polygon (L-shapes, alcoves, openings). Wall lengths, diagonals (squareness),
+  area, perimeter, ceiling height min/max. Missing walls/ceiling flagged.
+- **Output:** dimensioned drawing PDF/PNG and DXF; the slice is a floor plan.
+- **RoomPlan:** later, as a separate "Room" capture mode first (running it
+  alongside the detailed scan costs memory/heat).
+- **Tests:** synthetic scenes in StorageCore (box on floor, rotated box, box
+  against wall, L-shaped room, noise). Targets ~±1 cm objects, ±2 cm rooms;
+  then tape-measure checks on the phone.
+- New measurement kinds must decode tolerantly (older versions keep loading).
+
+### C. Planning (equipment placement, clearance, notes)
+- Inside saved scans first (SceneKit viewer; not RealityKit). Layouts are
+  companion files next to the scan (`companionFiles`, atomic writes), several
+  per scan, positions in the scan's saved frame (`SceneFrame` / `modelMatrix`).
+  Scale-unverified scans: planning checks blocked, like metric measuring.
+- Equipment: dimensioned boxes / cylinders, presets, definition snapshot saved
+  with each placement; sizes locked against accidental pinch; numeric panel;
+  undo/redo; edit mode separate from orbit (one finger drags on the support
+  surface, rotate handle). Default orientation follows the wall axes.
+- Snapping: floor, "push against wall", corners, other equipment. Live
+  dimension lines to the nearest wall/object while dragging.
+- Clearance volumes move with equipment; reason/source stored.
+- Checks: box vs nearby triangles via the spatial index (SAT); point clouds by
+  counting points inside the box above a noise threshold. Support contact is
+  not a clash. Results per region: clear (seen empty) / clash / unknown (never
+  scanned, from the occupancy grid); old scans → "coverage unverified".
+- "To be removed": select an existing object (from B) to ignore in checks;
+  "copy as equipment" turns a measured object into a placeable box.
+- Doorway fit (opening vs smallest cross-section) before any route planning.
+- Notes on equipment (move with it) or on scan locations; photos copied in.
+- Export: annotated images (with warnings), CSV list, footprints in the
+  plan/DXF export. Geometry checks + tests live in StorageCore.
+- Live AR later: same-session first; returning to a site needs a saved
+  ARWorldMap — shared with "continue scan another day" (D).
+
+### D. Large areas (from the capacity work)
+- Step 2 sections: continuous ARSession, finished parts saved and released
+  automatically (~80 % capacity) or by "New section"; overlap band = scan
+  range + margin (not a fixed 1 m); same coordinates throughout; drift checked
+  and corrected where sections meet again; per-section quality figure.
+- Step 3 thinning: areas left behind simplified (flat surfaces sparse,
+  edges/objects dense); setting "Full detail" / "Detail at edges only".
+- Step 4: saved world map to continue later; join scans (3 point pairs + ICP).

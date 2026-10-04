@@ -175,7 +175,8 @@ class StorageManager: ObservableObject {
         name: String,
         toProject project: Project,
         format: ExportFormat = .obj,
-        baked: BakedTexture? = nil
+        baked: BakedTexture? = nil,
+        metadata: ((inout Scan) -> Void)? = nil
     ) throws -> Scan {
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
@@ -222,6 +223,7 @@ class StorageManager: ObservableObject {
         )
         scan.hasColor = !meshData.colors.isEmpty
         scan.hasTexture = isTextured
+        scan.textureQuality = isTextured ? baked?.quality : nil
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
 
@@ -246,6 +248,7 @@ class StorageManager: ObservableObject {
         // Generate thumbnail
         scan.thumbnailData = generateThumbnail(for: meshData)
 
+        metadata?(&scan)
         try addScan(scan, to: project)
         return scan
     }
@@ -261,7 +264,8 @@ class StorageManager: ObservableObject {
     ///   scale; we derive this from the LiDAR mesh captured in the same session).
     /// - photosFolder: source photos to keep with the scan for later re-reconstruction.
     func importProcessedModel(modelURL: URL, name: String, toProject project: Project,
-                              modelTransform: simd_float4x4? = nil, photosFolder: URL? = nil) throws -> Scan {
+                              modelTransform: simd_float4x4? = nil, photosFolder: URL? = nil,
+                              metadata: ((inout Scan) -> Void)? = nil) throws -> Scan {
         let scanId = UUID()
         let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
         let fileName = "\(scanId.uuidString).\(ext)"
@@ -296,6 +300,7 @@ class StorageManager: ObservableObject {
             }
         }
 
+        metadata?(&scan)
         try addScan(scan, to: project)
         return scan
     }
@@ -390,6 +395,7 @@ class StorageManager: ObservableObject {
                 updated.modelScale = nil
                 updated.modelTransform = modelTransform.map(StorageManager.array(of:))
                 updated.coordinateProvenance = provenance
+                updated.textureQuality = nil // A new reconstruction has different surfaces/photos.
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
                     throw StorageFailure.missingItem
@@ -607,6 +613,7 @@ class StorageManager: ObservableObject {
             fileSize: scan.fileSize
         )
         newScan.hasTexture = scan.hasTexture
+        newScan.textureQuality = scan.textureQuality
         newScan.hasColor = scan.hasColor
         newScan.boundingBoxMin = scan.boundingBoxMin
         newScan.boundingBoxMax = scan.boundingBoxMax

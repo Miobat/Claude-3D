@@ -105,6 +105,7 @@ struct Scan: Identifiable, Codable {
     /// Optional for compatibility with every existing projects.json file.
     var retainedReconstructionFiles: [String]?
     var coordinateProvenance: CoordinateProvenance?
+    var textureQuality: TextureQualityReport?
 
     var scaleStatus: CoordinateProvenance.ScaleStatus {
         coordinateProvenance?.scaleStatus ?? ((vertexCount > 0 && modelTransform == nil && modelScale == nil) ? .lidarMetric : .legacyUnverified)

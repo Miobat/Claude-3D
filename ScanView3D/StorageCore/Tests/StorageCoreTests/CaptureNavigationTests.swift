@@ -37,17 +37,62 @@ final class CaptureNavigationTests: XCTestCase {
         XCTAssertFalse(index.contains(SIMD3(0.4, 0, -0.5)))
         XCTAssertTrue(index.insert(SIMD3(0, 0, -0.5), camera: .zero, range: 1))
     }
-    func testPhotoCoverageNeedsAPhotoAndIsNeverLost() {
+    func testPhotoCoverageNeedsACommittedRetainedPhoto() {
         var index = CapturedSurfaceIndex()
         let p = SIMD3<Float>(0, 0, -0.8)
         index.insert(p, camera: .zero, range: 1)
         XCTAssertTrue(index.contains(p))
         XCTAssertFalse(index.contains(p, requirePhoto: true))
-        index.insert(p, camera: .zero, range: 1, photographed: true)
+        index.markPhotographed(p, photoID: 7) // not committed / retained yet
+        XCTAssertFalse(index.isPhotographed(p))
+        index.retainPhotos([7])
+        index.markPhotographed(p, photoID: 7)
         XCTAssertTrue(index.isPhotographed(p))
         // A later depth-only observation keeps the photo mark.
         index.insert(p, camera: .zero, range: 1)
         XCTAssertTrue(index.contains(p, requirePhoto: true))
+        index.retainPhotos([]) // a removed image cannot promise sharp colour
+        XCTAssertFalse(index.contains(p, requirePhoto: true))
+        XCTAssertTrue(index.contains(p))
+    }
+    func testPhotoDoesNotCreateGeometryOrPaintTheNextView() {
+        var index = CapturedSurfaceIndex()
+        let p = SIMD3<Float>(0, 0, -0.8), other = SIMD3<Float>(0.3, 0, -0.8)
+        index.retainPhotos([1])
+        index.markPhotographed(p, photoID: 1)
+        XCTAssertFalse(index.contains(p))
+        index.insert(other, camera: .zero, range: 1)
+        index.markPhotographed(p, photoID: 1)
+        XCTAssertFalse(index.contains(other, requirePhoto: true))
+    }
+    func testSmallTriangleCannotCrossRangeAtAnAcceptedCorner() {
+        var index = CapturedSurfaceIndex()
+        let a = SIMD3<Float>(0, 0, -0.99)
+        index.insert(a, camera: .zero, range: 1)
+        let observations = [index.sample(at: a)!]
+        XCTAssertFalse(CapturedSurfaceIndex.withinObservedRange(a, SIMD3(0.1, 0, -1.08),
+            SIMD3(0, 0.1, -1.08), observations: observations))
+        XCTAssertTrue(CapturedSurfaceIndex.withinObservedRange(a, SIMD3(0.05, 0, -0.95),
+            SIMD3(0, 0.05, -0.95), observations: observations))
+    }
+    func testEvidenceRetainsRealCameraColour() {
+        var index = CapturedSurfaceIndex()
+        let p = SIMD3<Float>(0, 0, -0.8), red = SIMD3<Float>(1, 0.1, 0.2)
+        index.insert(p, camera: .zero, range: 1, color: red)
+        XCTAssertEqual(index.sample(at: p)?.color, red)
+    }
+    func testCapacityFitsCombinedBudgetAndSaveReserve() {
+        for available in [512.0, 700, 1024, 2048, 4096, 8192] {
+            for spacing: Float in [4, 10, 20, 50] {
+                for dense in [false, true] {
+                    let limits = CaptureBudget.limits(dense: dense, detailMM: spacing, availableMB: available)
+                    let bytes = Double(limits.points + limits.coverageCells) * CaptureBudget.bytesPerEntry
+                    XCTAssertLessThanOrEqual(bytes, max(0, available - 600) * 1_048_576 * 0.35)
+                    if !dense { XCTAssertEqual(limits.points, 0) }
+                }
+            }
+        }
+        XCTAssertEqual(CaptureBudget.limits(dense: true, detailMM: 10, availableMB: .nan).coverageCells, 0)
     }
     func testMaskErosionKeepsBackgroundExcludedAndRoundTrips() throws {
         let mask = PhotoRangeMask(width: 5, height: 5, pixels: Data(repeating: 255, count: 25), rangeMetres: 1)

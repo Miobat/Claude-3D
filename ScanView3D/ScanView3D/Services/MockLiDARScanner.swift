@@ -14,6 +14,8 @@ class MockLiDARScanner: ObservableObject {
     @Published var faceCount: Int = 0
     @Published var scanError: String?
     @Published var capturedFrameCount: Int = 0
+    @Published var sharpTextureFrameCount: Int = 0
+    @Published var textureCaptureIssue: String?
     @Published var detectedPlaneCount: Int = 0
     @Published var isPreviewing = false
     @Published var memoryUsageMB: Double = 0
@@ -78,6 +80,7 @@ class MockLiDARScanner: ObservableObject {
             self.faceCount = Int(Float(Self.sampleRoomFaceCount) * progress)
             self.scanProgress = "Scanning... \(Int(progress * 100))%"
             self.capturedFrameCount = Int(progress * 80)
+            self.sharpTextureFrameCount = Int(progress * 72)
 
             if self.simulatedProgress >= 1.0 {
                 self.scanTimer?.invalidate()
@@ -127,6 +130,8 @@ class MockLiDARScanner: ObservableObject {
         vertexCount = 0
         faceCount = 0
         capturedFrameCount = 0
+        sharpTextureFrameCount = 0
+        textureCaptureIssue = nil
         scanProgress = "Ready to scan (Simulator Mode)"
     }
 

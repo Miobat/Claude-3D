@@ -20,7 +20,12 @@ enum DesignPreview {
         let store = StorageManager(directory: root)
         guard !empty else { return store }
         if let site = store.createProject(name: "Coastal path · Demo") {
-            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site)
+            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site, metadata: {
+                if screen == "quality" {
+                    $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
+                        atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
+                }
+            })
             _ = try? store.saveScan(meshData: terrain(), name: "North slope", toProject: site, format: .ply)
         }
         if let room = store.createProject(name: "Studio · Demo") {
@@ -148,11 +153,97 @@ enum DesignPreview {
         } catch { check(false, "Photo-mask resize: \(error)") }
 
         checkFeedbackShader(check)
+        checkRecoveryAndSave(check)
+        checkTextureQuality(check)
         let report: [String: Any] = ["checks": count, "failures": failures]
         let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("navigation-checks.json")
         do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
         catch { assertionFailure("Could not write navigation test report: \(error)") }
+    }
+
+    private static func checkTextureQuality(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("texture-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            func photo(_ name: String, pixels: [UInt8]) throws -> URL {
+                let data = Data(pixels)
+                guard let provider = CGDataProvider(data: data as CFData),
+                      let image = CGImage(width: 8, height: 8, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 32,
+                        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+                      let png = UIImage(cgImage: image).pngData() else { throw CocoaError(.fileReadCorruptFile) }
+                let url = root.appendingPathComponent(name + ".png")
+                try png.write(to: url); return url
+            }
+            let red = try photo("red", pixels: (0..<64).flatMap { _ -> [UInt8] in [255, 0, 0, 255] })
+            let blue = try photo("blue", pixels: (0..<64).flatMap { _ -> [UInt8] in [0, 0, 255, 255] })
+            let quads = try photo("quadrants", pixels: (0..<64).flatMap { i -> [UInt8] in
+                i < 32 ? (i % 8 < 4 ? [255, 0, 0, 255] : [0, 255, 0, 255])
+                    : (i % 8 < 4 ? [0, 0, 255, 255] : [255, 255, 255, 255])
+            })
+            guard let image = DecodedImage(url: quads) else { check(false, "Decode texture fixture"); return }
+            check(image.sample(SIMD2(0.2, 0.2), gain: 1).x > 0.99 && image.sample(SIMD2(0.2, 0.8), gain: 1).z > 0.99 &&
+                  image.sample(SIMD2(0.8, 0.2), gain: 1).y > 0.99, "Decoded photos retain sensor quadrant orientation")
+            check(image.sample(SIMD2(-10, -10), gain: 1) == image.sample(.zero, gain: 1) &&
+                  image.sample(SIMD2(10, 10), gain: 1) == image.sample(SIMD2(1, 1), gain: 1), "Texture padding clamps bilinear samples")
+            let intrinsics = simd_float3x3(SIMD3(4, 0, 0), SIMD3(0, 4, 0), SIMD3(4, 4, 1))
+            let depth = [Float](repeating: 1, count: 64)
+            func frame(_ id: Int, _ url: URL, sharp: Bool = true, depth values: [Float]? = nil) -> CapturedFrame {
+                CapturedFrame(id: id, imageURL: url, transform: matrix_identity_float4x4, intrinsics: intrinsics,
+                    imageWidth: 8, imageHeight: 8, timestamp: Double(id), depth: values ?? depth, depthWidth: 8, depthHeight: 8,
+                    gain: 1, sharp: sharp)
+            }
+            let pose = FramePose(view: matrix_identity_float4x4, intrinsics: intrinsics, sensorW: 8, sensorH: 8,
+                position: .zero, forward: SIMD3(0, 0, -1), depth: depth, depthW: 8, depthH: 8)
+            check(pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 1)), "Texture accepts matching depth")
+            check(!pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 0.5)) &&
+                  !pose.isVisible(.init(uv: SIMD2(0.5, 0.5), depth: 2)), "Texture rejects both foreground and background mismatch")
+            check(!pose.isVisible(.init(uv: SIMD2(.nan, 0.5), depth: 1)), "Texture safely rejects invalid projection")
+            let vertices: [SIMD3<Float>] = [SIMD3(-0.4, 0.4, -1), SIMD3(-0.4, -0.4, -1), SIMD3(0.4, -0.4, -1)]
+            let bounds = MeshData.bounds(of: vertices)
+            let mesh = MeshData(vertices: vertices, normals: Array(repeating: SIMD3(0, 0, 1), count: 3), faces: [[0, 1, 2]],
+                colors: Array(repeating: SIMD4(0, 1, 1, 1), count: 3), boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+            var cornerBlocked = depth; cornerBlocked[2 * 8 + 2] = 0.5
+            let cases: [(String, [CapturedFrame], Float, Float, Float)] = [
+                ("Sharp beats soft", [frame(1, red, sharp: false), frame(2, blue)], 1, 0, 0),
+                ("Soft fallback remains available", [frame(1, red, sharp: false)], 0, 1, 0),
+                ("Occluded corner rejects entire photo patch", [frame(1, red, depth: cornerBlocked)], 0, 0, 1),
+                ("Unknown depth cannot authorize a photo", [frame(1, red, depth: [])], 0, 0, 1),
+                ("Missing JPEG retains sampled colour", [frame(1, root.appendingPathComponent("missing.jpg"))], 0, 0, 1)
+            ]
+            for (name, frames, sharp, soft, fallback) in cases {
+                try autoreleasepool {
+                    let mapper = TextureMapper(); mapper.useFixtureFrames(frames)
+                    guard let baked = mapper.bakeTexture(meshData: mesh, atlasSize: 2048), let report = baked.quality else {
+                        check(false, name + " bakes"); return
+                    }
+                    check(abs(report.sharpFraction - Double(sharp)) < 0.001 && abs(report.softFraction - Double(soft)) < 0.001 &&
+                          abs(report.fallbackFraction - Double(fallback)) < 0.001, name + " — area report")
+                    let url = root.appendingPathComponent("atlas.png")
+                    try baked.atlasImage.pngData()!.write(to: url)
+                    guard let atlas = DecodedImage(url: url) else { check(false, "Decode baked atlas"); return }
+                    let uv = baked.cornerUVs.reduce(SIMD2<Float>.zero, +) / 3
+                    let c = atlas.sample(SIMD2(uv.x, 1 - uv.y), gain: 1)
+                    check(fallback > 0 ? c.x < 0.01 && c.y > 0.99 && c.z > 0.99
+                          : sharp > 0 ? c.x < 0.01 && c.z > 0.99 : c.x > 0.99 && c.z < 0.01, name + " — real atlas colour")
+                    if sharp > 0 {
+                        let store = StorageManager(directory: root.appendingPathComponent("library"))
+                        guard let project = store.createProject(name: "Texture metadata") else { check(false, "Texture project fixture"); return }
+                        let scan = try store.saveScan(meshData: mesh, name: name, toProject: project, baked: baked)
+                        let restored = StorageManager(directory: root.appendingPathComponent("library")).projects.first?.scans.first
+                        check(restored?.textureQuality == report && restored?.hasTexture == true, "Texture report persists with baked model")
+                        let duplicate = store.duplicateScan(scan, from: project, to: project)
+                        check(duplicate?.textureQuality == report, "Duplicate retains texture report")
+                        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(scan)) as! [String: Any]
+                        json.removeValue(forKey: "textureQuality")
+                        let legacy = try JSONDecoder().decode(Scan.self, from: JSONSerialization.data(withJSONObject: json))
+                        check(legacy.textureQuality == nil, "Legacy scans without quality report still decode")
+                    }
+                }
+            }
+        } catch { check(false, "Native texture fixtures: \(error)") }
     }
 
     private static func checkFeedbackShader(_ check: (Bool, String) -> Void) {
@@ -181,8 +272,9 @@ enum DesignPreview {
               let depth = texture(.r32Float), let accepted = texture(.r32Float) else {
             check(false, "Capture feedback test textures"); return
         }
-        let colors = [SIMD4<Float>](repeating: SIMD4(26.0 / 255, 0.2, 0.8, 1), count: 256)
-        let colorBytes = (0..<256).flatMap { _ in [UInt8(26), 51, 204, 255] }
+        // Explicit element type is essential: unconstrained flatMap selected
+        // the optional overload and uploaded array storage, not RGBA bytes.
+        let colorBytes: [UInt8] = (0..<256).flatMap { _ -> [UInt8] in [26, 51, 204, 255] }
         let depths: [Float] = (0..<256).map { i in i % 16 < 4 ? 1 : i % 16 < 8 ? 2 : i % 16 < 12 ? 0 : 1 }
         let committed: [Float] = (0..<256).map { $0 % 16 < 8 ? 1 : 0 }
         colorBytes.withUnsafeBytes { source.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
@@ -192,6 +284,7 @@ enum DesignPreview {
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(source, index: 0); encoder.setTexture(output, index: 1)
         encoder.setTexture(depth, index: 2); encoder.setTexture(accepted, index: 3)
+        encoder.setTexture(accepted, index: 4)
         var uniforms = Uniforms()
         encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
@@ -209,19 +302,127 @@ enum DesignPreview {
         referenceEncoder.setComputePipelineState(pipeline)
         referenceEncoder.setTexture(source, index: 0); referenceEncoder.setTexture(baseline, index: 1)
         referenceEncoder.setTexture(depth, index: 2); referenceEncoder.setTexture(accepted, index: 3)
+        referenceEncoder.setTexture(accepted, index: 4)
         referenceEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         referenceEncoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
         referenceEncoder.endEncoding(); referenceCommand.commit(); referenceCommand.waitUntilCompleted()
         check(referenceCommand.status == .completed, "Capture feedback reference GPU command")
         var reference = [SIMD4<Float>](repeating: .zero, count: 256)
         reference.withUnsafeMutableBytes { baseline.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+        let sourceColour = SIMD4<Float>(26.0 / 255, 51.0 / 255, 204.0 / 255, 1)
+        check(reference.allSatisfy { simd_distance($0, sourceColour) < 0.002 },
+              "GPU fixture uploads uniform RGBA8 bytes: \(reference[8 * 16 + 5]), expected \(sourceColour)")
         func unchanged(_ i: Int) -> Bool {
             simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
         }
         check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
-        check(result[8 * 16 + 5].y < 0.4 && result[8 * 16 + 5].z < 0.7, "Out-of-range surface is muted without mint coverage")
+        let outside = 8 * 16 + 5
+        let original = SIMD3(reference[outside].x, reference[outside].y, reference[outside].z)
+        let grey = simd_dot(original, SIMD3<Float>(0.2126, 0.7152, 0.0722))
+        // A uniform input is unchanged by blur. Check the actual desaturation /
+        // dimming formula, not a GPU-dependent fixed colour threshold.
+        let expected = (original * 0.55 + SIMD3<Float>(repeating: grey) * 0.45) * 0.78
+        check(simd_distance(SIMD3(result[outside].x, result[outside].y, result[outside].z), expected) < 0.002,
+              "Out-of-range colour: actual \(result[outside]), expected \(expected), GPU \(device.name), OS \(ProcessInfo.processInfo.operatingSystemVersionString)")
         check(unchanged(8 * 16 + 9), "Unknown depth does not invent coverage: actual \(result[8 * 16 + 9]), baseline \(reference[8 * 16 + 9])")
         check(unchanged(8 * 16 + 13), "Uncommitted depth does not invent coverage: actual \(result[8 * 16 + 13]), baseline \(reference[8 * 16 + 13])")
+
+        // Fast colour mode: geometry alone is blue; only a retained, saved
+        // sharp photo is allowed to turn it mint. Test the production kernel.
+        for hasPhoto in [false, true] {
+            guard let photo = texture(.r32Float), let cmd = queue.makeCommandBuffer(),
+                  let enc = cmd.makeComputeCommandEncoder() else { check(false, "Photo coverage command"); return }
+            let photoDepths = hasPhoto ? committed : [Float](repeating: 0, count: 256)
+            photoDepths.withUnsafeBytes { photo.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
+            uniforms.parameters = SIMD4(1.5, 2, 16, 16)
+            enc.setComputePipelineState(pipeline)
+            enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
+            enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3); enc.setTexture(photo, index: 4)
+            enc.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+            enc.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+            var pixels = [SIMD4<Float>](repeating: .zero, count: 256)
+            pixels.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+            let p = pixels[8 * 16 + 1]
+            check(cmd.status == .completed && (hasPhoto ? simd_distance(p, result[8 * 16 + 1]) < 0.0001 : p.z > p.y && p.y < result[8 * 16 + 1].y - 0.08),
+                  "Fast coverage \(hasPhoto ? "mint with photo" : "blue without photo"): \(p)")
+        }
+    }
+
+    private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {
+        do {
+            let mesh = terrain()
+            let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+            let data = try encoder.encode(mesh)
+            let restored = try PropertyListDecoder().decode(MeshData.self, from: data)
+            check(restored.vertices == mesh.vertices && restored.normals == mesh.normals && restored.faces == mesh.faces,
+                  "Packed checkpoint geometry round-trip")
+            check(zip(restored.colors, mesh.colors).allSatisfy { simd_distance($0, $1) <= 0.004 },
+                  "Packed checkpoint retains sampled camera colour")
+            var properties = try PropertyListSerialization.propertyList(from: data, format: nil) as! [String: Any]
+            for key in ["packedVertices", "packedNormals", "packedFaces", "packedColors"] {
+                var corrupt = properties
+                var bytes = corrupt[key] as! Data; bytes.append(0)
+                corrupt[key] = bytes
+                let invalid = try PropertyListSerialization.data(fromPropertyList: corrupt, format: .binary, options: 0)
+                do {
+                    _ = try PropertyListDecoder().decode(MeshData.self, from: invalid)
+                    check(false, "Reject truncated \(key)")
+                } catch { check(true, "Reject truncated \(key)") }
+            }
+            properties["packedFaces"] = Data(repeating: 255, count: 12)
+            let invalidFaces = try PropertyListSerialization.data(fromPropertyList: properties, format: .binary, options: 0)
+            do {
+                _ = try PropertyListDecoder().decode(MeshData.self, from: invalidFaces)
+                check(false, "Reject out-of-bounds checkpoint indices")
+            } catch { check(true, "Reject out-of-bounds checkpoint indices") }
+            // Preserve compatibility with the original synthesized Codable shape.
+            struct LegacyMesh: Encodable {
+                let vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>]
+                let boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>
+            }
+            let legacy = LegacyMesh(vertices: mesh.vertices, normals: mesh.normals, faces: mesh.faces,
+                                    colors: mesh.colors, boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            let old = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(legacy))
+            check(old.vertices == mesh.vertices && old.colors == mesh.colors, "Legacy checkpoint remains readable")
+            let bare = LegacyMesh(vertices: mesh.vertices, normals: [], faces: mesh.faces, colors: [],
+                                  boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            let bareMesh = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(bare))
+            check(bareMesh.vertices == mesh.vertices && bareMesh.normals.isEmpty && bareMesh.colors.isEmpty,
+                  "Legacy geometry without optional colour / normals remains readable")
+            var invalidVertices = mesh.vertices; invalidVertices[0].x = .nan
+            let nonFinite = MeshData(vertices: invalidVertices, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                                     boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try encoder.encode(nonFinite); check(false, "Reject nonfinite checkpoint") }
+            catch { check(true, "Reject nonfinite checkpoint") }
+            var invalidTriangles = mesh.faces; invalidTriangles[0] = [0, 1]
+            let brokenFace = MeshData(vertices: mesh.vertices, normals: mesh.normals, faces: invalidTriangles, colors: mesh.colors,
+                                      boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try encoder.encode(brokenFace); check(false, "Never silently discard malformed faces") }
+            catch { check(true, "Never silently discard malformed faces") }
+
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("save-check-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Atomic metadata fixture") else { check(false, "Fixture project creation"); return }
+            let scan = try store.saveScan(meshData: mesh, name: "Atomic save", toProject: project, metadata: {
+                $0.latitude = 59.91; $0.longitude = 10.75
+            })
+            let reloaded = StorageManager(directory: root).projects.first?.scans.first
+            check(reloaded?.id == scan.id && reloaded?.latitude == 59.91 && reloaded?.longitude == 10.75,
+                  "Mesh and capture metadata survive first index commit")
+            let indexURL = root.appendingPathComponent("projects.json")
+            let externalIndex = Data("[]".utf8)
+            try externalIndex.write(to: indexURL, options: .atomic)
+            do {
+                _ = try store.saveScan(meshData: mesh, name: "Must fail", toProject: project, metadata: { $0.latitude = 60 })
+                check(false, "Reject a save when the library index changes externally")
+            } catch { check(true, "Reject a save when the library index changes externally") }
+            let diskAfterFailure = try Data(contentsOf: indexURL)
+            check(store.projects.first?.scans.count == 1 && store.projects.first?.scans.first?.id == scan.id &&
+                  diskAfterFailure == externalIndex,
+                  "Failed metadata/model transaction leaves published library and external index unchanged")
+        } catch { check(false, "Recovery / atomic save fixtures: \(error)") }
     }
 }
 
@@ -234,12 +435,12 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "walk", "joysticks", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: ["scanner", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
         .onAppear {

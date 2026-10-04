@@ -66,6 +66,7 @@ struct CaptureDepthFrame {
 struct AcceptedDepthFrame {
     let frame: CaptureDepthFrame
     let depth: [Float] // zero means NOT committed to the capture
+    let photoDepth: [Float]? // nil outside Fast + colour; zero means needs photo
 }
 
 /// Display-only effect: accepted depth reprojects into the current camera every
@@ -82,6 +83,7 @@ final class LiveCaptureFeedback {
     private struct State {
         let current: MTLTexture
         let accepted: MTLTexture
+        let photographed: MTLTexture
         let uniforms: Uniforms
     }
     private let device: MTLDevice
@@ -90,6 +92,7 @@ final class LiveCaptureFeedback {
     private var state: State?
     private var acceptedTime: TimeInterval = -1
     private var acceptedTexture: MTLTexture?
+    private var photoTexture: MTLTexture?
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let library = device.makeDefaultLibrary(),
@@ -100,7 +103,7 @@ final class LiveCaptureFeedback {
 
     func reset() {
         lock.lock(); state = nil; lock.unlock()
-        acceptedTime = -1; acceptedTexture = nil
+        acceptedTime = -1; acceptedTexture = nil; photoTexture = nil
     }
 
     // Each texture is immutable after publication to the render thread.
@@ -111,6 +114,7 @@ final class LiveCaptureFeedback {
         }
         if let accepted, accepted.frame.timestamp != acceptedTime {
             acceptedTexture = texture(accepted.depth, width: accepted.frame.width, height: accepted.frame.height)
+            photoTexture = accepted.photoDepth.flatMap { texture($0, width: accepted.frame.width, height: accepted.frame.height) }
             acceptedTime = accepted.frame.timestamp
         }
         let previous = accepted?.frame ?? sensor
@@ -122,12 +126,15 @@ final class LiveCaptureFeedback {
             k.z / Float(previous.width), k.w / Float(previous.height))
         var reliable = false
         if case .normal = frame.camera.trackingState { reliable = true }
+        let needsPhotoMask = accepted?.photoDepth != nil
+        let canShowCoverage = showCoverage && reliable && acceptedTexture != nil && (!needsPhotoMask || photoTexture != nil)
         let uniforms = Uniforms(cameraToWorld: sensor.cameraToWorld,
             worldToAcceptedCamera: previous.cameraToWorld.inverse, displayToImage: displayToImage,
             intrinsics: sensor.intrinsics, acceptedIntrinsics: normalizedK,
-            parameters: SIMD4(range, showCoverage && reliable && acceptedTexture != nil ? 1 : 0,
+            parameters: SIMD4(range, canShowCoverage ? (needsPhotoMask ? 2 : 1) : 0,
                 Float(sensor.width), Float(sensor.height)))
-        let newState = State(current: current, accepted: acceptedTexture ?? current, uniforms: uniforms)
+        let newState = State(current: current, accepted: acceptedTexture ?? current,
+                             photographed: photoTexture ?? current, uniforms: uniforms)
         lock.lock(); state = newState; lock.unlock()
     }
 
@@ -149,6 +156,7 @@ final class LiveCaptureFeedback {
         // Source and destination may have different pixel formats; a blit-copy
         // is not a valid passthrough. Let the shader do the conversion instead.
         let state = currentState ?? State(current: context.sourceColorTexture, accepted: context.sourceColorTexture,
+            photographed: context.sourceColorTexture,
             uniforms: Uniforms(cameraToWorld: matrix_identity_float4x4, worldToAcceptedCamera: matrix_identity_float4x4,
                 displayToImage: matrix_identity_float3x3, intrinsics: .zero, acceptedIntrinsics: .zero,
                 parameters: SIMD4(-1, 0, 1, 1)))
@@ -158,6 +166,7 @@ final class LiveCaptureFeedback {
         encoder.setTexture(context.targetColorTexture, index: 1)
         encoder.setTexture(state.current, index: 2)
         encoder.setTexture(state.accepted, index: 3)
+        encoder.setTexture(state.photographed, index: 4)
         var uniforms = state.uniforms
         encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         let width = pipeline.threadExecutionWidth
