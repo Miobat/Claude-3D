@@ -6,6 +6,12 @@ on:
       - 'ScanView3D/**'
       - '.github/workflows/**'
   workflow_call:
+    inputs:
+      compile:
+        # The TestFlight job archives (= compiles) the app anyway, so a
+        # publishing run skips this separate compile and only runs the tests.
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
@@ -37,6 +43,8 @@ jobs:
           python -m pip install usd-core==25.11
           python ScanView3D/Tests/verify_usdz.py "$RUNNER_TEMP/export-fixtures/aligned.usdz"
       - name: Compile device and simulator without signing
+        # Pull requests / manual runs have no input (empty): always compile.
+        if: format('{0}', inputs.compile) != 'false'
         shell: bash
         run: |
           set -o pipefail
