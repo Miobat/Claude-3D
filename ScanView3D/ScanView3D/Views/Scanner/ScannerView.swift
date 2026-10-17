@@ -296,7 +296,7 @@ struct ScannerView: View {
                 HStack(spacing: 8) {
                     Circle().fill(scanner.isScanning ? (scanner.isPaused ? Color.orange : FieldStyle.mint) : Color.white.opacity(0.5))
                         .frame(width: 7, height: 7)
-                    Text(scanner.isScanning ? (scanner.isPaused ? "PAUSED" : "CAPTURING") : "SCANVIEW 3D")
+                    Text(scanner.isScanning ? (scanner.isPaused ? "PAUSED" : "CAPTURING") : AppConstants.appName.uppercased())
                         .font(.caption.weight(.bold)).tracking(2)
                 }.foregroundStyle(FieldStyle.mint)
                 }
