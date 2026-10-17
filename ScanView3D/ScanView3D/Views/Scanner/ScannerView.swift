@@ -1301,7 +1301,7 @@ struct ScannerView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 // Terrain was already thinned while capturing. A second grid could
-                // average positions and erase small breaks; preserve those samples.
+                // merge adjacent bins and drop small breaks; preserve those samples.
                 var points = terrain == nil ? MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters) : cloud
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
                 let frame: simd_float4x4

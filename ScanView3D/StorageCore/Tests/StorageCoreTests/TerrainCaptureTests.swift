@@ -82,6 +82,18 @@ final class TerrainCaptureTests: XCTestCase {
         XCTAssertEqual(pb - pa, b - a)
         XCTAssertEqual((pb.y - pa.y) / (pb.x - pa.x), 0.25)
     }
+    func testSparseCoverageNeverTreatsAnEntireVoxelAsObserved() {
+        var evidence = CapturedSurfaceIndex(cellSize: 0.2, capacity: 2)
+        let camera = SIMD3<Float>(0, 0, 1)
+        XCTAssertTrue(evidence.insert(SIMD3(0.01, 0, 0), camera: camera, range: 2))
+        XCTAssertTrue(evidence.contains(SIMD3(0.02, 0, 0), tolerance: 0.035))
+        // Same 20 cm voxel, but not within the fixed evidence tolerance.
+        XCTAssertFalse(evidence.contains(SIMD3(0.18, 0, 0), tolerance: 0.035))
+        XCTAssertTrue(evidence.insert(SIMD3(0.3, 0, 0), camera: camera, range: 2))
+        XCTAssertFalse(evidence.insert(SIMD3(0.5, 0, 0), camera: camera, range: 2))
+        XCTAssertEqual(evidence.cells.count, 2)
+        XCTAssertTrue(evidence.contains(SIMD3(0.01, 0, 0), tolerance: 0.035))
+    }
     func testInvalidBoundsAreRejected() {
         XCTAssertThrowsError(try TerrainCapture.localFrame(minimum: SIMD3(1, 0, 0), maximum: .zero))
         XCTAssertThrowsError(try TerrainCapture.localFrame(minimum: SIMD3(.nan, 0, 0), maximum: .zero))

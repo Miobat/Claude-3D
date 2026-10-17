@@ -798,7 +798,8 @@ enum DesignPreview {
             let folder = delivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(scan.id.uuidString)
             let exported = try Data(contentsOf: folder.appendingPathComponent("model.ply"))
             let manifest = try decoder.decode(TerrainExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("terrain.json")))
-            let coordinates = try decoder.decode(ModelExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("coordinates.json")))
+            let exportDecoder = JSONDecoder(); exportDecoder.dateDecodingStrategy = .iso8601
+            let coordinates = try exportDecoder.decode(ModelExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("coordinates.json")))
             let hash = SHA256.hash(data: exported).map { String(format: "%02x", $0) }.joined()
             check(sourceBytes == exported, "Terrain native delivery preserves the exact saved PLY bytes")
             check(manifest.modelSHA256 == hash && manifest.pointCount == points.vertexCount && manifest.spacingMetres == 0.1,

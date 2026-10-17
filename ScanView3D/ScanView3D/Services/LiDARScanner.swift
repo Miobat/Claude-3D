@@ -420,7 +420,7 @@ class LiDARScanner: NSObject, ObservableObject {
         // Motion blur estimate from movement since the previous tick.
         let now = frame.timestamp
         var blurPixels = 0.0
-        if let prev = lastTickTransform, now > lastTickTime {
+        if captureMode != .terrain, let prev = lastTickTransform, now > lastTickTime {
             let dt = now - lastTickTime
             let turn = Double(TextureMapper.angle(between: prev, and: frame.camera.transform))
             let move = Double(simd_distance(prev.position, camPos))
@@ -759,7 +759,7 @@ class LiDARScanner: NSObject, ObservableObject {
         let memoryPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
         scanCapacityPercent = max(memoryPercent, captureBudgetPercent)
 
-        if (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
+        if captureMode != .terrain && (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
             textureCapturePaused = true
             textureCaptureIssue = "Photos paused to protect memory — shape capture continues"
             scanProgress = "Photo capture paused (memory) — scan continues"
