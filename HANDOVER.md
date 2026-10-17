@@ -448,3 +448,23 @@ The phone display name is **TinyScanner**; in-app and export branding is
 signing profile, build target and storage paths are intentionally unchanged.
 This is an update to the existing app, not a new installation or library migration.
 App Store Connect listing metadata is separate from the binary display name.
+
+## 22. TinyScanner visual identity
+
+`codex/tinyscanner-visual-identity` starts from the combined, published `6426f98`.
+The app icon and in-app product mark use a graphite/titanium spatial emblem with
+an ice-cyan edge. Master artwork, exact image-generation prompts and the approved
+deterministic icon-packaging script live in `ScanView3D/Branding/`.
+
+`FieldStyle.cyan` is the brand/action colour; `mint` remains green photo-quality
+and capture evidence. Do not recolour quality feedback as a branding operation.
+Adaptive surfaces retain the saved System/Light/Dark choice. Settings menu labels
+and values stack without truncating at accessibility sizes. The compact Object
+panel dimensions and all scanning, selection, measurement and storage contracts
+are unchanged. CI adds bundled-mark and contrast checks (144 native checks total)
+and screenshots of the library, project and empty states on the visual branch.
+
+Visual code/assets `4fdb6a5` passed both iOS builds, 166 Swift tests, independent
+USDZ validation and all 144 native checks in Actions run `39019638035`.
+55 simulator screenshots were generated, with the main dark/light, accessibility
+and landscape surfaces inspected. No TestFlight upload was started for this work.

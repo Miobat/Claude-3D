@@ -1,0 +1,32 @@
+TinyScanner by TinyCorp — visual identity
+
+Generation mode: built-in image_gen tool (logo-brand), not CLI/API fallback.
+Generated 2026-10-17. This is the product identity, not a registered corporate trademark.
+Palette: graphite #0C1017, panel #171E29, titanium/silver, ice #78DEED.
+Use cyan for actions and selection controls. Retain green/amber/red for evidence, warnings and capture state.
+Respect the saved System/Light/Dark appearance choice, Dynamic Type and Reduce Motion.
+No capture, geometry, measurements, storage identifiers or signing changes.
+
+The original generation is the selected master. The export-only image-tool
+attempt still returned 1254 x 1254, so the owner explicitly approved a standard
+local resize. prepare-icon.ps1 packages the master as opaque RGB PNGs:
+1024 x 1024 AppIcon and 512 x 512 in-app TinyScannerMark. No redesign or crop.
+
+Original generation prompt:
+Create one production-quality iOS app icon for TinyScanner, a professional LiDAR 3D scanning and measurement tool by TinyCorp. Brand mood: dark, sleek, quietly confident, a little cool; precision instrument, not a game.
+Asset: single opaque square 1024 by 1024 pixel app icon, full bleed. Deep neutral graphite-black background (#0C1017), very subtle studio falloff. Center one original bold geometric spatial scanning emblem: an open isometric cube formed from three substantial precision-cut folded planes, with an elegant negative-space T integrated into the construction. The solid architectural silhouette must be immediately readable at small phone icon size. Brushed titanium/silver planes, one restrained icy-cyan illuminated edge (#78DEED) suggesting a scan passing over a surface. Crisp controlled bevels, beautiful balanced proportions, broad simple shapes, excellent contrast. Mark occupies about 65% of the canvas with generous safe margins. Premium industrial design, minimal, polished but not glossy plastic.
+No words, no lettering beyond the abstract geometric suggestion, no numbers, no watermarks, no secondary symbols, no bounding scan brackets, no tiny dots or grids, no decorative particles, no lens, no scenery, no extra icon variations, no mockup. No excessive neon, no rainbow. Do not draw rounded outer corners or a device frame; the entire square background is opaque, the operating system will apply the icon mask.
+
+Image-tool export request:
+Production asset export of this exact TinyScanner icon. Keep the emblem, material, colors, lighting, proportions and full square composition unchanged. Change only the output pixel dimensions to exactly 1024 x 1024 pixels for an iOS AppIcon asset. Opaque RGB background; no transparency, no outer rounded corners, no additional elements, no text. Do not redesign or crop the mark.
+
+Validation (2026-10-17):
+App code and assets at 4fdb6a5282f2091846833939650cb475806de334 passed
+166 Swift tests, 144 native checks, independent USDZ validation and unsigned
+iPhone / simulator builds. Run: https://github.com/Miobat/Claude-3D/actions/runs/39019638035
+55 real simulator screenshots were generated. Visually reviewed Projects dark/light,
+Settings dark/light/large text, scanner dark/landscape, active capture, library,
+empty state, manual Measure, Object dark/large text, joystick landscape and texture
+quality. Large accessibility Object controls retain their existing scrolling layout;
+landscape capture settings also scroll. No new LiDAR hardware validation was performed.
+TestFlight upload was intentionally skipped; publishing remains a separate action.

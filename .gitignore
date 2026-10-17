@@ -6,6 +6,8 @@ Forus/
 Storebaug/
 *.jpg
 *.png
+!ScanView3D/ScanView3D/Assets.xcassets/**/*.png
+!ScanView3D/Branding/TinyScanner-master.png
 **/.build/
 **/.swiftpm/
 **/DerivedData/

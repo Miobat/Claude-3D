@@ -1,19 +1,25 @@
 import SwiftUI
 
-/// Shared visual language. Adaptive library surfaces; opaque, high-contrast field controls.
+/// TinyCorp's graphite / titanium / ice visual language.
+/// Brand cyan is intentionally separate from green photo-quality evidence.
 enum FieldStyle {
     static let accent = Color("AccentColor")
+    static let cyan = Color(red: 0.471, green: 0.871, blue: 0.929)
     static let mint = Color(red: 0.43, green: 0.91, blue: 0.78)
-    static let ink = Color(red: 0.055, green: 0.10, blue: 0.12)
-    static let viewport = Color(red: 0.075, green: 0.105, blue: 0.13)
-    static let panel = Color(red: 0.10, green: 0.14, blue: 0.17)
+    static let ink = Color(red: 0.047, green: 0.063, blue: 0.090)
+    static let viewport = Color(red: 0.059, green: 0.078, blue: 0.110)
+    static let panel = Color(red: 0.090, green: 0.118, blue: 0.161)
     static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.045, green: 0.065, blue: 0.08, alpha: 1)
-            : UIColor(red: 0.95, green: 0.96, blue: 0.95, alpha: 1)
+            ? UIColor(red: 0.047, green: 0.063, blue: 0.090, alpha: 1)
+            : UIColor(red: 0.945, green: 0.957, blue: 0.973, alpha: 1)
     })
-    static let surface = Color(uiColor: .secondarySystemGroupedBackground)
-    static let line = Color.primary.opacity(0.08)
+    static let surface = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.078, green: 0.102, blue: 0.141, alpha: 1)
+            : .white
+    })
+    static let line = Color.primary.opacity(0.10)
 }
 
 extension View {
@@ -30,8 +36,9 @@ extension View {
     }
 
     func fieldPanel() -> some View {
-        background(FieldStyle.panel, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(.white.opacity(0.12), lineWidth: 1))
+        background(LinearGradient(colors: [FieldStyle.panel, FieldStyle.viewport], startPoint: .topLeading, endPoint: .bottomTrailing),
+                   in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(.white.opacity(0.14), lineWidth: 1))
     }
 }
 
@@ -47,12 +54,25 @@ struct FieldButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .padding(.horizontal, 14)
             .foregroundStyle(prominent ? FieldStyle.ink : .primary)
-            .background(prominent ? FieldStyle.mint : FieldStyle.surface,
+            .background(prominent ? FieldStyle.cyan : FieldStyle.surface,
                         in: RoundedRectangle(cornerRadius: 15, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 15).stroke(FieldStyle.line, lineWidth: 1))
             .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: configuration.isPressed)
+    }
+}
+
+/// The same product mark used on the home screen; never substitutes for scan data.
+struct TinyScannerMark: View {
+    var size: CGFloat = 44
+    var body: some View {
+        Image("TinyScannerMark").resizable().scaledToFit()
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: size * 0.23, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1))
+            .accessibilityHidden(true)
     }
 }
 
@@ -64,22 +84,30 @@ struct FieldHero: View {
     var icon = "viewfinder"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 20) {
             if !typeSize.isAccessibilitySize {
-            HStack {
-                Label(eyebrow.uppercased(), systemImage: icon)
-                    .font(.caption.weight(.bold)).tracking(1.6)
-                    .foregroundStyle(FieldStyle.mint)
-                Spacer(minLength: 0)
-                Image(systemName: "circle.hexagongrid")
-                    .font(.title2).foregroundStyle(FieldStyle.mint.opacity(0.65))
+                if eyebrow == AppConstants.brandName {
+                    HStack(spacing: 12) {
+                        TinyScannerMark()
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(AppConstants.appName).font(.headline).tracking(-0.3)
+                            Text("by \(AppConstants.companyName)").font(.caption).foregroundStyle(.white.opacity(0.65))
+                        }
+                        Spacer(minLength: 0)
+                    }
+                } else {
+                    Label(eyebrow.uppercased(), systemImage: icon)
+                        .font(.caption.weight(.semibold)).tracking(1.4)
+                        .foregroundStyle(FieldStyle.cyan)
+                }
             }
-            }
-            Text(title).font(typeSize.isAccessibilitySize ? .headline : .title.weight(.semibold)).tracking(-0.7)
-                .fixedSize(horizontal: false, vertical: true)
-            if !typeSize.isAccessibilitySize {
-            Text(subtitle).font(.subheadline).foregroundStyle(.white.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(typeSize.isAccessibilitySize ? .headline : .title2.weight(.semibold)).tracking(-0.5)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !typeSize.isAccessibilitySize {
+                    Text(subtitle).font(.subheadline).foregroundStyle(.white.opacity(0.72))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .foregroundStyle(.white)
@@ -87,24 +115,27 @@ struct FieldHero: View {
         .padding(24)
         .background(alignment: .trailing) {
             ZStack {
-                FieldStyle.ink
-                ContourArtwork().foregroundStyle(FieldStyle.mint.opacity(0.09))
+                LinearGradient(colors: [FieldStyle.panel, FieldStyle.ink], startPoint: .topLeading, endPoint: .bottomTrailing)
+                SpatialArtwork().foregroundStyle(FieldStyle.cyan.opacity(0.07))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.12), lineWidth: 1))
         .accessibilityElement(children: .combine)
     }
 }
 
-/// Decorative vector contours, not a representation of scan data.
-struct ContourArtwork: View {
+/// Quiet architectural planes echo the icon. Decorative, not captured geometry.
+struct SpatialArtwork: View {
     var body: some View {
         Canvas { context, size in
-            for index in 0..<12 {
-                let inset = CGFloat(index) * 18
-                let rect = CGRect(x: size.width * 0.55 - inset, y: -size.height * 0.2 - inset,
-                                  width: size.width * 0.75 + inset * 2, height: size.height * 1.5 + inset * 2)
-                context.stroke(Path(ellipseIn: rect), with: .foreground, lineWidth: 1)
+            for index in 0..<5 {
+                let offset = CGFloat(index) * size.width * 0.12
+                var path = Path()
+                path.move(to: CGPoint(x: size.width * 0.55 + offset, y: -20))
+                path.addLine(to: CGPoint(x: size.width * 0.78 + offset, y: size.height * 0.42))
+                path.addLine(to: CGPoint(x: size.width * 0.45 + offset, y: size.height + 20))
+                context.stroke(path, with: .foreground, lineWidth: 1)
             }
         }
         .accessibilityHidden(true)
@@ -147,7 +178,7 @@ struct FieldThumbnail: View {
                     Image(uiImage: image).resizable().scaledToFill()
                         .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 } else {
-                    ContourArtwork().foregroundStyle(FieldStyle.accent.opacity(0.10))
+                    SpatialArtwork().foregroundStyle(FieldStyle.accent.opacity(0.10))
                     Image(systemName: icon).font(.system(size: min(geometry.size.width * 0.32, 44), weight: .light))
                         .foregroundStyle(FieldStyle.accent)
                 }
@@ -180,7 +211,7 @@ struct FieldIcon: View {
         Image(systemName: symbol).font(.system(size: 18, weight: .medium))
             .frame(minWidth: 46, minHeight: 46)
             .foregroundStyle(selected ? FieldStyle.ink : .white)
-            .background(selected ? FieldStyle.mint : FieldStyle.panel,
+            .background(selected ? FieldStyle.cyan : FieldStyle.panel,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.12), lineWidth: 1))
     }

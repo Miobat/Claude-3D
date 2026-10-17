@@ -440,8 +440,8 @@ struct ModelViewerView: View {
                                 .fontWeight(.medium)
                                 .padding(.horizontal, 10)
                                 .frame(minHeight: 44)
-                                .background(selected ? Color.yellow : Color.white.opacity(0.15))
-                                .foregroundColor(selected ? .black : .white)
+                                .background(selected ? FieldStyle.cyan : Color.white.opacity(0.10))
+                                .foregroundColor(selected ? FieldStyle.ink : .white)
                                 .cornerRadius(8)
                         }.accessibilityAddTraits(selected ? .isSelected : [])
                     }
@@ -466,8 +466,8 @@ struct ModelViewerView: View {
 
                 Button { session.placeAtCrosshair() } label: {
                     ZStack {
-                        Circle().fill(Color.yellow).frame(width: 58, height: 58)
-                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(.black)
+                        Circle().fill(FieldStyle.cyan).frame(width: 58, height: 58)
+                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(FieldStyle.ink)
                     }
                 }
                 .accessibilityLabel("Add point at crosshair")
@@ -507,7 +507,7 @@ struct ModelViewerView: View {
                                         .padding(.horizontal, 8)
                                         .frame(minHeight: 44)
                                         .background(selected ? Color.orange : Color.black.opacity(0.7))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(selected ? FieldStyle.ink : .white)
                                         .cornerRadius(8)
                                 }
                             }
@@ -551,7 +551,7 @@ struct ModelViewerView: View {
 
     private var loadingOverlay: some View {
         VStack(spacing: 16) {
-            ProgressView().tint(FieldStyle.mint).controlSize(.large)
+            ProgressView().tint(FieldStyle.cyan).controlSize(.large)
             Text("Opening your scan").font(.headline).foregroundStyle(.white)
             Text("Preparing geometry and materials").font(.subheadline).foregroundStyle(.white.opacity(0.65))
         }
@@ -594,7 +594,7 @@ struct ModelViewerView: View {
                     NotificationCenter.default.post(name: .joystickElevate, object: nil, userInfo: ["dy": value])
                 }
             } else {
-                Image(systemName: "figure.walk").foregroundStyle(FieldStyle.mint)
+                Image(systemName: "figure.walk").foregroundStyle(FieldStyle.cyan)
                     .frame(width: 44, height: 100).accessibilityLabel("Height locked to 1.8 metres")
             }
 
@@ -686,7 +686,7 @@ struct ModelViewerView: View {
                                 Text(mode.rawValue).font(.subheadline.weight(.medium))
                                     .padding(.horizontal, 16).frame(minHeight: 44)
                                     .foregroundStyle(vizMode == mode ? FieldStyle.ink : .white)
-                                    .background(vizMode == mode ? FieldStyle.mint : Color.clear,
+                                    .background(vizMode == mode ? FieldStyle.cyan : Color.clear,
                                                 in: RoundedRectangle(cornerRadius: 13))
                             }.buttonStyle(.plain)
                             .accessibilityAddTraits(vizMode == mode ? .isSelected : [])
@@ -789,7 +789,7 @@ struct ModelViewerView: View {
         .frame(minWidth: typeSize.isAccessibilitySize ? 150 : 0, maxWidth: .infinity)
         .frame(minHeight: 64)
         .foregroundStyle(selected ? FieldStyle.ink : .white)
-        .background(selected ? FieldStyle.mint : FieldStyle.panel,
+        .background(selected ? FieldStyle.cyan : FieldStyle.panel,
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 1))
     }
@@ -938,9 +938,9 @@ struct VirtualJoystick: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color.black.opacity(0.3))
+                .fill(FieldStyle.panel.opacity(0.94))
                 .frame(width: joystickRadius * 2, height: joystickRadius * 2)
-                .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1.5))
+                .overlay(Circle().stroke(isDragging ? FieldStyle.cyan : Color.white.opacity(0.24), lineWidth: 1.5))
 
             ForEach(0..<4) { i in
                 let angle = Double(i) * .pi / 2
@@ -949,7 +949,8 @@ struct VirtualJoystick: View {
             }
 
             Circle()
-                .fill(Color.white.opacity(isDragging ? 0.8 : 0.5))
+                .fill(LinearGradient(colors: isDragging ? [FieldStyle.cyan, FieldStyle.cyan.opacity(0.75)] : [Color(white: 0.90), Color(white: 0.62)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
                 .frame(width: knobRadius * 2, height: knobRadius * 2)
                 .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
                 .offset(effectiveOffset)
@@ -1001,7 +1002,7 @@ private struct VerticalPanSlider: View {
             Image(systemName: "chevron.up").font(.caption2)
             ZStack {
                 Capsule().fill(.white.opacity(0.18)).frame(width: 5, height: 62)
-                Capsule().fill(FieldStyle.mint).frame(width: 26, height: 16).offset(y: offset)
+                Capsule().fill(FieldStyle.cyan).frame(width: 26, height: 16).offset(y: offset)
             }.frame(width: 44, height: 70).contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
                     .updating($offset) { value, state, _ in state = min(26, max(-26, value.translation.height)) }
@@ -1119,7 +1120,7 @@ private struct TextureQualitySheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     Label("SURFACE DETAIL", systemImage: "square.stack.3d.up")
-                        .font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(FieldStyle.mint)
+                        .font(.caption.weight(.bold)).tracking(1.5).foregroundStyle(FieldStyle.cyan)
                     Text(scanName).font(.title2.weight(.semibold))
                     if let report {
                         VStack(alignment: .leading, spacing: 16) {
