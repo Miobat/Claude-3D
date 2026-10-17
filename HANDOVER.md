@@ -463,3 +463,8 @@ and values stack without truncating at accessibility sizes. The compact Object
 panel dimensions and all scanning, selection, measurement and storage contracts
 are unchanged. CI adds bundled-mark and contrast checks (144 native checks total)
 and screenshots of the library, project and empty states on the visual branch.
+
+Visual code/assets `4fdb6a5` passed both iOS builds, 166 Swift tests, independent
+USDZ validation and all 144 native checks in Actions run `39019638035`.
+55 simulator screenshots were generated, with the main dark/light, accessibility
+and landscape surfaces inspected. No TestFlight upload was started for this work.
