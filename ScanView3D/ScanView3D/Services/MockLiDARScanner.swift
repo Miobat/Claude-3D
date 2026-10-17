@@ -31,6 +31,8 @@ class MockLiDARScanner: ObservableObject {
     private var scanTimer: Timer?
     private var simulatedProgress: Float = 0
     private var meshData: MeshData?
+    private var captureMode: ScanSettings.CaptureMode = .fast
+    private var terrainSpacing: TerrainSpacing = .standard
     private(set) var rangeMeters: Float = 3.0
     private(set) var meshMode: ScanSettings.MeshMode = .free
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
@@ -62,6 +64,9 @@ class MockLiDARScanner: ObservableObject {
         meshData = nil
         self.rangeMeters = rangeMeters
         self.meshMode = meshMode
+        self.captureMode = captureMode
+        self.terrainSpacing = .validated(detailMM)
+        depthPointCount = 0
         isScanning = true
         isPaused = false
         scanError = nil
@@ -81,11 +86,16 @@ class MockLiDARScanner: ObservableObject {
             self.scanProgress = "Scanning... \(Int(progress * 100))%"
             self.capturedFrameCount = Int(progress * 80)
             self.sharpTextureFrameCount = Int(progress * 72)
+            if self.captureMode == .terrain {
+                self.depthPointCount = Int(Float(self.sampleData().vertexCount) * progress)
+                self.vertexCount = self.depthPointCount; self.faceCount = 0
+                self.capturedFrameCount = 0; self.sharpTextureFrameCount = 0
+            }
 
             if self.simulatedProgress >= 1.0 {
                 self.scanTimer?.invalidate()
                 self.scanProgress = "Scan complete - \(self.vertexCount) vertices captured"
-                self.meshData = Self.generateSampleRoomMesh(range: self.rangeMeters)
+                self.meshData = self.sampleData()
             }
         }
     }
@@ -107,7 +117,7 @@ class MockLiDARScanner: ObservableObject {
         isPaused = false
 
         if meshData == nil {
-            let mesh = Self.generateSampleRoomMesh(range: rangeMeters)
+            let mesh = sampleData()
             meshData = mesh
             vertexCount = mesh.vertexCount
             faceCount = mesh.faceCount
@@ -129,6 +139,7 @@ class MockLiDARScanner: ObservableObject {
         meshData = nil
         vertexCount = 0
         faceCount = 0
+        depthPointCount = 0
         capturedFrameCount = 0
         sharpTextureFrameCount = 0
         textureCaptureIssue = nil
@@ -136,7 +147,7 @@ class MockLiDARScanner: ObservableObject {
     }
 
     func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
-        let mesh = meshData ?? Self.generateSampleRoomMesh(range: rangeMeters)
+        let mesh = meshData ?? sampleData()
         DispatchQueue.main.async { completion(mesh) }
     }
 
@@ -153,6 +164,25 @@ class MockLiDARScanner: ObservableObject {
     }
 
     private(set) var capturedPoses: [CapturedPose] = []
+
+    private func sampleData() -> MeshData {
+        captureMode == .terrain ? Self.generateTerrainPoints(spacing: terrainSpacing)
+            : Self.generateSampleRoomMesh(range: rangeMeters)
+    }
+
+    /// Synthetic slope for simulator save/recovery/UI checks, not LiDAR validation.
+    static func generateTerrainPoints(spacing: TerrainSpacing) -> MeshData {
+        var points: [SIMD3<Float>] = [], colors: [SIMD4<Float>] = []
+        let steps = Int(4 / spacing.metres)
+        for z in 0...steps { for x in 0...steps {
+            let px = Float(x) * spacing.metres - 2, pz = Float(z) * spacing.metres - 2
+            points.append(SIMD3(px, 0.2 * px - 1, pz))
+            colors.append(SIMD4(0.35, 0.55, 0.4, 1))
+        } }
+        let bounds = MeshData.bounds(of: points)
+        return MeshData(vertices: points, normals: [], faces: [], colors: colors,
+                        boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+    }
 
     func getCaptureFolderURL() -> URL? {
         return nil // No real photos in simulator

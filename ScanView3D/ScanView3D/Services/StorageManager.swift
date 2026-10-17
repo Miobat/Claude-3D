@@ -544,6 +544,7 @@ class StorageManager: ObservableObject {
                 updated.coordinateProvenance = provenance
                 updated.textureQuality = nil // A new reconstruction has different surfaces/photos.
                 updated.meshRetention = nil; updated.originalMeshSHA256 = nil
+                updated.terrainCapture = nil // This replacement is no longer a measured terrain point cloud.
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
                     throw StorageFailure.missingItem
@@ -592,6 +593,18 @@ class StorageManager: ObservableObject {
         let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
+        let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
+        let bundleURL = scanDir.appendingPathComponent("\(scanId.uuidString)_bundle.zip")
+        var committed = false
+        defer {
+            if !committed {
+                // Only this save's fresh UUID files; never touch the recovery draft.
+                for url in [scanDir.appendingPathComponent(fileName), scnURL, bundleURL] {
+                    try? fileManager.removeItem(at: url)
+                }
+            }
+        }
+
         let fileURL = try OBJExporter.exportPointCloudPLY(
             meshData: meshData,
             fileName: scanId.uuidString,
@@ -605,21 +618,21 @@ class StorageManager: ObservableObject {
         scan.boundingBoxMax = meshData.boundingBoxMax
 
         // Native point-cloud scene for fast in-app viewing
-        let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
         let node = MeshProcessor.createPointCloudNode(from: meshData)
         let scene = SCNScene()
         scene.rootNode.addChildNode(node)
-        scene.write(to: scnURL, delegate: nil)
+        guard scene.write(to: scnURL, delegate: nil) else { throw CoordinateError.incompleteExport }
 
         scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
 
         if let bundle = splatBundle {
-            let destination = scanDir.appendingPathComponent("\(scanId.uuidString)_bundle.zip")
-            try fileManager.copyItem(at: bundle, to: destination)
-            scan.splatBundleName = destination.lastPathComponent
+            try fileManager.copyItem(at: bundle, to: bundleURL)
+            scan.splatBundleName = bundleURL.lastPathComponent
         }
         metadata?(&scan)   // stored in the same index write as the scan itself
+        try scan.terrainCapture?.validate()
         try addScan(scan, to: project)
+        committed = true
         return scan
     }
 
@@ -808,6 +821,7 @@ class StorageManager: ObservableObject {
         newScan.hasTexture = scan.hasTexture
         newScan.textureQuality = scan.textureQuality
         newScan.meshRetention = scan.meshRetention
+        newScan.terrainCapture = scan.terrainCapture
         if let hash = scan.originalMeshSHA256 {
             do {
                 let source = sourceDir.appendingPathComponent(oldBase + "_original.mesh")
@@ -1060,6 +1074,17 @@ class StorageManager: ObservableObject {
             try exportCancellation.check()
             // A replacement/move/delete during export must not silently change its source revision.
             guard try exportSHA256(source) == sourceHash else { throw CoordinateError.incompleteExport }
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+            if let terrain = scan.terrainCapture, kind == .native {
+                guard ext == "ply", transform == CoordinateMath.identity, scan.hasKnownScale else {
+                    throw CoordinateError.incompleteExport
+                }
+                let terrainManifest = try TerrainExportManifest(metadata: terrain, modelFile: model.lastPathComponent,
+                    modelSHA256: exportSHA256(model), pointCount: scan.vertexCount)
+                try encoder.encode(terrainManifest).write(to: folder.appendingPathComponent("terrain.json"), options: .atomic)
+                limitations.append(contentsOf: terrainManifest.limitations)
+                limitations.append("Import terrain.json and coordinates.json with the PLY. Saved positions are already transformed: do not apply captureToLocal again.")
+            }
             let factor: Double = kind == .stl ? 1000 : 1
             let convention = kind == .native ? CoordinateMath.identity :
                 [factor, 0, 0, 0, 0, 0, factor, 0, 0, -factor, 0, 0, 0, 0, 0, 1]
@@ -1068,7 +1093,6 @@ class StorageManager: ObservableObject {
                 units: scan.hasKnownScale ? (kind == .stl ? "millimetres" : "metres") : "source units — scale unverified",
                 axes: kind == .native ? (scan.hasKnownScale ? "right-handed Y up" : "source convention unverified") : "right-handed Z up; X'=X, Y'=-Z, Z'=Y",
                 sourceModelToLocal: transform, localToExport: convention, provenance: scan.coordinateProvenance, limitations: limitations)
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
             try encoder.encode(manifest).write(to: folder.appendingPathComponent("coordinates.json"), options: .atomic)
             try "\(scan.name)\nOpen \(model.lastPathComponent).\n\(limitations.joined(separator: "\n"))\nSee coordinates.json for units, axes and source revision.\n"
                 .write(to: folder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)

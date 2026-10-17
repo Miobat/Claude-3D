@@ -266,6 +266,10 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        if let terrain = scan.terrainCapture {
+                            Label("Terrain · \(terrain.spacing.label) sampling", systemImage: "mountain.2.fill")
+                            Text("Measured points, not classified ground. Share includes planner metadata; no gaps have been filled.")
+                        }
                         Button { showingMeshRetention = true } label: {
                             Label("Mesh retention & original", systemImage: "square.stack.3d.up")
                         }

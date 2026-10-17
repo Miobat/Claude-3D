@@ -183,8 +183,12 @@ class LiDARScanner: NSObject, ObservableObject {
         self.captureMode = captureMode
         anchorPathIndex = PathRangeIndex(points: [], radius: rangeMeters + 4)
 
-        let dense = captureMode == .pointCloud || captureMode == .splatExport
-        let limits = Self.captureLimits(dense: dense, detailMM: detailMM, availableMB: Self.availableMemoryMB())
+        let dense = captureMode.usesPointCloud
+        let terrain = captureMode == .terrain
+        let availableMB = Self.availableMemoryMB()
+        let limits = terrain
+            ? TerrainCapture.limits(spacing: .validated(detailMM), availableMB: availableMB)
+            : Self.captureLimits(dense: dense, detailMM: detailMM, availableMB: availableMB)
         guard limits.coverageCells > 0, !dense || limits.points > 0 else {
             scanError = "Not enough memory to capture and safely save a scan. Close other apps and try again."
             startPreview()
@@ -204,12 +208,17 @@ class LiDARScanner: NSObject, ObservableObject {
 
         // All modes retain capture-time depth evidence. Raw ARKit anchor extents
         // and the camera's walked path must never expand the accepted range.
-        depthCloud.configure(voxelSize: limits.voxelSize, maxPoints: limits.points, coverageCells: limits.coverageCells)
+        depthCloud.configure(voxelSize: limits.voxelSize, maxPoints: limits.points, coverageCells: limits.coverageCells,
+                             coverageCellSize: terrain ? limits.voxelSize : 0.025, reliableCoverageOnly: terrain)
 
         let configuration = ARWorldTrackingConfiguration()
-        configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
-            ? .meshWithClassification : .mesh
-        configuration.planeDetection = [.horizontal, .vertical]
+        // Terrain needs depth samples, not a second, independently growing mesh.
+        // No floor-plane fitting: a genuine slope must remain a slope.
+        if !terrain {
+            configuration.sceneReconstruction = LiDARScanner.isLiDARWithClassificationAvailable
+                ? .meshWithClassification : .mesh
+            configuration.planeDetection = [.horizontal, .vertical]
+        }
         // Compass alignment: -Z = true north, +X = east (needs a working compass).
         configuration.worldAlignment = alignToNorth ? .gravityAndHeading : .gravity
         // Depth is used to hide occluded surfaces when colouring and for the point cloud.
@@ -411,7 +420,7 @@ class LiDARScanner: NSObject, ObservableObject {
         // Motion blur estimate from movement since the previous tick.
         let now = frame.timestamp
         var blurPixels = 0.0
-        if let prev = lastTickTransform, now > lastTickTime {
+        if captureMode != .terrain, let prev = lastTickTransform, now > lastTickTime {
             let dt = now - lastTickTime
             let turn = Double(TextureMapper.angle(between: prev, and: frame.camera.transform))
             let move = Double(simd_distance(prev.position, camPos))
@@ -743,12 +752,14 @@ class LiDARScanner: NSObject, ObservableObject {
         let available = Self.availableMemoryMB()
 
         memoryUsageMB = totalMB
-        estimatedFileSizeMB = estFileMB + textureMapper.estimatedAtlasSizeMB
+        estimatedFileSizeMB = captureMode.usesPointCloud
+            ? Double(depthPointCount) * 15 / 1_048_576
+            : estFileMB + textureMapper.estimatedAtlasSizeMB
         // Capacity = share of the app's real memory budget in use.
         let memoryPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
         scanCapacityPercent = max(memoryPercent, captureBudgetPercent)
 
-        if (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
+        if captureMode != .terrain && (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
             textureCapturePaused = true
             textureCaptureIssue = "Photos paused to protect memory — shape capture continues"
             scanProgress = "Photo capture paused (memory) — scan continues"
@@ -791,9 +802,10 @@ class LiDARScanner: NSObject, ObservableObject {
     /// - lightweight: skips expensive photo reprojection, retaining sampled
     ///   depth-camera vertex colour for a usable recovery checkpoint.
     func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
-        let cloud = (captureMode == .pointCloud || captureMode == .splatExport) ? depthCloud : nil
+        let cloud = captureMode.usesPointCloud ? depthCloud : nil
+        let terrain = captureMode == .terrain
         // Point modes return the depth cloud, so don't copy all mesh buffers for nothing.
-        let anchors: [MeshAnchorSnapshot] = cloud != nil && cloud!.pointCount > 0 ? []
+        let anchors: [MeshAnchorSnapshot] = terrain || (cloud != nil && cloud!.pointCount > 0) ? []
             : meshAnchors.map(MeshAnchorSnapshot.init) + Array(retiredMeshSnapshots.values)
         let depthSource = depthCloud
         let mode = meshMode
@@ -806,6 +818,7 @@ class LiDARScanner: NSObject, ObservableObject {
                 DispatchQueue.main.async { completion(cloudMesh) }
                 return
             }
+            if terrain { DispatchQueue.main.async { completion(nil) }; return }
             let evidence = depthSource.surfaceEvidence
             var mesh = LiDARScanner.combine(anchors: anchors, evidence: evidence, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
@@ -1032,7 +1045,7 @@ extension LiDARScanner: ARSessionDelegate {
     }
 
     private func handle(anchors: [ARAnchor]) {
-        guard isScanning, !isPaused else { return }
+        guard isScanning, !isPaused, captureMode != .terrain else { return }
         var meshChanged = false
         var planesChanged = false
         for anchor in anchors {
@@ -1052,7 +1065,7 @@ extension LiDARScanner: ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
-        guard session === arSession, isScanning else { return }
+        guard session === arSession, isScanning, captureMode != .terrain else { return }
         var meshChanged = false
         for anchor in anchors {
             if let removed = meshAnchorsByID.removeValue(forKey: anchor.identifier) {
@@ -1188,6 +1201,8 @@ final class DepthPointAccumulator {
     /// 0 = coverage only (Fast / HQ), no saved point cloud is kept.
     private var maxPoints = 2_000_000
     private var coverageCells = 600_000
+    private var coverageCellSize: Float = 0.025
+    private var reliableCoverageOnly = false
     private var full = false
     private var inFlight = false          // main thread
     private var evidence = CapturedSurfaceIndex()
@@ -1228,13 +1243,16 @@ final class DepthPointAccumulator {
         return min(1, max(cover, points))
     }
 
-    func configure(voxelSize: Float, maxPoints: Int, coverageCells: Int) {
+    func configure(voxelSize: Float, maxPoints: Int, coverageCells: Int,
+                   coverageCellSize: Float = 0.025, reliableCoverageOnly: Bool = false) {
         lock.lock()
         self.voxelSize = voxelSize
         self.maxPoints = max(0, maxPoints)
         self.coverageCells = max(1, coverageCells)
+        self.coverageCellSize = coverageCellSize
+        self.reliableCoverageOnly = reliableCoverageOnly
         // Only an empty index is resized; captured coverage is never dropped.
-        if evidence.cells.isEmpty { evidence = CapturedSurfaceIndex(capacity: self.coverageCells) }
+        if evidence.cells.isEmpty { evidence = CapturedSurfaceIndex(cellSize: coverageCellSize, capacity: self.coverageCells) }
         lock.unlock()
     }
 
@@ -1243,7 +1261,7 @@ final class DepthPointAccumulator {
         inFlight = false
         lock.lock()
         cells.removeAll()
-        evidence = CapturedSurfaceIndex(capacity: coverageCells)
+        evidence = CapturedSurfaceIndex(cellSize: coverageCellSize, capacity: coverageCells)
         coverageLock.lock()
         coverage = nil
         publishedPointCount = 0; publishedCoverageCount = 0; publishedBudgetFraction = 0
@@ -1285,7 +1303,6 @@ final class DepthPointAccumulator {
             self.epoch.withCurrent(token) {
                 self.lock.lock()
                 defer { self.lock.unlock() }
-                let inv = 1 / self.voxelSize
                 var acceptedDepth = [Float](repeating: 0, count: sensor.depth.count)
                 var photoDepth = [Float](repeating: 0, count: photoCoverage ? sensor.depth.count : 0)
                 let keepsPoints = self.maxPoints > 0
@@ -1296,9 +1313,9 @@ final class DepthPointAccumulator {
                     // as a point. The selected radial range was checked above.
                     guard CaptureRange.allowsCoverage(reliable: reliable,
                         distance: simd_distance(p, transform.position)) else { continue }
+                    if self.reliableCoverageOnly && !reliable { continue }
                     if keepsPoints && reliable {
-                        let s = p * inv
-                        let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))
+                        guard let key = TerrainCapture.key(p, spacing: self.voxelSize) else { continue }
                         if var cell = self.cells[key] {
                             // Keep a real accepted point (not an average that can
                             // move beyond the range boundary); average only colour.
@@ -1444,7 +1461,7 @@ final class DepthPointAccumulator {
         return out
     }
 
-    /// Averaged point per voxel, ready to save / view.
+    /// One observed position per voxel, with averaged colour, ready to save / view.
     func pointCloud() -> MeshData? {
         lock.lock()
         let snapshot = cells

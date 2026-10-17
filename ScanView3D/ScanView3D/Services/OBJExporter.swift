@@ -148,29 +148,14 @@ class OBJExporter {
     }
 
     /// Export a colored point cloud as a binary PLY (vertices + RGB, no faces).
-    static func exportPointCloudPLY(meshData: MeshData, fileName: String, directory: URL? = nil) throws -> URL {
+    static func exportPointCloudPLY(meshData: MeshData, fileName: String, directory: URL? = nil,
+                                    replacingExisting: Bool = false) throws -> URL {
         guard !meshData.vertices.isEmpty else { throw ExportError.noMeshData }
         let exportDir = directory ?? getDefaultExportDirectory()
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
         let plyURL = exportDir.appendingPathComponent("\(sanitizeFileName(fileName)).ply")
-        let hasColors = !meshData.colors.isEmpty
-
-        var header = "ply\nformat binary_little_endian 1.0\ncomment TinyScanner by TinyCorp Point Cloud\n"
-        header += "element vertex \(meshData.vertices.count)\nproperty float x\nproperty float y\nproperty float z\n"
-        if hasColors { header += "property uchar red\nproperty uchar green\nproperty uchar blue\n" }
-        header += "end_header\n"
-
-        var bytes = [UInt8](header.utf8)
-        bytes.reserveCapacity(bytes.count + meshData.vertices.count * 15)
-        for i in 0..<meshData.vertices.count {
-            let v = meshData.vertices[i]
-            appendFloat(v.x, to: &bytes); appendFloat(v.y, to: &bytes); appendFloat(v.z, to: &bytes)
-            if hasColors {
-                let c = i < meshData.colors.count ? meshData.colors[i] : SIMD4<Float>(0.7, 0.7, 0.7, 1)
-                bytes.append(contentsOf: [byte(c.x), byte(c.y), byte(c.z)])
-            }
-        }
-        try Data(bytes).write(to: plyURL)
+        try PointCloudPLYWriter.write(positions: meshData.vertices, colors: meshData.colors, to: plyURL,
+                                      replacingExisting: replacingExisting)
         return plyURL
     }
 
