@@ -1290,9 +1290,12 @@ final class DepthPointAccumulator {
                 var photoDepth = [Float](repeating: 0, count: photoCoverage ? sensor.depth.count : 0)
                 let keepsPoints = self.maxPoints > 0
                 for (p, c, pixel, reliable) in batch {
-                    // Weak depth can retain OLD coverage below, never create new
-                    // evidence for geometry that was not accepted into the scan.
-                    guard reliable else { continue }
+                    // Weak depth far away is noise and only retains OLD coverage below.
+                    // Keep Claude's near-depth coverage fallback for dark/shiny/thin
+                    // surfaces. It is not a precision guarantee and is never saved
+                    // as a point. The selected radial range was checked above.
+                    guard CaptureRange.allowsCoverage(reliable: reliable,
+                        distance: simd_distance(p, transform.position)) else { continue }
                     if keepsPoints && reliable {
                         let s = p * inv
                         let key = SIMD3<Int32>(Int32(s.x.rounded(.down)), Int32(s.y.rounded(.down)), Int32(s.z.rounded(.down)))

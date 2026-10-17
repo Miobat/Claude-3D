@@ -1131,14 +1131,16 @@ struct ScannerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // Keep observation-time positions, especially at the range edge.
-                var meshData = MeshProcessor.postProcess(rawMesh, level: level, preservePositions: true)
+                // Preserve keeps observed positions and every valid surface.
+                // Balanced/Strong retain Claude's smoothing and detail averaging;
+                // the unprocessed original below remains available for recovery.
+                var meshData = MeshProcessor.postProcess(rawMesh, level: level)
                 let cleanedStage = meshData.retentionStage
 
                 // DETAIL slider: simplify to about one vertex per chosen spacing, so
                 // a coarse setting (e.g. 20 mm) gives a much lighter mesh.
                 if level != .quick && detailMeters > 0.005 {
-                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters, preservePositions: true)
+                    meshData = MeshProcessor.clusterVertices(meshData, cellSize: detailMeters)
                 }
                 if !wantColor {
                     meshData = MeshProcessor.makeUniformGrey(meshData)

@@ -3,6 +3,12 @@ import simd
 
 /// Distance means a sphere around the camera, not the depth sensor's optical Z.
 enum CaptureRange {
+    /// Coverage evidence only; saved point clouds still require reliable depth.
+    /// The caller must independently enforce the selected radial capture range.
+    static func allowsCoverage(reliable: Bool, distance: Float) -> Bool {
+        distance.isFinite && distance >= 0 && (reliable || distance <= 1.5)
+    }
+
     static func accepts(_ cameraPoint: SIMD3<Float>, metres: Float) -> Bool {
         metres.isFinite && metres > 0 && cameraPoint.x.isFinite && cameraPoint.y.isFinite &&
         cameraPoint.z.isFinite && cameraPoint.z < -0.1 && simd_length_squared(cameraPoint) <= metres * metres

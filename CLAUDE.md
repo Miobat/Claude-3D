@@ -8,7 +8,7 @@
 
 ## Apple Developer Account
 - Account holder: Michael Tragethon
-- Team ID: 2K36RTR5 (visible in top-right of developer portal)
+- Team ID: 2K36RTR522 (visible in top-right of developer portal)
 - App Store Connect API Key ID: `V3M65TDS5B`
 - App Store Connect Issuer ID: `13bfcc6f-f787-483d-bace-316f4cc84519`
 - API Key Name: "GitHub Actions" (App Manager access)

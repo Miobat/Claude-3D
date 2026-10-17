@@ -9,6 +9,7 @@ on:
       - 'codex/**'
     paths:
       - 'ScanView3D/**'
+      - '!ScanView3D/**/*.md'      # notes and docs don't need a build
       - '.github/workflows/**'
       - '.github/scripts/**'
   workflow_dispatch:  # Allows manual trigger from GitHub UI
@@ -21,6 +22,9 @@ concurrency:
 jobs:
   validate:
     uses: ./.github/workflows/validate-ios.yml
+    with:
+      # Only codex/** pushes (which don't publish) need the separate compile check.
+      compile: ${{ github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/codex/') }}
 
   build-and-deploy:
     needs: validate

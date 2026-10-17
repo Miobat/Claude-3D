@@ -509,7 +509,7 @@
 				DEVELOPMENT_TEAM = 2K36RTR522;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ScanView3D/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "ScanView 3D";
+				INFOPLIST_KEY_CFBundleDisplayName = "TinyScanner";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -543,7 +543,7 @@
 				DEVELOPMENT_TEAM = 2K36RTR522;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ScanView3D/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "ScanView 3D";
+				INFOPLIST_KEY_CFBundleDisplayName = "TinyScanner";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

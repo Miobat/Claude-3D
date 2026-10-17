@@ -7,7 +7,7 @@
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDisplayName</key>
-	<string>ScanView 3D</string>
+	<string>TinyScanner</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleVersion</key>
@@ -27,11 +27,11 @@
 		<string>iphone-ipad-minimum-performance-a12</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
-	<string>ScanView 3D needs camera access to perform LiDAR scanning and capture textures of your environment.</string>
+	<string>TinyScanner needs camera access to perform LiDAR scanning and capture textures of your environment.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Used only when you turn on "Align to north + GPS", to record where a scan was taken.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>ScanView 3D needs photo library access to save scan screenshots.</string>
+	<string>TinyScanner needs photo library access to save scan screenshots.</string>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>

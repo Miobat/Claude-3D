@@ -1134,7 +1134,7 @@ class StorageManager: ObservableObject {
         guard fileManager.createFile(atPath: url.path, contents: nil) else { throw CoordinateError.incompleteExport }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
-        var header = Data("ScanView 3D — millimetres, Z up".utf8); header.count = 80
+        var header = Data("TinyScanner by TinyCorp — millimetres, Z up".utf8); header.count = 80
         var number = UInt32(count).littleEndian
         withUnsafeBytes(of: &number) { header.append(contentsOf: $0) }
         try handle.write(contentsOf: header)
@@ -1232,7 +1232,7 @@ class StorageManager: ObservableObject {
         guard FileManager.default.createFile(atPath: url.path, contents: nil) else { throw CoordinateError.incompleteExport }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
-        try handle.write(contentsOf: Data("# ScanView 3D export - metres, Z up\n".utf8))
+        try handle.write(contentsOf: Data("# TinyScanner by TinyCorp export - metres, Z up\n".utf8))
         for v in triangles {
             if cancelled() { throw CancellationError() }
             guard v.x.isFinite, v.y.isFinite, v.z.isFinite else { throw CoordinateError.incompleteExport }

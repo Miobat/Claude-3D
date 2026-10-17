@@ -984,7 +984,7 @@ enum SplatExporter {
         }
 
         let readme = """
-        ScanView 3D — Gaussian Splat capture bundle
+        TinyScanner by TinyCorp — Gaussian Splat capture bundle
         ===========================================
 
         Contents:

@@ -76,7 +76,7 @@ final class DebugLogger: ObservableObject {
 
     /// Export logs as a shareable text string.
     func exportText() -> String {
-        let header = "ScanView 3D Debug Log\nExported: \(Date())\nEntries: \(entries.count)\n\n"
+        let header = "TinyScanner by TinyCorp Debug Log\nExported: \(Date())\nEntries: \(entries.count)\n\n"
         let lines = entries.map { entry in
             "[\(entry.formattedTimestamp)] [\(entry.level)] [\(entry.category)] \(entry.message)"
         }

@@ -7,6 +7,12 @@ on:
       - '.github/workflows/**'
       - '.github/scripts/**'
   workflow_call:
+    inputs:
+      compile:
+        # The TestFlight job archives (= compiles) the app for devices anyway, so
+        # a publishing run skips the device compile (simulator build still runs).
+        type: boolean
+        default: true
   workflow_dispatch:
 
 permissions:
@@ -39,9 +45,14 @@ jobs:
           python ScanView3D/Tests/verify_usdz.py "$RUNNER_TEMP/export-fixtures/aligned.usdz"
       - name: Compile device and simulator without signing
         shell: bash
+        env:
+          # Publishing runs skip the device compile (the TestFlight archive does
+          # it) but keep the simulator build: the native checks below install it.
+          # Pull requests / manual runs have no input (empty): compile both.
+          SDKS: ${{ format('{0}', inputs.compile) == 'false' && 'iphonesimulator' || 'iphoneos iphonesimulator' }}
         run: |
           set -o pipefail
-          for SDK in iphoneos iphonesimulator; do
+          for SDK in $SDKS; do
             # This is a compile check, not a simulator launch. Build the target
             # against each SDK without requiring an installed simulator runtime.
             xcodebuild -project ScanView3D/ScanView3D.xcodeproj \

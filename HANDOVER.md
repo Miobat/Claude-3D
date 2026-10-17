@@ -1,4 +1,4 @@
-# ScanView 3D — Developer Handover
+# TinyScanner by TinyCorp — Developer Handover
 
 Native iOS LiDAR scanning app (SwiftUI + ARKit + SceneKit + RealityKit), in
 `ScanView3D/`. Requires an iPhone/iPad Pro with LiDAR, iOS 17+.
@@ -183,7 +183,7 @@ build from "Previous Builds", or run the TestFlight workflow on that commit.
 See `ScanView3D/CAPTURE_TRUST.md`. Fast colour coverage now distinguishes shape
 (blue) from shape plus a retained sharp photo (mint). A photo is committed only
 after its JPEG write, using its own depth pose. Every kept mesh face must fit
-a recorded range sphere; postprocessing preserves observed positions.
+a recorded range sphere. (Smoothing and near low-confidence evidence: see §18.)
 Lightweight recovery retains sampled vertex colour (not the temporary photo
 atlas). Required scan metadata commits with the first library write. Native
 Metal / recovery / navigation checks now gate every release branch.
@@ -347,3 +347,104 @@ The chevron expands the existing review/paint/axis/saved-object tools and collap
 them again. Leaving Object/Measure resets to compact. Large text scrolls instead
 of shrinking tap targets. No selection maths, scan storage or capture changes.
 CI covers compact and expanded portrait/landscape/large-text screenshots.
+## 18. Claude integration decisions
+
+Decided by the owner after testing on the phone:
+- **Balanced/Strong Fast cleanup keeps smoothing and detail averaging**
+  (`postProcess` / `clusterVertices` without `preservePositions`). Preserve
+  remains the loss-minimising default from the later surface-retention work;
+  it keeps observed positions and skips detail thinning. All retain an original.
+- **Low-confidence depth within 1.5 m creates coverage evidence** (never saved
+  points). Dark / shiny / thin objects rarely reach medium confidence; without it
+  they become holes in Fast meshes. Farther weak depth only retains old coverage.
+- Normal-size scans must behave as before any capacity / large-area work.
+- Every change must keep a way back (TestFlight previous builds; known-good commits).
+
+## 19. CI timing
+
+Publishing runs skip the redundant unsigned device compile (`compile: false`)
+because the signed TestFlight archive compiles for devices. The simulator build
+and native checks ALWAYS run. Development pushes and pull requests compile both.
+Doc-only changes (`ScanView3D/**/*.md`) don't trigger the TestFlight workflow.
+
+## 20. Claude roadmap (historical proposal; see implemented contracts above)
+
+Coordinate before starting: one tool per area; merge branch by branch.
+
+The object tool and face labels are now implemented in §§13–17. Those sections
+supersede older proposed percentile trimming, floor-based object height and
+unqualified wall depth below. Occupancy, room outlines and planning remain future
+work; field-accuracy targets are not guarantees.
+
+### A. Save more on new scans (small, first)
+- Per-face ARKit classification (floor/wall/ceiling/table/seat/door/window),
+  stored with the scan (optional sidecar / field; old scans have none).
+- Coarse 3D occupancy grid (5–10 cm cells: seen-empty / surface / never-seen),
+  built from depth rays during capture. Needed for honest fit checks.
+
+### B. Measurement: objects and rooms
+- **Object:** Measure → Object → tap. Region-grow over connected surfaces from
+  the tap, stopping at the floor, large wall planes (RANSAC, `MeasurementEngine`)
+  and gaps; classification helps when present. Gravity-aligned box with yaw
+  only (min-area footprint rectangle); height from the floor plane; extents use
+  1st–99th percentiles. Depth against a wall = front face to wall plane. Only a
+  free-standing, front-only object reports "≥ X (partial)". Each dimension is
+  labelled measured / from wall / partial. Corrections: handles plus paint to
+  add/remove surfaces. Views (orthographic exists) align to the selection.
+- **Room:** horizontal slice at ~1.0–1.2 m → 2D outline → fitted lines →
+  polygon (L-shapes, alcoves, openings). Wall lengths, diagonals (squareness),
+  area, perimeter, ceiling height min/max. Missing walls/ceiling flagged.
+- **Output:** dimensioned drawing PDF/PNG and DXF; the slice is a floor plan.
+- **RoomPlan:** later, as a separate "Room" capture mode first (running it
+  alongside the detailed scan costs memory/heat).
+- **Tests:** synthetic scenes in StorageCore (box on floor, rotated box, box
+  against wall, L-shaped room, noise). Targets ~±1 cm objects, ±2 cm rooms;
+  then tape-measure checks on the phone.
+- New measurement kinds must decode tolerantly (older versions keep loading).
+
+### C. Planning (equipment placement, clearance, notes)
+- Inside saved scans first (SceneKit viewer; not RealityKit). Layouts are
+  companion files next to the scan (`companionFiles`, atomic writes), several
+  per scan, positions in the scan's saved frame (`SceneFrame` / `modelMatrix`).
+  Scale-unverified scans: planning checks blocked, like metric measuring.
+- Equipment: dimensioned boxes / cylinders, presets, definition snapshot saved
+  with each placement; sizes locked against accidental pinch; numeric panel;
+  undo/redo; edit mode separate from orbit (one finger drags on the support
+  surface, rotate handle). Default orientation follows the wall axes.
+- Snapping: floor, "push against wall", corners, other equipment. Live
+  dimension lines to the nearest wall/object while dragging.
+- Clearance volumes move with equipment; reason/source stored.
+- Checks: box vs nearby triangles via the spatial index (SAT); point clouds by
+  counting points inside the box above a noise threshold. Support contact is
+  not a clash. Results per region: clear (seen empty) / clash / unknown (never
+  scanned, from the occupancy grid); old scans → "coverage unverified".
+- "To be removed": select an existing object (from B) to ignore in checks;
+  "copy as equipment" turns a measured object into a placeable box.
+- Doorway fit (opening vs smallest cross-section) before any route planning.
+- Notes on equipment (move with it) or on scan locations; photos copied in.
+- Export: annotated images (with warnings), CSV list, footprints in the
+  plan/DXF export. Geometry checks + tests live in StorageCore.
+- Live AR later: same-session first; returning to a site needs a saved
+  ARWorldMap — shared with "continue scan another day" (D).
+
+### D. Large areas (from the capacity work)
+- Step 2 sections: continuous ARSession, finished parts saved and released
+  automatically (~80 % capacity) or by "New section"; overlap band = scan
+  range + margin (not a fixed 1 m); same coordinates throughout; drift checked
+  and corrected where sections meet again; per-section quality figure.
+- Step 3 thinning: areas left behind simplified (flat surfaces sparse,
+  edges/objects dense); setting "Full detail" / "Detail at edges only".
+- Step 4: saved world map to continue later; join scans (3 point pairs + ICP).
+
+## 21. TinyScanner integration and branding
+
+`codex/tinyscanner-branding` combines published Codex `31f18a9` and Claude
+`7f64bf0`, preserving both histories. It retains the Object tool, compact panel,
+original mesh recovery, photo feedback, thin-object fixes, capture safeguards,
+texture work and Claude's near-depth coverage / optional smoothing behaviour.
+
+The phone display name is **TinyScanner**; in-app and export branding is
+**TinyScanner by TinyCorp**. The existing bundle ID `com.michael.scanview3d`,
+signing profile, build target and storage paths are intentionally unchanged.
+This is an update to the existing app, not a new installation or library migration.
+App Store Connect listing metadata is separate from the binary display name.

@@ -212,6 +212,10 @@ enum DesignPreview {
         var failures: [String] = []
         var count = 0
         func check(_ condition: Bool, _ name: String) { count += 1; if !condition { failures.append(name) } }
+        check(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String == "TinyScanner",
+              "Installed app uses TinyScanner display name")
+        check(AppConstants.brandName == "TinyScanner by TinyCorp", "TinyCorp product branding is consistent")
+        check(Bundle.main.bundleIdentifier == "com.michael.scanview3d", "Rebrand preserves existing app identity")
         check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: false) == 190,
               "Object panel defaults to compact portrait height")
         check(ObjectPanelLayout.height(expanded: false, landscape: true, accessibility: false) < 230,
@@ -671,10 +675,10 @@ enum DesignPreview {
                 faceClassifications: Data(repeating: SurfaceCategory.wall.rawValue, count: mesh.faceCount))
             let coloured = mesh.replacingColors(Array(repeating: SIMD4<Float>(0.3,0.4,0.5,1), count: points.count))
             check(coloured.faceClassifications == mesh.faceClassifications, "Camera recolouring retains floor/wall labels")
-            let preserved = MeshProcessor.postProcess(coloured, level: .quick, preservePositions: true)
+            let preserved = MeshProcessor.postProcess(coloured, level: .quick)
             check(preserved.vertices == mesh.vertices && preserved.faces == mesh.faces,
                   "Preserve cleanup keeps sparse wall triangles and thin object geometry exactly")
-            let balanced = MeshProcessor.postProcess(coloured, level: .standard, preservePositions: true)
+            let balanced = MeshProcessor.postProcess(coloured, level: .standard)
             check(balanced.faceCount == mesh.faceCount, "Balanced cleanup no longer deletes large sparse wall components")
             let index = try ObjectSelectionIndex(points: preserved.vertices, triangles: preserved.faces.map { SIMD3($0[0],$0[1],$0[2]) }, labels: preserved.faceClassifications)
             check(try index.grow(from: 0).selection.ids == [0,1], "Recolour → cleanup → Object keeps thin TV separate from wall")

@@ -3,6 +3,16 @@ import simd
 @testable import StorageCore
 
 final class CaptureNavigationTests: XCTestCase {
+    func testNearWeakDepthRemainsCoverageOnlyWithinFallbackDistance() {
+        XCTAssertTrue(CaptureRange.allowsCoverage(reliable: false, distance: 1.5))
+        XCTAssertFalse(CaptureRange.allowsCoverage(reliable: false, distance: 1.501))
+        XCTAssertTrue(CaptureRange.allowsCoverage(reliable: true, distance: 3))
+        XCTAssertFalse(CaptureRange.allowsCoverage(reliable: true, distance: .nan))
+        XCTAssertFalse(CaptureRange.allowsCoverage(reliable: false, distance: -1))
+        // Near-depth fallback does not override a shorter user-selected range.
+        XCTAssertFalse(CaptureRange.accepts(SIMD3(0, 0, -1.2), metres: 1))
+    }
+
     func testRangeIsRadialNotOpticalDepth() {
         XCTAssertTrue(CaptureRange.accepts(SIMD3(0, 0, -1), metres: 1))
         XCTAssertFalse(CaptureRange.accepts(SIMD3(0.8, 0, -0.8), metres: 1))
