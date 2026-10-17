@@ -107,6 +107,7 @@ struct Scan: Identifiable, Codable {
     var coordinateProvenance: CoordinateProvenance?
     var textureQuality: TextureQualityReport?
     var meshRetention: MeshRetentionReport?
+    var terrainCapture: TerrainCaptureMetadata?
     /// Pre-cleanup captured mesh, already in the same saved coordinate frame.
     var originalMeshSHA256: String?
 
@@ -141,6 +142,14 @@ struct Scan: Identifiable, Codable {
         coordinateProvenance = CoordinateProvenance(sourceKind: "lidar", scaleStatus: .lidarMetric,
             alignmentMethod: "gravity level / local recenter", captureToLocal: sceneFrame?.map(Double.init),
             localDatum: "Local levelled low surface; zero is not a surveyed elevation datum")
+    }
+
+    mutating func recordTerrainCapture(_ metadata: TerrainCaptureMetadata, frame: simd_float4x4) {
+        terrainCapture = metadata
+        sceneFrame = StorageManager.array(of: frame)
+        coordinateProvenance = CoordinateProvenance(sourceKind: "lidar", scaleStatus: .lidarMetric,
+            alignmentMethod: "gravity preserved / translation only", captureToLocal: sceneFrame?.map(Double.init),
+            localDatum: "Lowest retained sample; not surveyed ground or an elevation datum")
     }
 
     mutating func recordLocation(_ fix: CaptureLocation?, compassRequested: Bool) {
@@ -217,6 +226,7 @@ struct ScanSettings: Codable, Equatable {
     var captureMode: CaptureMode = .fast
     var rangeValue: Float = 3.0        // metres (0.3 – 5.0)
     var detailMM: Float = 10.0         // grid spacing, Fast / Point Cloud (5 fine – 20 coarse)
+    var terrainSpacing: TerrainSpacing = .standard
     var meshMode: MeshMode = .free     // Fast only
     var captureTexture: Bool = true    // colour for Fast / Point Cloud
     var reconstructQuality: ReconstructQuality = .best
@@ -224,6 +234,10 @@ struct ScanSettings: Codable, Equatable {
     var alignToNorth: Bool = false     // compass-aligned world + GPS tag (outdoor / land)
 
     init() {}
+
+    var effectiveDetailMM: Float {
+        captureMode == .terrain ? Float(terrainSpacing.rawValue) : detailMM
+    }
 
     // Tolerant decoding: settings saved by an older version keep their values,
     // and any option added later simply starts at its default.
@@ -233,6 +247,7 @@ struct ScanSettings: Codable, Equatable {
         captureMode = (try? c.decodeIfPresent(CaptureMode.self, forKey: .captureMode)) ?? d.captureMode
         rangeValue = (try? c.decodeIfPresent(Float.self, forKey: .rangeValue)) ?? d.rangeValue
         detailMM = (try? c.decodeIfPresent(Float.self, forKey: .detailMM)) ?? d.detailMM
+        terrainSpacing = (try? c.decodeIfPresent(TerrainSpacing.self, forKey: .terrainSpacing)) ?? d.terrainSpacing
         meshMode = (try? c.decodeIfPresent(MeshMode.self, forKey: .meshMode)) ?? d.meshMode
         captureTexture = (try? c.decodeIfPresent(Bool.self, forKey: .captureTexture)) ?? d.captureTexture
         reconstructQuality = (try? c.decodeIfPresent(ReconstructQuality.self, forKey: .reconstructQuality)) ?? d.reconstructQuality
@@ -281,6 +296,7 @@ struct ScanSettings: Codable, Equatable {
         case fast = "Fast"
         case highQuality = "High Quality"
         case pointCloud = "Point Cloud"
+        case terrain = "Terrain"
         case splatExport = "Splat (Desktop)"
 
         var shortName: String {
@@ -288,6 +304,7 @@ struct ScanSettings: Codable, Equatable {
             case .fast: return "Fast"
             case .highQuality: return "HQ"
             case .pointCloud: return "Points"
+            case .terrain: return "Terrain"
             case .splatExport: return "Splat"
             }
         }
@@ -297,6 +314,7 @@ struct ScanSettings: Codable, Equatable {
             case .fast: return "Mesh with photo texture. Best for big areas and measuring."
             case .highQuality: return "Takes photos, then builds a photoreal model after the scan."
             case .pointCloud: return "Coloured point cloud (PLY). Good for survey and CAD tools."
+            case .terrain: return "Sparse measured points for terrain planning. Preserves slopes; no gap filling."
             case .splatExport: return "Photos + camera positions to train a Gaussian splat on a PC."
             }
         }
@@ -306,6 +324,7 @@ struct ScanSettings: Codable, Equatable {
             case .fast: return "bolt.fill"
             case .highQuality: return "sparkles"
             case .pointCloud: return "aqi.medium"
+            case .terrain: return "mountain.2.fill"
             case .splatExport: return "square.and.arrow.up.on.square"
             }
         }
@@ -313,7 +332,8 @@ struct ScanSettings: Codable, Equatable {
         /// Whether the Detail slider affects this mode.
         var usesDetail: Bool { self == .fast || self == .pointCloud }
         /// Whether the colour on/off switch affects this mode.
-        var usesColorToggle: Bool { self == .fast || self == .pointCloud }
+        var usesColorToggle: Bool { self == .fast || self == .pointCloud || self == .terrain }
+        var usesPointCloud: Bool { self == .pointCloud || self == .splatExport || self == .terrain }
         /// Whether the mesh filter (Everything / Structure / Room shell) applies.
         var usesMeshMode: Bool { self == .fast }
         /// Whether this mode takes posed photos.

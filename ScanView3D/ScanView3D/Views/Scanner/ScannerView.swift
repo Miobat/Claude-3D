@@ -139,6 +139,15 @@ struct ScannerView: View {
             recovery.refresh()
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "capture-settings" { showingCaptureSettings = true }
+            if DesignPreview.screen?.hasPrefix("terrain-") == true {
+                settings.captureMode = .terrain; settings.terrainSpacing = .standard
+                if DesignPreview.screen == "terrain-settings" { showingCaptureSettings = true }
+                if DesignPreview.screen == "terrain-active" {
+                    scanner.isScanning = true; scanner.depthPointCount = 42_180
+                    scanner.scanCapacityPercent = 18; scanner.estimatedFileSizeMB = 0.6
+                    scanner.scanProgress = "Scanning"
+                }
+            }
             if DesignPreview.screen == "capture-active" {
                 settings.captureMode = .fast; settings.captureTexture = true
                 scanner.isScanning = true; scanner.vertexCount = 48_210; scanner.faceCount = 80_450
@@ -226,6 +235,11 @@ struct ScannerView: View {
                     .padding(.horizontal, 16)
             }
             coverageLegend
+            if settings.captureMode == .terrain {
+                Text("\(scanner.depthPointCount.formatted()) points · \(settings.terrainSpacing.label) sampling")
+                    .font(.caption.weight(.medium)).foregroundStyle(.white)
+                    .accessibilityIdentifier("terrainCaptureCount")
+            }
             if scanner.scanCapacityPercent >= 75 && !showingCaptureDetails { scanCapacityGauge }
             if settings.captureMode == .fast && settings.captureTexture {
                 VStack(spacing: 5) {
@@ -249,7 +263,9 @@ struct ScannerView: View {
                         (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
                             .font(.caption2).foregroundStyle(.white.opacity(0.7))
                     }
-                    Text("Shape marks accepted depth observations, not guaranteed saved triangles. Photo marks saved, low-motion, locally exposed candidates—not final texture resolution.")
+                    Text(settings.captureMode == .terrain
+                         ? "Blue marks observed depth, not continuous ground coverage. Terrain keeps sparse samples, not a filled mesh. Save and start a new scan when capacity is reached."
+                         : "Shape marks accepted depth observations, not guaranteed saved triangles. Photo marks saved, low-motion, locally exposed candidates—not final texture resolution.")
                         .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
                 }.padding(.top, 8)
             }.font(.caption).tint(FieldStyle.cyan).padding(.horizontal, 16)
@@ -443,7 +459,9 @@ struct ScannerView: View {
                     Image(systemName: "slider.horizontal.3").foregroundStyle(FieldStyle.cyan)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Scan settings").font(.subheadline.weight(.semibold))
-                        Text(String(format: "%.1f m range", settings.rangeValue) + (settings.captureMode.usesDetail ? String(format: " · %.0f mm detail", settings.detailMM) : " · Photo capture"))
+                        Text(String(format: "%.1f m range", settings.rangeValue) + (settings.captureMode == .terrain
+                            ? " · \(settings.terrainSpacing.label) sampling"
+                            : settings.captureMode.usesDetail ? String(format: " · %.0f mm detail", settings.detailMM) : " · Photo capture"))
                             .font(.caption).foregroundStyle(.white.opacity(0.7))
                     }
                     Spacer(minLength: 0)
@@ -466,7 +484,9 @@ struct ScannerView: View {
                     Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
                         .accessibilityLabel("Capture range in metres")
                 } header: { Text("Range") } footer: {
-                    Text("Distance from the phone. Blurred areas are out of range. Shape shows accepted depth in blue. Photos adds green dots for saved photo candidates and amber lines where another photo is needed. Photo quality is estimated from motion and exposure; check the saved texture too. Unknown depth is not captured.")
+                    Text(settings.captureMode == .terrain
+                         ? "Distance from the phone. Blurred areas are out of range. Blue marks observed depth, not a filled ground surface. Unknown depth is not captured."
+                         : "Distance from the phone. Blurred areas are out of range. Shape shows accepted depth in blue. Photos adds green dots for saved photo candidates and amber lines where another photo is needed. Photo quality is estimated from motion and exposure; check the saved texture too. Unknown depth is not captured.")
                 }
                 if settings.captureMode.usesDetail {
                     Section {
@@ -475,6 +495,18 @@ struct ScannerView: View {
                             .accessibilityLabel("Point spacing in millimetres")
                     } header: { Text("Detail") } footer: {
                         Text("Smaller spacing makes larger files. Sampling density is not measurement accuracy.")
+                    }
+                }
+                if settings.captureMode == .terrain {
+                    Section {
+                        Picker("Target spacing", selection: $settings.terrainSpacing) {
+                            ForEach(TerrainSpacing.allCases, id: \.self) { spacing in
+                                Text(spacing.label).tag(spacing)
+                            }
+                        }.pickerStyle(.segmented).accessibilityIdentifier("terrainSpacing")
+                        Text(settings.terrainSpacing.title).font(.caption).foregroundStyle(.secondary)
+                    } header: { Text("Terrain sampling") } footer: {
+                        Text("Retains one measured point per sampling cell during capture. Coarser spacing reduces memory and file size but can miss small features. Not a maximum gap or an accuracy guarantee. No mesh or photos are kept; color comes from the live camera. Ground selection and gap-aware triangulation happen in the planner.")
                     }
                 }
                 if settings.captureMode.usesMeshMode {
@@ -491,7 +523,7 @@ struct ScannerView: View {
                     } footer: { Text("Higher resolution captures finer photo detail and may use about 1 GB per scan.") }
                 }
                 if settings.captureMode.usesColorToggle {
-                    Section { Toggle("Capture photo color", isOn: $settings.captureTexture) } footer: {
+                    Section { Toggle(settings.captureMode == .terrain ? "Capture point color" : "Capture photo color", isOn: $settings.captureTexture) } footer: {
                         Text("Turn off for a simpler grey model and faster processing.")
                     }
                 }
@@ -500,7 +532,9 @@ struct ScannerView: View {
                 } header: { Text("Orientation") } footer: {
                     Text(settings.alignToNorth
                          ? "Requests compass alignment and approximate phone GPS. Not survey control."
-                         : "The scan is levelled and aligned with the walls.")
+                         : settings.captureMode == .terrain
+                            ? "Keeps gravity and the capture heading. Slopes stay sloped. Height zero is the lowest retained sample, not surveyed ground."
+                            : "The scan is levelled and aligned with the walls.")
                 }
             }
             .fieldScreen().navigationTitle("Scan settings").navigationBarTitleDisplayMode(.inline)
@@ -584,13 +618,13 @@ struct ScannerView: View {
                     checkpointWarning = nil
                     lastCheckpointStart = .distantPast
                     lastCheckpointDuration = 0
-                    scanName = Scan.autoName()
+                    scanName = Scan.autoName(prefix: settings.captureMode == .terrain ? "Terrain" : "Scan")
                     scanner.startScanning(
                         captureTexture: settings.captureTexture,
                         meshMode: settings.meshMode,
                         rangeMeters: settings.rangeValue,
                         captureMode: settings.captureMode,
-                        detailMM: settings.detailMM,
+                        detailMM: settings.effectiveDetailMM,
                         highResPhotos: settings.highResPhotos,
                         alignToNorth: settings.alignToNorth
                     )
@@ -762,6 +796,13 @@ struct ScannerView: View {
                     } footer: {
                         Text(String(format: "Points are thinned to one per %.0f mm.", settings.detailMM))
                     }
+                case .terrain:
+                    Section {
+                        Label("Terrain point cloud (PLY)", systemImage: "mountain.2.fill")
+                        LabeledContent("Capture sampling", value: settings.terrainSpacing.label)
+                    } header: { Text("Output") } footer: {
+                        Text("Keeps measured points and slopes at metre scale. No smoothing, ground classification or gap filling. Share the saved scan to include terrain.json and coordinates.json for the planner. Height zero is local, not a surveyed elevation.")
+                    }
                 case .splatExport:
                     Section {
                         Label("Photos + camera positions + point cloud (.zip)", systemImage: "square.and.arrow.up.on.square")
@@ -820,7 +861,7 @@ struct ScannerView: View {
                             Text("Desktop export needs a point-cloud checkpoint. Your photos are preserved; use Keep for Later.")
                                 .foregroundColor(.secondary)
                         }
-                    } else if settings.captureTexture {
+                    } else if settings.captureTexture && !settings.captureMode.usesPointCloud {
                         LabeledContent("Colour frames", value: "\(scanner.capturedFrameCount)")
                     }
                 }
@@ -1084,7 +1125,7 @@ struct ScannerView: View {
             runPhotogrammetrySave(project: project, inputFolder: inputFolder)
             #endif
             break
-        case .pointCloud:
+        case .pointCloud, .terrain:
             if let cloud = pendingMesh { savePointCloudFlow(project: project, cloud: cloud) }
         case .splatExport:
             if let folder = capturePhotoFolder { runSplatExport(project: project, folder: folder) }
@@ -1251,19 +1292,32 @@ struct ScannerView: View {
         isSaving = true
         savingProgress = "Saving point cloud…"
         let detailMeters = max(0.001, settings.detailMM / 1000.0)
+        let terrain: TerrainCaptureMetadata? = settings.captureMode == .terrain
+            ? TerrainCaptureMetadata(spacing: settings.terrainSpacing, captureRangeMetres: settings.rangeValue) : nil
         let grey = !settings.captureTexture
         let name = scanName
         let north = settings.alignToNorth
         let fix = north ? captureLocation : nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                var points = MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters)
+                // Terrain was already thinned while capturing. A second grid could
+                // average positions and erase small breaks; preserve those samples.
+                var points = terrain == nil ? MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters) : cloud
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
-                let frame = SceneFrame.compute(from: points, keepHeading: north)
+                let frame: simd_float4x4
+                if let terrain {
+                    try terrain.validate()
+                    let values = try TerrainCapture.localFrame(minimum: points.boundingBoxMin, maximum: points.boundingBoxMax)
+                    guard let translation = Scan.matrix(values.map(Float.init)) else { throw CoordinateError.invalidTransform }
+                    frame = translation
+                } else {
+                    frame = SceneFrame.compute(from: points, keepHeading: north)
+                }
                 points = points.transformed(by: frame)
                 let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project) {
                     $0.recordLocation(fix, compassRequested: north)
-                    $0.recordCaptureFrame(frame)
+                    if let terrain { $0.recordTerrainCapture(terrain, frame: frame) }
+                    else { $0.recordCaptureFrame(frame) }
                 }
                 DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {

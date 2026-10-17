@@ -5,6 +5,7 @@ import SceneKit
 import CoreVideo
 import Metal
 import ImageIO
+import CryptoKit
 
 /// CI-only visual fixtures. Never compiled into the device/TestFlight app.
 /// Uses a new temporary library, never the user's Documents library.
@@ -340,6 +341,7 @@ enum DesignPreview {
 
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
+        checkTerrainCapture(check)
         checkMeshRetention(check)
         checkTextureQuality(check)
         checkObjects(view: view, coordinator: coordinator, check: check) {
@@ -738,6 +740,118 @@ enum DesignPreview {
         } catch { check(false, "Mesh retention fixtures: \(error)") }
     }
 
+    private static func checkTerrainCapture(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("terrain-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let decoder = JSONDecoder(), encoder = JSONEncoder()
+            let old = try decoder.decode(ScanSettings.self, from: Data("{\"captureMode\":\"Point Cloud\",\"detailMM\":7}".utf8))
+            check(old.captureMode == .pointCloud && old.effectiveDetailMM == 7 && old.terrainSpacing == .standard,
+                  "Legacy point settings retain mm density")
+            let invalid = try decoder.decode(ScanSettings.self, from: Data("{\"captureMode\":\"Terrain\",\"terrainSpacing\":999}".utf8))
+            check(invalid.captureMode == .terrain && invalid.terrainSpacing == .standard, "Invalid terrain preset defaults to 10 cm")
+            var settings = ScanSettings(); settings.captureMode = .terrain; settings.detailMM = 7
+            for spacing in TerrainSpacing.allCases {
+                settings.terrainSpacing = spacing
+                let restored = try decoder.decode(ScanSettings.self, from: encoder.encode(settings))
+                check(restored == settings && restored.effectiveDetailMM == Float(spacing.rawValue), "Terrain preset persists: \(spacing.label)")
+            }
+            check(settings.captureMode.usesPointCloud && !settings.captureMode.usesPhotos && !settings.captureMode.usesMeshMode,
+                  "Terrain capture uses points without photo or mesh processing")
+            settings.terrainSpacing = .standard
+            let cloud = MockLiDARScanner.generateTerrainPoints(spacing: settings.terrainSpacing)
+            let values = try TerrainCapture.localFrame(minimum: cloud.boundingBoxMin, maximum: cloud.boundingBoxMax)
+            guard let frame = Scan.matrix(values.map(Float.init)) else { throw CoordinateError.invalidTransform }
+            let points = cloud.transformed(by: frame)
+            check(points.vertexCount == cloud.vertexCount && points.faces.isEmpty && points.normals.isEmpty,
+                  "Terrain translation preserves every measured point without generating faces")
+            check(abs(points.boundingBoxMax.y - points.boundingBoxMin.y - 0.8) < 0.00001,
+                  "Terrain save does not level the synthetic slope")
+            let draft = CaptureDraft(id: UUID(), startedAt: Date(), checkpointAt: Date(), name: "Slope checkpoint",
+                settings: settings, photoFolderName: nil, location: nil, isFinalized: true)
+            let checkpoint = CaptureCheckpointStore<CaptureDraft, MeshData>(directory: root.appendingPathComponent("checkpoint"))
+            try checkpoint.save(draft, payload: cloud)
+            let recovered = try checkpoint.load()
+            check(recovered.0.settings == settings && recovered.1?.vertices == cloud.vertices,
+                  "Terrain recovery retains settings and exact measured XYZ")
+
+            let store = StorageManager(directory: root.appendingPathComponent("library"))
+            guard let project = store.createProject(name: "Terrain"), let target = store.createProject(name: "Moved terrain") else {
+                check(false, "Terrain fixture projects"); return
+            }
+            let meta = TerrainCaptureMetadata(spacing: .standard, captureRangeMetres: 3)
+            let scan = try store.savePointCloud(meshData: points, name: "Slope", toProject: project) {
+                $0.recordTerrainCapture(meta, frame: frame)
+            }
+            let reloaded = StorageManager(directory: root.appendingPathComponent("library")).projects
+                .first(where: { $0.id == project.id })?.scans.first
+            check(reloaded?.terrainCapture == meta && reloaded?.sceneFrame == StorageManager.array(of: frame),
+                  "Terrain metadata and frame commit atomically with point cloud")
+            check(reloaded?.coordinateProvenance?.alignmentMethod == "gravity preserved / translation only",
+                  "Terrain provenance does not claim floor-plane levelling")
+            let source = store.getScanFileURL(scan: scan, project: project)
+            let scene = try SCNScene(url: source.deletingPathExtension().appendingPathExtension("scn"), options: nil)
+            check(scene.rootNode.childNodes.first?.geometry?.elements.first?.primitiveType == .point,
+                  "Terrain native viewer loads point geometry")
+            let sourceBytes = try Data(contentsOf: source)
+            let delivery = try store.exportScan(scan, from: project)
+            let folder = delivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(scan.id.uuidString)
+            let exported = try Data(contentsOf: folder.appendingPathComponent("model.ply"))
+            let manifest = try decoder.decode(TerrainExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("terrain.json")))
+            let coordinates = try decoder.decode(ModelExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("coordinates.json")))
+            let hash = SHA256.hash(data: exported).map { String(format: "%02x", $0) }.joined()
+            check(sourceBytes == exported, "Terrain native delivery preserves the exact saved PLY bytes")
+            check(manifest.modelSHA256 == hash && manifest.pointCount == points.vertexCount && manifest.spacingMetres == 0.1,
+                  "Terrain sidecar is bound to exported bytes, count and spacing")
+            check(manifest.transformsAlreadyApplied && coordinates.transformsAlreadyAppliedToExport &&
+                  coordinates.sourceModelToLocal == CoordinateMath.identity && coordinates.provenance?.captureToLocal == values,
+                  "Export reports already baked coordinates without double-transforming")
+            check(manifest.groundClassification == "unclassified" && !manifest.interpolated &&
+                  manifest.coverage == "retainedSamplesOnly" && manifest.registrationRequired,
+                  "Terrain export does not claim filled ground or survey registration")
+            check(FileManager.default.fileExists(atPath: delivery.path), "Terrain ZIP delivery is generated")
+            guard let duplicate = store.duplicateScan(scan, from: project, to: project) else {
+                check(false, "Terrain duplicate fixture"); return
+            }
+            check(duplicate.terrainCapture == meta && duplicate.coordinateProvenance == scan.coordinateProvenance,
+                  "Duplicate retains terrain metadata and provenance")
+            check(store.moveScan(duplicate, from: project, to: target), "Terrain cloud moves between projects")
+            let moved = store.projects.first(where: { $0.id == target.id })?.scans.first
+            check(moved?.terrainCapture == meta, "Move preserves terrain sampling metadata")
+            var legacyJSON = try JSONSerialization.jsonObject(with: encoder.encode(scan)) as! [String: Any]
+            legacyJSON.removeValue(forKey: "terrainCapture")
+            let legacy = try decoder.decode(Scan.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
+            check(legacy.terrainCapture == nil && legacy.vertexCount == scan.vertexCount, "Legacy scan records remain readable")
+            let legacyDelivery = try store.exportScan(legacy, from: project)
+            let legacyFolder = legacyDelivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(legacy.id.uuidString)
+            check(!FileManager.default.fileExists(atPath: legacyFolder.appendingPathComponent("terrain.json").path),
+                  "Ordinary point clouds do not acquire invented terrain metadata")
+
+            let scanDirectory = source.deletingLastPathComponent()
+            let before = Set(try FileManager.default.contentsOfDirectory(atPath: scanDirectory.path))
+            do {
+                _ = try store.savePointCloud(meshData: points, name: "Invalid metadata", toProject: project) {
+                    var invalidMeta = meta; invalidMeta.version = 99; $0.terrainCapture = invalidMeta
+                }
+                check(false, "Reject invalid terrain metadata save")
+            } catch { check(true, "Reject invalid terrain metadata save") }
+            check(Set(try FileManager.default.contentsOfDirectory(atPath: scanDirectory.path)) == before,
+                  "Failed terrain save removes only its new unpublished files")
+            let indexURL = root.appendingPathComponent("library/projects.json")
+            try Data("[]".utf8).write(to: indexURL, options: .atomic)
+            do {
+                _ = try store.savePointCloud(meshData: points, name: "Conflicting save", toProject: project) {
+                    $0.recordTerrainCapture(meta, frame: frame)
+                }
+                check(false, "Point save rejects external index change")
+            } catch { check(true, "Point save rejects external index change") }
+            let afterFailure = Set(try FileManager.default.contentsOfDirectory(atPath: scanDirectory.path))
+            let recoveryAfterFailure = try checkpoint.load()
+            check(afterFailure == before && recoveryAfterFailure.1?.vertices == cloud.vertices,
+                  "Failed point save preserves earlier scans and the recoverable terrain checkpoint")
+        } catch { check(false, "Terrain native fixtures: \(error)") }
+    }
+
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {
         do {
             let mesh = terrain()
@@ -829,7 +943,7 @@ struct DesignPreviewRoot: View {
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings", "terrain-ready", "terrain-settings", "terrain-active"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
         .onAppear {

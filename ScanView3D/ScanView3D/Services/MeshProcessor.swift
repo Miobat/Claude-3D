@@ -980,7 +980,8 @@ enum SplatExporter {
         }
 
         if let cloud = pointCloud, !cloud.vertices.isEmpty {
-            _ = try OBJExporter.exportPointCloudPLY(meshData: cloud, fileName: "points3D", directory: imageFolder)
+            _ = try OBJExporter.exportPointCloudPLY(meshData: cloud, fileName: "points3D", directory: imageFolder,
+                                                    replacingExisting: true)
         }
 
         let readme = """

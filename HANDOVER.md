@@ -7,6 +7,53 @@ web prototype and are not part of the app.)
 
 ---
 
+## Terrain capture v1 (2026-10-18, `codex/terrain-capture`)
+
+Based on the published visual identity branch at `d455594`; no latest Claude or
+Codex improvements were dropped. This branch is validation-only until an explicit
+TestFlight dispatch. LBG Site Planner implementation is coordinated separately.
+
+- New Terrain mode retains one actual observed point per 5/10/20 cm voxel DURING
+  capture (10 cm default). Reliable, in-range depth only; average colour, not XYZ.
+- No ARKit mesh/plane collection or photo archive in Terrain. Coverage index uses
+  the same cell size so a hidden 25 mm index does not defeat sparse retention.
+  Existing capture modes keep their prior photo/mesh/confidence policies.
+- No terrain levelling, wall alignment, smoothing, second downsample, ground
+  classification or gap filling. Save translates horizontal centre/lowest sample
+  to local zero while preserving gravity, yaw, slopes and metre scale.
+- Capture is still bounded (up to two million samples, less with low memory),
+  pauses at capacity and uses existing recovery checkpoints. Not unlimited area.
+  Automatic disk-streamed sections and adaptive sampling remain future work.
+- Point PLY saving is streamed through a synchronized staging file. A failed
+  library/native-scene save retains recovery and removes only its new UUID files.
+  Splat derived-PLY retry uses explicit staged replacement.
+- Optional `Scan.terrainCapture` follows save, copy and move. Native Share adds
+  SHA-bound `terrain.json`; older scans and PLY-only import remain supported.
+- **Planner contract:** `ScanView3D/TERRAIN_EXPORT_CONTRACT.md`. Coordinates are
+  already baked, Y-up metres; samples are unclassified, not coverage polygons.
+- Tests: `TerrainCaptureTests.swift` plus native settings/recovery/save/copy/move/
+  export/failure fixtures and Terrain screenshots. CI is the real compiler.
+  Device acceptance below is still required; do not claim field accuracy.
+
+### Terrain device acceptance before broad release
+
+1. On iPhone 16 Pro, scan the same small slope at 5, 10 and 20 cm. Confirm fewer
+   retained points and smaller PLY files at coarser settings, without flattening.
+2. Check a kerb/break, a deliberate unscanned strip, vegetation and parked objects.
+   Small details may be lost at coarse spacing; do not interpret holes as ground.
+3. Test range edges, pause/continue, background interruption, Keep for Later and
+   recovery after termination. Only completed checkpoints are recoverable.
+4. Scan progressively longer walks; record thermal state, memory, drift against
+   independent reference points, checkpoint duration and save/reopen time. At
+   capacity it must pause explicitly and permit saving. Repeat on an older LiDAR
+   device before claiming support/performance parity.
+5. Share PLY + JSON to the planner. Check known distances, independent elevations,
+   slope direction, no doubled transform and no arbitrary rescaling. Local Y zero
+   is the lowest sample, NOT a surveyed datum. The planner must constrain triangles
+   across gaps and distinguish inferred surfaces from measured samples.
+
+---
+
 ## 1. How building & publishing works (read first)
 
 - **You cannot build locally here.** The owner's Mac can't run a current Xcode, and
@@ -36,7 +83,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10050`/`B10050`). Deleting a file = remove those 4 lines too.
+(next available `A10052`/`B10052`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches

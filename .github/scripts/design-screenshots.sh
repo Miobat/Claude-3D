@@ -28,8 +28,8 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 144 and not r["failures"], "Native capture / navigation / recovery / texture / automatic measurement / branding checks failed"' "$OUT/navigation-checks.json"
-SCREENS="projects settings scanner capture-active capture-settings viewer measure object object-wall object-rejected object-expanded quality retention"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 170 and not r["failures"], "Native capture / navigation / recovery / terrain / texture / automatic measurement / branding checks failed"' "$OUT/navigation-checks.json"
+SCREENS="projects settings scanner capture-active capture-settings viewer measure object object-wall object-rejected object-expanded quality retention terrain-ready terrain-settings terrain-active"
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/tinyscanner-visual-identity" || "${GITHUB_HEAD_REF:-}" == "codex/tinyscanner-visual-identity" ]]; then
   SCREENS="$SCREENS library project empty"
 fi
@@ -47,6 +47,8 @@ capture projects projects-large-text
 capture settings settings-large-text
 capture scanner scanner-large-text
 capture capture-active capture-active-large-text
+capture terrain-settings terrain-settings-large-text
+capture terrain-active terrain-active-large-text
 capture viewer viewer-large-text
 capture object object-large-text
 capture object-wall object-wall-large-text
@@ -59,6 +61,8 @@ capture joysticks viewer-joysticks
 capture walk viewer-walk-selection
 capture scanner scanner-landscape --landscape
 capture capture-active capture-active-landscape --landscape
+capture terrain-ready terrain-ready-landscape --landscape
+capture terrain-active terrain-active-landscape --landscape
 capture viewer viewer-landscape --landscape
 capture measure measure-landscape --landscape
 capture object object-landscape --landscape
