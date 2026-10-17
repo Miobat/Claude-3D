@@ -216,6 +216,28 @@ enum DesignPreview {
               "Installed app uses TinyScanner display name")
         check(AppConstants.brandName == "TinyScanner by TinyCorp", "TinyCorp product branding is consistent")
         check(Bundle.main.bundleIdentifier == "com.michael.scanview3d", "Rebrand preserves existing app identity")
+        check(UIImage(named: "TinyScannerMark") != nil, "TinyScanner product mark is bundled")
+        func luminance(_ color: Color, style: UIUserInterfaceStyle) -> CGFloat {
+            let resolved = UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            resolved.getRed(&r, green: &g, blue: &b, alpha: &a)
+            func linear(_ value: CGFloat) -> CGFloat { value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+        func contrast(_ foreground: Color, _ background: Color, style: UIUserInterfaceStyle) -> CGFloat {
+            let a = luminance(foreground, style: style), b = luminance(background, style: style)
+            return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+        }
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            check(contrast(FieldStyle.accent, FieldStyle.surface, style: style) >= 4.5,
+                  "Brand text contrast on adaptive cards \(style.rawValue)")
+            check(contrast(FieldStyle.accent, FieldStyle.canvas, style: style) >= 4.5,
+                  "Brand text contrast on adaptive canvas \(style.rawValue)")
+        }
+        check(contrast(FieldStyle.ink, FieldStyle.cyan, style: .dark) >= 7,
+              "Primary capture and selection controls have strong text contrast")
+        check(contrast(FieldStyle.cyan, FieldStyle.panel, style: .dark) >= 4.5,
+              "Field control text remains readable on opaque dark panels")
         check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: false) == 190,
               "Object panel defaults to compact portrait height")
         check(ObjectPanelLayout.height(expanded: false, landscape: true, accessibility: false) < 230,

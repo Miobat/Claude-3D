@@ -28,12 +28,12 @@ struct ObjectMeasurementPanel: View {
                     Text(session.draft?.name ?? "Select an object").font(.headline)
                 }
                 Spacer(minLength: 4)
-                if session.busy { ProgressView().tint(FieldStyle.mint).accessibilityLabel("Analysing selection") }
+                if session.busy { ProgressView().tint(FieldStyle.cyan).accessibilityLabel("Analysing selection") }
                 else if session.draft != nil {
                     Button { session.save() } label: {
                         Label(session.dirty ? "Save" : "Saved", systemImage: session.dirty ? "checkmark" : "checkmark.circle")
                             .font(.caption.weight(.semibold)).padding(.horizontal, 10).frame(minHeight: 44)
-                            .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+                            .foregroundStyle(FieldStyle.ink).background(FieldStyle.cyan, in: RoundedRectangle(cornerRadius: 10))
                     }.disabled(!session.writable || !session.dirty)
                         .accessibilityLabel(session.dirty ? "Save reviewed object" : "Object is saved")
                 }
@@ -57,7 +57,7 @@ struct ObjectMeasurementPanel: View {
                 if let wall = region.wallProjection {
                     if !region.usesWallProjectionForDisplay {
                         Label("Out from wall · " + unit.format(meters: wall.metres), systemImage: "arrow.left.and.right")
-                            .font(.caption.weight(.semibold)).foregroundStyle(FieldStyle.mint)
+                            .font(.caption.weight(.semibold)).foregroundStyle(FieldStyle.cyan)
                     }
                     Text("Wall distance includes any gap behind the object.")
                         .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
@@ -72,15 +72,15 @@ struct ObjectMeasurementPanel: View {
             }
             if session.mode == .select {
                 Label("Automatic boundary", systemImage: "sparkles")
-                    .font(.caption).foregroundStyle(FieldStyle.mint).fixedSize(horizontal: false, vertical: true)
+                    .font(.caption).foregroundStyle(FieldStyle.cyan).fixedSize(horizontal: false, vertical: true)
             } else if session.mode == .part {
                 Text("Tap another captured piece of the same object. Separate pieces remain a partial measurement.")
-                    .font(.caption).foregroundStyle(FieldStyle.mint).fixedSize(horizontal: false, vertical: true)
+                    .font(.caption).foregroundStyle(FieldStyle.cyan).fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 10) {
                         Text("Brush").font(.caption)
-                        Slider(value: $session.brushRadius, in: 0.01...0.25, step: 0.01).tint(FieldStyle.mint)
+                        Slider(value: $session.brushRadius, in: 0.01...0.25, step: 0.01).tint(FieldStyle.cyan)
                             .accessibilityLabel("Selection brush radius").accessibilityValue(unit.format(meters: session.brushRadius))
                         Text(unit.format(meters: session.brushRadius)).font(.caption.monospacedDigit()).frame(minWidth: 55)
                     }
@@ -176,7 +176,7 @@ struct ObjectMeasurementPanel: View {
                         Button { session.save() } label: {
                             Image(systemName: session.dirty ? "checkmark" : "checkmark.circle")
                                 .frame(width: 44, height: 44)
-                                .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+                                .foregroundStyle(FieldStyle.ink).background(FieldStyle.cyan, in: RoundedRectangle(cornerRadius: 10))
                         }.disabled(!session.writable || !session.dirty)
                             .accessibilityLabel(session.dirty ? "Save reviewed object" : "Object is saved")
                     }
@@ -243,7 +243,7 @@ struct ObjectMeasurementPanel: View {
         } label: {
             Label(session.mode.rawValue, systemImage: session.mode.icon)
                 .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
-                .foregroundStyle(FieldStyle.ink).background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 10))
+                .foregroundStyle(FieldStyle.ink).background(FieldStyle.cyan, in: RoundedRectangle(cornerRadius: 10))
         }
         .disabled(!session.ready || session.busy).accessibilityLabel("Selection tool: " + session.mode.rawValue)
     }
@@ -270,7 +270,7 @@ struct ObjectMeasurementPanel: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(wall == nil ? axis.rawValue.capitalized : "Out from wall").font(.caption).foregroundStyle(.white.opacity(0.7))
                 Text((wall?.metres ?? dimension?.metres).map { unit.format(meters: $0) } ?? "Unknown")
-                    .font(expanded ? .headline.monospacedDigit() : .subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(FieldStyle.mint)
+                    .font(expanded ? .headline.monospacedDigit() : .subheadline.monospacedDigit().weight(.semibold)).foregroundStyle(FieldStyle.cyan)
                     .minimumScaleFactor(0.8)
                 Text(wall == nil ? evidence(dimension?.evidence) : "Wall reference").font(.caption2).foregroundStyle(.white.opacity(0.6))
                     .fixedSize(horizontal: false, vertical: true)

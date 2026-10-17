@@ -21,8 +21,8 @@ struct AllScansView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if searchText.isEmpty {
-                        FieldHero(eyebrow: "Scan library", title: "Every detail.\nReady to explore.",
-                                  subtitle: "Your captures, together in one view.", icon: "cube.transparent")
+                        FieldHero(eyebrow: "Scan library", title: "A new perspective.",
+                                  subtitle: "Explore and measure your captures.", icon: "cube.transparent")
                     }
                     HStack {
                         Text(searchText.isEmpty ? "Latest captures" : "Search results").font(.headline)

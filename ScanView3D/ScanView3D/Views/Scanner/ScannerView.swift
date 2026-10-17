@@ -210,7 +210,7 @@ struct ScannerView: View {
         }
         if !scanner.isScanning, !recovery.drafts.isEmpty {
             Button("Unfinished captures (\(recovery.drafts.count))") { showingRecovery = true }
-                .buttonStyle(.bordered).tint(FieldStyle.mint).padding(.horizontal, 20)
+                .buttonStyle(.bordered).tint(FieldStyle.cyan).padding(.horizontal, 20)
                 .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
         }
         if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
@@ -252,7 +252,7 @@ struct ScannerView: View {
                     Text("Shape marks accepted depth observations, not guaranteed saved triangles. Photo marks saved, low-motion, locally exposed candidates—not final texture resolution.")
                         .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
                 }.padding(.top, 8)
-            }.font(.caption).tint(FieldStyle.mint).padding(.horizontal, 16)
+            }.font(.caption).tint(FieldStyle.cyan).padding(.horizontal, 16)
         }
         .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
     }
@@ -291,16 +291,21 @@ struct ScannerView: View {
 
     private var topStatusBar: some View {
         HStack(alignment: .top, spacing: 12) {
+            if !scanner.isScanning && !typeSize.isAccessibilitySize {
+                TinyScannerMark(size: 46)
+            }
             VStack(alignment: .leading, spacing: 7) {
                 if scanner.isScanning || !typeSize.isAccessibilitySize {
                 HStack(spacing: 8) {
-                    Circle().fill(scanner.isScanning ? (scanner.isPaused ? Color.orange : FieldStyle.mint) : Color.white.opacity(0.5))
-                        .frame(width: 7, height: 7)
+                    if scanner.isScanning {
+                        Circle().fill(scanner.isPaused ? Color.orange : FieldStyle.mint)
+                            .frame(width: 7, height: 7)
+                    }
                     Text(scanner.isScanning ? (scanner.isPaused ? "PAUSED" : "CAPTURING") : AppConstants.appName.uppercased())
                         .font(.caption.weight(.bold)).tracking(2)
-                }.foregroundStyle(FieldStyle.mint)
+                }.foregroundStyle(FieldStyle.cyan)
                 }
-                Text(scanner.isScanning ? scanner.scanProgress : (typeSize.isAccessibilitySize ? "Ready to scan" : "Capture your world"))
+                Text(scanner.isScanning ? scanner.scanProgress : "Ready to capture")
                     .font(scanner.isScanning ? .subheadline.weight(.medium) : (typeSize.isAccessibilitySize ? .headline : .title2.weight(.semibold)))
                     .foregroundStyle(.white)
             }
@@ -404,7 +409,7 @@ struct ScannerView: View {
             HStack {
                 Text("Capture mode").font(.headline)
                 Spacer()
-                Image(systemName: settings.captureMode.icon).foregroundStyle(FieldStyle.mint)
+                Image(systemName: settings.captureMode.icon).foregroundStyle(FieldStyle.cyan)
             }
             LazyVGrid(columns: typeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
                 ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
@@ -421,7 +426,8 @@ struct ScannerView: View {
                         }
                         .padding(.horizontal, 12).frame(minHeight: 48)
                         .foregroundStyle(selected ? FieldStyle.ink : .white)
-                        .background(selected ? FieldStyle.mint : .white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+                        .background(selected ? FieldStyle.cyan : .white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
+                        .overlay(RoundedRectangle(cornerRadius: 13).stroke(selected ? Color.clear : .white.opacity(0.10), lineWidth: 1))
                         .opacity(unavailable ? 0.4 : 1)
                     }
                     .buttonStyle(.plain).disabled(unavailable)
@@ -434,7 +440,7 @@ struct ScannerView: View {
             Divider().overlay(.white.opacity(0.12))
             Button { showingCaptureSettings = true } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "slider.horizontal.3").foregroundStyle(FieldStyle.mint)
+                    Image(systemName: "slider.horizontal.3").foregroundStyle(FieldStyle.cyan)
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Scan settings").font(.subheadline.weight(.semibold))
                         Text(String(format: "%.1f m range", settings.rangeValue) + (settings.captureMode.usesDetail ? String(format: " · %.0f mm detail", settings.detailMM) : " · Photo capture"))
@@ -510,7 +516,7 @@ struct ScannerView: View {
     private var scanningInfoBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
         HStack(spacing: 10) {
-            chip(settings.captureMode.shortName, icon: settings.captureMode.icon, color: FieldStyle.mint)
+            chip(settings.captureMode.shortName, icon: settings.captureMode.icon, color: FieldStyle.cyan)
             chip(String(format: "%.1f m", settings.rangeValue), icon: "scope", color: .cyan)
             if settings.captureMode.usesMeshMode && settings.meshMode != .free {
                 chip(settings.meshMode.rawValue, icon: settings.meshMode.icon, color: .purple)
@@ -612,7 +618,7 @@ struct ScannerView: View {
                     }
                     .foregroundStyle(FieldStyle.ink).padding(.horizontal, 22)
                     .frame(minHeight: 58).frame(maxWidth: .infinity)
-                    .background(FieldStyle.mint, in: RoundedRectangle(cornerRadius: 19))
+                    .background(FieldStyle.cyan, in: RoundedRectangle(cornerRadius: 19))
                 }
             }
         }

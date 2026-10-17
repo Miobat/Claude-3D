@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(ScanSettings.MeasurementUnit.storageKey) private var measurementUnit = ScanSettings.MeasurementUnit.meters.rawValue
     @AppStorage("showGridByDefault") private var showGridByDefault = true
     @AppStorage("appAppearance") private var appearance = "system"
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var versionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -21,35 +22,45 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    FieldHero(eyebrow: AppConstants.brandName, title: "Make it yours.",
-                              subtitle: "Your workspace. Your preferences.", icon: "slider.horizontal.3")
+                    FieldHero(eyebrow: AppConstants.brandName, title: "Your workspace.",
+                              subtitle: "Preferences for the way you capture.", icon: "slider.horizontal.3")
                         .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 }
                 Section("Appearance") {
-                    Picker("Color scheme", selection: $appearance) {
-                        Text("System").tag("system")
-                        Text("Light").tag("light")
-                        Text("Dark").tag("dark")
+                    Menu {
+                        Picker("Color scheme", selection: $appearance) {
+                            Text("System").tag("system")
+                            Text("Light").tag("light")
+                            Text("Dark").tag("dark")
+                        }
+                    } label: {
+                        preferenceLabel("Color scheme", value: appearance.capitalized, symbol: "circle.lefthalf.filled")
                     }
-                }
+                    .accessibilityLabel("Color scheme").accessibilityValue(appearance.capitalized)
+                }.listRowBackground(FieldStyle.surface)
                 // Viewer settings
                 Section("Viewer") {
-                    Picker("Measurement Unit", selection: $measurementUnit) {
-                        ForEach(ScanSettings.MeasurementUnit.allCases, id: \.rawValue) { unit in
-                            Text("\(unit.rawValue) (\(unit.abbreviation))").tag(unit.rawValue)
+                    Menu {
+                        Picker("Measurement unit", selection: $measurementUnit) {
+                            ForEach(ScanSettings.MeasurementUnit.allCases, id: \.rawValue) { unit in
+                                Text("\(unit.rawValue) (\(unit.abbreviation))").tag(unit.rawValue)
+                            }
                         }
+                    } label: {
+                        preferenceLabel("Measurement unit", value: measurementUnit, symbol: "ruler")
                     }
+                    .accessibilityLabel("Measurement unit").accessibilityValue(measurementUnit)
 
-                    Toggle("Show Grid by Default", isOn: $showGridByDefault)
-                }
+                    Toggle("Show grid by default", isOn: $showGridByDefault)
+                }.listRowBackground(FieldStyle.surface)
 
                 // Storage
                 Section("Storage") {
-                    LabeledContent("Projects", value: "\(storageManager.projects.count)")
-                    LabeledContent("Total Scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })")
-                    LabeledContent("Storage Used", value: storageUsed)
+                    infoRow("Projects", value: "\(storageManager.projects.count)")
+                    infoRow("Total scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })")
+                    infoRow("Storage used", value: storageUsed)
 
-                }
+                }.listRowBackground(FieldStyle.surface)
 
                 // Debug
                 Section("Support & diagnostics") {
@@ -58,7 +69,7 @@ struct SettingsView: View {
                     } label: {
                         HStack {
                             Image(systemName: "ladybug.fill")
-                                .foregroundColor(.orange)
+                                .foregroundStyle(FieldStyle.accent)
                             Text("Debug Log")
                             Spacer()
                             Text("\(DebugLogger.shared.entries.count)")
@@ -66,13 +77,13 @@ struct SettingsView: View {
                                 .font(.subheadline)
                         }
                     }
-                }
+                }.listRowBackground(FieldStyle.surface)
 
                 // About
                 Section("About") {
-                    LabeledContent("App", value: AppConstants.appName)
-                    LabeledContent("By", value: AppConstants.companyName)
-                    LabeledContent("Version", value: versionLabel)
+                    infoRow("App", value: AppConstants.appName)
+                    infoRow("By", value: AppConstants.companyName)
+                    infoRow("Version", value: versionLabel)
 
                     HStack {
                         Text("LiDAR")
@@ -93,15 +104,17 @@ struct SettingsView: View {
                         }
                         #endif
                     }
-                }
+                }.listRowBackground(FieldStyle.surface)
                 Section {
                     Label("Stored on this device", systemImage: "internaldrive")
                     Text("Model exports are not full backups: source photos and measurements are not included. Keep the app installed to preserve your library.")
                         .font(.footnote).foregroundStyle(.secondary)
                 } header: { Text("Your files") }
+                    .listRowBackground(FieldStyle.surface)
                 Section {
                     Button("Delete all projects and scans", role: .destructive) { showingClearConfirm = true }
                 } footer: { Text("Permanent removal. This action cannot be undone.") }
+                    .listRowBackground(FieldStyle.surface)
             }
             .fieldScreen()
             .navigationTitle("Settings")
@@ -118,6 +131,42 @@ struct SettingsView: View {
                 Text("This will permanently delete all projects and scan files. This cannot be undone.")
             }
         }
+    }
+
+    /// Stacked at accessibility sizes: neither the name nor its current value is squeezed.
+    private func preferenceLabel(_ title: String, value: String, symbol: String) -> some View {
+        HStack(spacing: 12) {
+            if !typeSize.isAccessibilitySize {
+                Image(systemName: symbol).font(.body.weight(.medium))
+                    .foregroundStyle(FieldStyle.accent)
+                    .frame(width: 36, height: 36)
+                    .background(FieldStyle.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title).foregroundStyle(.primary)
+                Text(value).font(.subheadline).foregroundStyle(FieldStyle.accent)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary).accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .padding(.vertical, 4).contentShape(Rectangle())
+    }
+
+    private func infoRow(_ title: String, value: String) -> some View {
+        Group {
+            if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                    Text(value).foregroundStyle(.secondary)
+                }.fixedSize(horizontal: false, vertical: true)
+            } else {
+                LabeledContent(title, value: value)
+            }
+        }.accessibilityElement(children: .combine)
     }
 
     private func calculateStorageUsage() {
