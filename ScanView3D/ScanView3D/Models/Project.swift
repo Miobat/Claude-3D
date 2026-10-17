@@ -106,6 +106,9 @@ struct Scan: Identifiable, Codable {
     var retainedReconstructionFiles: [String]?
     var coordinateProvenance: CoordinateProvenance?
     var textureQuality: TextureQualityReport?
+    var meshRetention: MeshRetentionReport?
+    /// Pre-cleanup captured mesh, already in the same saved coordinate frame.
+    var originalMeshSHA256: String?
 
     var scaleStatus: CoordinateProvenance.ScaleStatus {
         coordinateProvenance?.scaleStatus ?? ((vertexCount > 0 && modelTransform == nil && modelScale == nil) ? .lidarMetric : .legacyUnverified)

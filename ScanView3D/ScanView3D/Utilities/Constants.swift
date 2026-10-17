@@ -1,7 +1,9 @@
 import SwiftUI
 
 enum AppConstants {
-    static let appName = "ScanView 3D"
+    static let appName = "TinyScanner"
+    static let companyName = "TinyCorp"
+    static let brandName = "\(appName) by \(companyName)"
     static let projectsDirectory = "Projects"
     static let scansDirectory = "Scans"
     static let exportDirectory = "Exports"

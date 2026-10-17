@@ -20,10 +20,17 @@ enum DesignPreview {
         let store = StorageManager(directory: root)
         guard !empty else { return store }
         if let site = store.createProject(name: "Coastal path · Demo") {
-            _ = try? store.saveScan(meshData: terrain(), name: "Rocky shoreline", toProject: site, metadata: {
+            let object = screen?.hasPrefix("object") == true
+            let mesh = screen == "object-wall" ? wallObjectMesh() : (object ? objectMesh() : terrain())
+            _ = try? store.saveScan(meshData: mesh, name: object ? "Cabinet · Demo" : "Rocky shoreline", toProject: site,
+                originalMesh: screen == "retention" ? mesh : nil, metadata: {
                 if screen == "quality" {
                     $0.textureQuality = TextureQualityReport(sharpArea: 76, softArea: 8, fallbackArea: 16,
                         atlasSize: 4096, atlasScale: 0.68, photoCount: 42)
+                }
+                if screen == "retention" {
+                    $0.meshRetention = MeshRetentionReport(cleanup: "Preserve", captured: mesh.retentionStage,
+                        cleaned: mesh.retentionStage, saved: mesh.retentionStage)
                 }
             })
             _ = try? store.saveScan(meshData: terrain(), name: "North slope", toProject: site, format: .ply)
@@ -54,6 +61,149 @@ enum DesignPreview {
                         faces: faces, colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
     }
 
+    static func objectMesh(width: Float = 1.2) -> MeshData {
+        let bounds = UprightMeasurementBounds(center: SIMD3(0, 0.65, 0), right: SIMD3(1, 0, 0), front: SIMD3(0, 0, 1), size: SIMD3(width, 1.3, 0.6))
+        let points = bounds.corners() + [SIMD3<Float>(-2, 0, -2), SIMD3(2, 0, -2), SIMD3(2, 0, 2), SIMD3(-2, 0, 2)]
+        let faces: [[UInt32]] = [[4, 5, 7], [4, 7, 6], [0, 2, 3], [0, 3, 1], [0, 4, 6], [0, 6, 2],
+                                [1, 3, 7], [1, 7, 5], [2, 6, 7], [2, 7, 3], [0, 1, 5], [0, 5, 4], [8, 10, 9], [8, 11, 10]]
+        let extents = MeshData.bounds(of: points)
+        return MeshProcessor.recalculateNormals(MeshData(vertices: points, normals: [], faces: faces,
+            colors: (0..<12).map { $0 < 8 ? SIMD4<Float>(0.62, 0.49, 0.34, 1) : SIMD4<Float>(0.25, 0.28, 0.3, 1) },
+            boundingBoxMin: extents.0, boundingBoxMax: extents.1, faceClassifications: Data(Array(repeating: UInt8(0), count: 12) + [2, 2])))
+    }
+
+    static func wallObjectMesh() -> MeshData {
+        var points: [SIMD3<Float>] = [], faces: [[UInt32]] = []
+        func quad(_ x0: Float, _ x1: Float, _ y0: Float, _ y1: Float, _ z: Float) {
+            let i = UInt32(points.count)
+            points += [SIMD3(x0,y0,z), SIMD3(x1,y0,z), SIMD3(x1,y1,z), SIMD3(x0,y1,z)]
+            faces += [[i,i+1,i+2], [i,i+2,i+3]]
+        }
+        quad(-0.6,0.6,1,2,0.6)
+        quad(-2,-0.8,0,3,0); quad(0.8,2,0,3,0); quad(-0.8,0.8,0,0.7,0); quad(-0.8,0.8,2.3,3,0)
+        let bounds = MeshData.bounds(of: points)
+        return MeshProcessor.recalculateNormals(MeshData(vertices: points, normals: [], faces: faces,
+            colors: points.indices.map { $0 < 4 ? SIMD4<Float>(0.62,0.49,0.34,1) : SIMD4<Float>(0.25,0.28,0.3,1) },
+            boundingBoxMin: bounds.0, boundingBoxMax: bounds.1))
+    }
+
+    /// Exercises the production mesh pipeline and files in an isolated library.
+    static func automaticMeasurementChecks(check: (Bool, String) -> Void) {
+        do {
+            let vertices: [SIMD3<Float>] = [SIMD3(0, 1, 0), SIMD3(1, 1, 0), SIMD3(0, 2, 0),
+                                          SIMD3(0, 1.001, 0), SIMD3(10, 1, 0)]
+            let mesh = MeshData(vertices: vertices, normals: Array(repeating: SIMD3(0, 0, 1), count: 5),
+                faces: [[0, 1, 2], [0, 3, 1], [4, 4, 4]], colors: [],
+                boundingBoxMin: SIMD3(0, 1, 0), boundingBoxMax: SIMD3(10, 2, 0),
+                faceClassifications: Data([4, 1, 3]))
+            let cleaned = MeshProcessor.removeDegenerateTriangles(mesh)
+            check(cleaned.faceClassifications == Data([4, 1]), "Degenerate-face removal remaps labels")
+            let welded = MeshProcessor.weldNearbyVertices(cleaned, threshold: 0.005)
+            check(welded.faceClassifications == Data([4]), "Welding drops collapsed triangle's label")
+            let connected = MeshProcessor.removeSmallComponents(welded, minVertices: 3)
+            check(connected.faceClassifications == Data([4]) && connected.vertexCount == 3,
+                  "Component removal preserves kept surface label")
+            let clustered = MeshProcessor.clusterVertices(mesh, cellSize: 0.01, preservePositions: true)
+            check(clustered.faceClassifications == Data([4]), "Detail clustering remaps labels")
+            let duplicate = MeshData(vertices: Array(vertices.prefix(3)), normals: [],
+                faces: [[0, 1, 2], [1, 2, 0]], colors: [], boundingBoxMin: .zero,
+                boundingBoxMax: SIMD3(1, 2, 0), faceClassifications: Data([1, 4]))
+            check(MeshProcessor.clusterVertices(duplicate, cellSize: 0.01).faceClassifications == Data([0]),
+                  "Collapsed duplicate triangles with conflicting labels become unknown")
+            check(MeshProcessor.recalculateNormals(connected).faceClassifications == Data([4]), "Normal rebuild retains labels")
+            check(MeshProcessor.smoothNormals(MeshProcessor.recalculateNormals(connected)).faceClassifications == Data([4]),
+                  "Normal smoothing retains labels")
+            check(MeshProcessor.smoothVertexPositions(connected).faceClassifications == Data([4]), "Position smoothing retains labels")
+            check(MeshProcessor.makeUniformGrey(connected).faceClassifications == Data([4]), "No-colour mode retains labels")
+            check(connected.transformed(by: matrix_identity_float4x4).faceClassifications == Data([4]), "Scene frame retains labels")
+            check(MeshProcessor.voxelDownsamplePoints(connected, leafSize: 0.01).faceClassifications == nil,
+                  "Point conversion does not misapply triangle labels to points")
+            let baked = BakedTexture(atlasImage: UIImage(), cornerUVs: [.zero, SIMD2(1, 0), SIMD2(0, 1)], atlasSize: 1)
+            check(MeshProcessor.createTexturedNode(from: connected, baked: baked).geometry?.elements.first?.primitiveCount == 1,
+                  "Textured viewer retains source face order / count")
+            let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+            let restored = try PropertyListDecoder().decode(MeshData.self, from: encoder.encode(mesh))
+            check(restored.faceClassifications == mesh.faceClassifications, "Recovery checkpoint retains face labels")
+            let invalid = MeshData(vertices: mesh.vertices, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax, faceClassifications: Data([4]))
+            do { _ = try encoder.encode(invalid); check(false, "Reject checkpoint label / face mismatch") }
+            catch { check(true, "Reject checkpoint label / face mismatch") }
+
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("automatic-check-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Semantic / measurement fixture") else {
+                check(false, "Automatic fixture project created"); return
+            }
+            let scan = try store.saveScan(meshData: connected, name: "Labelled surface", toProject: project,
+                metadata: { $0.recordCaptureFrame(matrix_identity_float4x4) })
+            let labels = try store.loadSurfaceLabels(for: scan, in: project)
+            check(labels?.classifications == Data([4]) && labels?.category(at: 0) == .table,
+                  "Saved labels bind to model and native viewer")
+            let legacyScan = try store.saveScan(meshData: MeshData(vertices: connected.vertices, normals: [],
+                faces: connected.faces, colors: [], boundingBoxMin: connected.boundingBoxMin,
+                boundingBoxMax: connected.boundingBoxMax), name: "Shape-only legacy", toProject: project,
+                metadata: { $0.modelScale = 2 })
+            check(try store.loadSurfaceLabels(for: legacyScan, in: project) == nil, "Absent legacy labels use shape-only fallback")
+            do { _ = try store.automaticMeasurementRevision(for: legacyScan, in: project)
+                check(false, "Unverified scale cannot produce automatic metric dimensions")
+            } catch { check(true, "Unverified scale cannot produce automatic metric dimensions") }
+            let manual = ScanMeasurement(kind: .distance, points: [SIMD3(0, 1, 0), SIMD3(1, 1, 0)])
+            try store.saveMeasurements([manual], for: scan, in: project)
+            let frame = try UprightMeasurementBounds.fit(points: connected.vertices, front: SIMD3(0, 0, 1))
+            let document = AutomaticMeasurementDocument(revision: try store.automaticMeasurementRevision(for: scan, in: project),
+                regions: [AutomaticMeasuredRegion(name: "Observed face", kind: .object, bounds: frame, dimensions: [
+                    AutomaticDimension(axis: .width, metres: 1, evidence: .partial),
+                    AutomaticDimension(axis: .height, metres: 1, evidence: .partial),
+                    AutomaticDimension(axis: .depth, metres: nil, evidence: .unavailable)
+                ])])
+            try store.saveAutomaticMeasurements(document, for: scan, in: project)
+            check(try store.loadAutomaticMeasurements(for: scan, in: project) == document, "Automatic selections save / reload")
+            check(store.loadMeasurements(for: scan, in: project) == [manual], "Automatic data leaves manual measurements readable")
+            let directory = store.getScanFileURL(scan: scan, project: project).deletingLastPathComponent()
+            let base = (scan.fileName as NSString).deletingPathExtension
+            let autoURL = directory.appendingPathComponent(base + AutomaticMeasurementDocument.suffix)
+            let original = try Data(contentsOf: autoURL)
+            for bytes in [Data(#"{"version":2,"regions":[{"kind":"future"}]}"#.utf8), Data("broken".utf8)] {
+                try bytes.write(to: autoURL, options: .atomic)
+                do { _ = try store.loadAutomaticMeasurements(for: scan, in: project); check(false, "Unreadable automatic data reported") }
+                catch { check(true, "Unreadable automatic data reported") }
+                do { try store.saveAutomaticMeasurements(document, for: scan, in: project); check(false, "Unreadable automatic data cannot be overwritten") }
+                catch { check(try Data(contentsOf: autoURL) == bytes, "Unreadable automatic data cannot be overwritten") }
+            }
+            try original.write(to: autoURL, options: .atomic)
+            guard let copy = store.duplicateScan(scan, from: project, to: project) else {
+                check(false, "Duplicate semantic scan created"); return
+            }
+            check(try store.loadSurfaceLabels(for: copy, in: project)?.classifications == Data([4]), "Duplicate retains correctly rebound labels")
+            let copyDocument = try store.loadAutomaticMeasurements(for: copy, in: project)
+            check(copyDocument?.regions == document.regions, "Duplicate retains automatic regions after OBJ reference rename")
+
+            var movedFrame = matrix_identity_float4x4; movedFrame.columns.3.x = 0.1
+            try store.updateScan(scan.id, in: project) { $0.modelTransform = StorageManager.array(of: movedFrame) }
+            guard let shifted = store.projects.first?.scans.first(where: { $0.id == scan.id }) else {
+                check(false, "Shifted fixture exists"); return
+            }
+            do { _ = try store.loadAutomaticMeasurements(for: shifted, in: project); check(false, "Alignment change invalidates dimensions") }
+            catch { check(true, "Alignment change invalidates dimensions") }
+            do { try store.saveAutomaticMeasurements(document, for: shifted, in: project); check(false, "Stale results cannot be saved") }
+            catch { check(try Data(contentsOf: autoURL) == original, "Stale results cannot be saved") }
+            try store.updateScan(scan.id, in: project) { $0.modelTransform = nil }
+            guard let destination = store.createProject(name: "Moved semantic fixture") else {
+                check(false, "Move fixture project created"); return
+            }
+            check(store.moveScan(scan, from: project, to: destination), "Move includes automatic / semantic sidecars")
+            check(try store.loadSurfaceLabels(for: scan, in: destination)?.classifications == Data([4]) &&
+                  store.loadAutomaticMeasurements(for: scan, in: destination)?.regions == document.regions,
+                  "Moved semantic / automatic data remain valid")
+            let newDirectory = store.getScanFileURL(scan: scan, project: destination).deletingLastPathComponent()
+            store.deleteScan(scan, from: destination)
+            check(!FileManager.default.fileExists(atPath: newDirectory.appendingPathComponent(base + SurfaceLabelDocument.suffix).path) &&
+                  !FileManager.default.fileExists(atPath: newDirectory.appendingPathComponent(base + AutomaticMeasurementDocument.suffix).path),
+                  "Delete removes both registered measurement companions")
+        } catch { check(false, "Automatic measurement foundation fixtures: \(error)") }
+    }
+
     /// Runs against the real SceneKit camera / hit tester, not just the pure
     /// maths helpers. The CI script requires this report and rejects failures.
     static func navigationChecks(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator) {
@@ -62,6 +212,20 @@ enum DesignPreview {
         var failures: [String] = []
         var count = 0
         func check(_ condition: Bool, _ name: String) { count += 1; if !condition { failures.append(name) } }
+        check(Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String == "TinyScanner",
+              "Installed app uses TinyScanner display name")
+        check(AppConstants.brandName == "TinyScanner by TinyCorp", "TinyCorp product branding is consistent")
+        check(Bundle.main.bundleIdentifier == "com.michael.scanview3d", "Rebrand preserves existing app identity")
+        check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: false) == 190,
+              "Object panel defaults to compact portrait height")
+        check(ObjectPanelLayout.height(expanded: false, landscape: true, accessibility: false) < 230,
+              "Compact object panel frees landscape viewport")
+        check(ObjectPanelLayout.height(expanded: false, landscape: false, accessibility: true) < 320,
+              "Large-text compact panel remains bounded and scrollable")
+        check(ObjectPanelLayout.height(expanded: true, landscape: false, accessibility: false) == 320 &&
+              ObjectPanelLayout.height(expanded: true, landscape: true, accessibility: true) == 230,
+              "Expanded object tools retain full review viewport")
+        automaticMeasurementChecks(check: check)
         let old = camera.simdTransform
         let extent: Float = 6
         rig.frame(center: .zero, extent: extent)
@@ -154,12 +318,158 @@ enum DesignPreview {
 
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
+        checkMeshRetention(check)
         checkTextureQuality(check)
-        let report: [String: Any] = ["checks": count, "failures": failures]
-        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("navigation-checks.json")
-        do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
-        catch { assertionFailure("Could not write navigation test report: \(error)") }
+        checkObjects(view: view, coordinator: coordinator, check: check) {
+            let report: [String: Any] = ["checks": count, "failures": failures]
+            let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("navigation-checks.json")
+            do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
+            catch { assertionFailure("Could not write navigation test report: \(error)") }
+        }
+    }
+
+    private static func checkObjects(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator,
+                                     check: @escaping (Bool, String) -> Void, done: @escaping () -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("object-ui-check-\(UUID().uuidString)")
+        let store = StorageManager(directory: root), session = ObjectMeasurementSession()
+        var renderedRegion: AutomaticMeasuredRegion?, renderedHighlight: SCNNode?
+        session.render = { renderedRegion = $0; renderedHighlight = $1 }
+        func finish() { session.detach(); try? FileManager.default.removeItem(at: root); done() }
+        func idle(_ attempt: Int = 0, then: @escaping () -> Void) {
+            if !session.busy { then(); return }
+            guard attempt < 100 else { check(false, "Object worker completes without blocking main thread"); finish(); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { idle(attempt + 1, then: then) }
+        }
+        do {
+            guard let project = store.createProject(name: "Object UI fixture") else { check(false, "Object fixture project"); finish(); return }
+            let mesh = objectMesh(width: 3.8)
+            let scan = try store.saveScan(meshData: mesh, name: "Cabinet", toProject: project, metadata: { $0.recordCaptureFrame(matrix_identity_float4x4) })
+            let node = MeshProcessor.createSceneKitNode(from: mesh)
+            let sources = ModelGeometryIndex.sources(in: node)
+            let geometry = try ObjectSceneGeometry.read(sources)
+            check(geometry.points.count == mesh.vertices.count && geometry.triangles.count == mesh.faces.count,
+                  "Native Object extraction retains exact metric vertex and face order")
+            let index = try ObjectSelectionIndex(points: geometry.points, triangles: geometry.triangles, labels: mesh.faceClassifications)
+            let selection = try index.grow(from: 0).selection
+            let highlight = try ObjectSceneGeometry.highlight(index: index, selection: selection)
+            check(highlight.name == "objectSelection" && highlight.geometry?.elements.first?.primitiveCount == selection.ids.count &&
+                  !selection.ids.contains(12) && !selection.ids.contains(13),
+                  "Object highlight contains only selected triangles, not the floor")
+            coordinator.parent.objects.active = true; coordinator.parent.objects.mode = .add; coordinator.updateObjectGestures()
+            check(coordinator.objectPaint?.isEnabled == true && coordinator.cameraController?.selectionEditing == true,
+                  "Object paint mode replaces only one-finger orbit")
+            check(view.gestureRecognizers?.contains { ($0 as? UIPanGestureRecognizer)?.minimumNumberOfTouches == 2 && $0.isEnabled } ?? false,
+                  "Object paint keeps two-finger navigation available")
+            coordinator.parent.objects.mode = .part; coordinator.updateObjectGestures()
+            check(coordinator.objectPaint?.isEnabled == false && coordinator.cameraController?.selectionEditing == false,
+                  "Add part uses taps and keeps one-finger orbit available")
+            coordinator.parent.objects.active = false; coordinator.parent.objects.mode = .select; coordinator.updateObjectGestures()
+            // Actual hit under the overlay must resolve to model geometry.
+            let old = view.pointOfView?.simdTransform
+            node.simdPosition = SIMD3(20, 0, 0); highlight.simdPosition = SIMD3(20, 0, 0)
+            view.scene?.rootNode.addChildNode(node); view.scene?.rootNode.addChildNode(highlight)
+            coordinator.cameraController?.set(yaw: 0, pitch: 0, target: SIMD3(20, 0.65, 0), distance: 3, animated: false)
+            SCNTransaction.flush(); _ = view.snapshot()
+            let target = SIMD3<Float>(20, 0.65, 0.3), pixel = view.projectPoint(SCNVector3(target.x, target.y, target.z))
+            let hit = coordinator.surfacePointForFocus(at: CGPoint(x: CGFloat(pixel.x), y: CGFloat(pixel.y)))
+            check(hit.map { simd_distance($0, target) < 0.005 } ?? false, "Object overlay does not intercept surface picking")
+            node.removeFromParentNode(); highlight.removeFromParentNode(); node.simdPosition = .zero
+            if let old { view.pointOfView?.simdTransform = old; coordinator.cameraController?.syncFromCamera() }
+            session.prepare(sources: ModelGeometryIndex.sources(in: node), store: store, scan: scan, project: project)
+            idle {
+                check(session.ready && session.writable, "Object session prepares verified model and writable storage")
+                guard session.ready else { finish(); return }
+                session.active = true
+                session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(1, 0, 0), cameraFront: SIMD3(0, 0, 1))
+                idle {
+                    guard let draft = session.draft else { check(false, "Object tap produces a draft"); finish(); return }
+                    check(abs(draft.bounds.size.x - 3.8) < 0.0001 && abs(draft.bounds.size.y - 1.3) < 0.0001 && abs(draft.bounds.size.z - 0.6) < 0.0001,
+                          "Object tap finds the entire 3.8 m cabinet and ignores a misleading local face normal")
+                    session.save()
+                    idle {
+                        do {
+                            let document = try store.loadAutomaticMeasurements(for: scan, in: project)
+                            check(document?.regions.first?.selection == draft.selection && !session.dirty,
+                                  "Save persists exact selected surfaces and clears unsaved state")
+                            session.newObject(); session.open(draft)
+                            idle {
+                                check(session.draft == draft && !session.dirty, "Reopening restores reviewed bounds and exact object selection")
+                                session.rotateFront()
+                                idle {
+                                    check(session.draft.map { abs($0.bounds.size.x - 0.6) < 0.0001 && abs($0.bounds.size.z - 3.8) < 0.0001 } ?? false,
+                                          "Turning object front swaps width and depth in the local frame")
+                                    session.undo()
+                                    idle {
+                                        check(session.draft?.bounds == draft.bounds, "Object undo restores prior orientation and extents")
+                                        session.mode = .remove
+                                        session.pick(point: SIMD3(0, 0.65, 0.3), normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+                                        session.pick(point: SIMD3(0, 0.65, -0.3), normal: SIMD3(0, 0, -1), cameraFront: SIMD3(0, 0, 1))
+                                        idle {
+                                            check(session.draft?.selection?.ids.count == (draft.selection?.ids.count ?? 0) - 4,
+                                                  "Coalesced paint removes front and final rear stroke without unbounded work")
+                                            session.undo()
+                                            idle {
+                                                session.undo()
+                                                idle {
+                                                    check(session.draft?.selection == draft.selection, "Undo restores exact surfaces after both paint samples")
+                                                    session.mode = .select
+                                                    session.pick(point: SIMD3(1.5,0,1.5), normal: SIMD3(0,1,0), cameraFront: SIMD3(0,0,1))
+                                                    idle {
+                                                        check(session.draft == nil && session.wallDepth == nil && !session.dirty && session.canUndo,
+                                                              "Rejected object tap clears stale box and Save state but keeps Undo")
+                                                        check(renderedRegion == nil && renderedHighlight == nil, "Rejected tap clears the actual renderer overlay")
+                                                        session.undo()
+                                                        idle {
+                                                            check(session.draft?.selection == draft.selection, "Undo recovers the prior selection after a rejected tap")
+                                                            session.mode = .part
+                                                            session.pick(point: SIMD3(0,0.65,0.3), normal: SIMD3(0,0,1), cameraFront: SIMD3(0,0,1))
+                                                            idle {
+                                                                check(session.draft?.selection == draft.selection && session.draft?.dimensions.first?.evidence == .partial,
+                                                                      "Add part session unions exact IDs and marks review as Partial")
+                                                                session.undo()
+                                                                idle {
+                                                                    session.mode = .select; session.missedPick()
+                                                                    idle {
+                                                                        check(session.draft == nil && renderedHighlight == nil, "Tap on missing geometry clears stale measurement")
+                                                                        session.undo()
+                                                                        idle {
+                                                                            check(session.draft?.selection == draft.selection, "Missed-tap Undo preserves source IDs")
+                                                                            finishEdits()
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        func finishEdits() {
+                                            session.adjust(name: "Reviewed cabinet", size: SIMD3(1.25, 1.3, 0.6))
+                                            check(session.draft?.dimensions.first { $0.axis == .width }?.evidence == .adjusted && session.dirty,
+                                                  "Edited object bounds are explicitly adjusted, never measured")
+                                            for aligned in ["front", "side", "top"] {
+                                                coordinator.alignObject(view: aligned, bounds: draft.bounds)
+                                                let direction = aligned == "side" ? draft.bounds.right : draft.bounds.front
+                                                let camera = view.pointOfView?.simdTransform
+                                                let axis = aligned == "top" ? SIMD3<Float>(0, 1, 0) : direction
+                                                check(camera.map { simd_dot(SIMD3($0.columns.2.x, $0.columns.2.y, $0.columns.2.z), axis) > 0.999 } ?? false,
+                                                      "Object \(aligned) view aligns orthographically to selection axes")
+                                            }
+                                            session.deleteDraft()
+                                            idle {
+                                                check(session.saved.isEmpty && session.draft == nil, "Delete removes only the saved object result")
+                                                finish()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch { check(false, "Object native persistence: \(error)"); finish() }
+                    }
+                }
+            }
+        } catch { check(false, "Object native fixture: \(error)"); finish() }
     }
 
     private static func checkTextureQuality(_ check: (Bool, String) -> Void) {
@@ -315,7 +625,8 @@ enum DesignPreview {
         func unchanged(_ i: Int) -> Bool {
             simd_distance(SIMD3(result[i].x, result[i].y, result[i].z), SIMD3(reference[i].x, reference[i].y, reference[i].z)) < 0.00001
         }
-        check(result[8 * 16 + 1].y > 0.45, "Committed in-range surface gets visible mint coverage")
+        check(result[8 * 16 + 1].z > result[8 * 16 + 1].y && result[8 * 16 + 1].y > reference[8 * 16 + 1].y + 0.05,
+              "Committed in-range surface gets visible blue shape coverage")
         let outside = 8 * 16 + 5
         let original = SIMD3(reference[outside].x, reference[outside].y, reference[outside].z)
         let grey = simd_dot(original, SIMD3<Float>(0.2126, 0.7152, 0.0722))
@@ -329,12 +640,12 @@ enum DesignPreview {
 
         // Fast colour mode: geometry alone is blue; only a retained, saved
         // sharp photo is allowed to turn it mint. Test the production kernel.
-        for hasPhoto in [false, true] {
+        for mode: Float in [2, 3] { for hasPhoto in [false, true] {
             guard let photo = texture(.r32Float), let cmd = queue.makeCommandBuffer(),
                   let enc = cmd.makeComputeCommandEncoder() else { check(false, "Photo coverage command"); return }
             let photoDepths = hasPhoto ? committed : [Float](repeating: 0, count: 256)
             photoDepths.withUnsafeBytes { photo.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: 64) }
-            uniforms.parameters = SIMD4(1.5, 2, 16, 16)
+            uniforms.parameters = SIMD4(1.5, mode, 16, 16)
             enc.setComputePipelineState(pipeline)
             enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
             enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3); enc.setTexture(photo, index: 4)
@@ -344,9 +655,65 @@ enum DesignPreview {
             var pixels = [SIMD4<Float>](repeating: .zero, count: 256)
             pixels.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256, from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
             let p = pixels[8 * 16 + 1]
-            check(cmd.status == .completed && (hasPhoto ? simd_distance(p, result[8 * 16 + 1]) < 0.0001 : p.z > p.y && p.y < result[8 * 16 + 1].y - 0.08),
-                  "Fast coverage \(hasPhoto ? "mint with photo" : "blue without photo"): \(p)")
-        }
+            check(cmd.status == .completed && (hasPhoto ? p.y > result[8 * 16 + 1].y + 0.05 : p.y < result[8 * 16 + 1].y + 0.04),
+                  "Photo coverage mode \(mode), \(hasPhoto ? "green candidate" : "needs photo"): \(p)")
+            check(simd_distance(pixels[8 * 16 + 13], reference[8 * 16 + 13]) < 0.00001,
+                  "Photo mode \(mode) cannot mark uncaptured geometry")
+        } }
+    }
+
+    private static func checkMeshRetention(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("retention-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            var mesh = wallObjectMesh()
+            // A TV front only 18 mm off the wall, mislabelled as wall by ARKit.
+            let points = mesh.vertices.enumerated().map { i, p in i < 4 ? SIMD3(p.x, p.y, Float(0.018)) : p }
+            let bounds = MeshData.bounds(of: points)
+            mesh = MeshData(vertices: points, normals: mesh.normals, faces: mesh.faces, colors: mesh.colors,
+                boundingBoxMin: bounds.0, boundingBoxMax: bounds.1,
+                faceClassifications: Data(repeating: SurfaceCategory.wall.rawValue, count: mesh.faceCount))
+            let coloured = mesh.replacingColors(Array(repeating: SIMD4<Float>(0.3,0.4,0.5,1), count: points.count))
+            check(coloured.faceClassifications == mesh.faceClassifications, "Camera recolouring retains floor/wall labels")
+            let preserved = MeshProcessor.postProcess(coloured, level: .quick)
+            check(preserved.vertices == mesh.vertices && preserved.faces == mesh.faces,
+                  "Preserve cleanup keeps sparse wall triangles and thin object geometry exactly")
+            let balanced = MeshProcessor.postProcess(coloured, level: .standard)
+            check(balanced.faceCount == mesh.faceCount, "Balanced cleanup no longer deletes large sparse wall components")
+            let index = try ObjectSelectionIndex(points: preserved.vertices, triangles: preserved.faces.map { SIMD3($0[0],$0[1],$0[2]) }, labels: preserved.faceClassifications)
+            check(try index.grow(from: 0).selection.ids == [0,1], "Recolour → cleanup → Object keeps thin TV separate from wall")
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Original recovery"), let destination = store.createProject(name: "Move target") else {
+                check(false, "Original fixture project creation"); return
+            }
+            let report = MeshRetentionReport(cleanup: "Preserve", captured: mesh.retentionStage, cleaned: preserved.retentionStage, saved: preserved.retentionStage)
+            let scan = try store.saveScan(meshData: preserved, name: "Thin TV", toProject: project, originalMesh: mesh) {
+                $0.meshRetention = report; $0.recordCaptureFrame(matrix_identity_float4x4); $0.latitude = 59.9
+            }
+            let reloaded = StorageManager(directory: root).projects.first { $0.id == project.id }?.scans.first
+            check(reloaded?.originalMeshSHA256 == scan.originalMeshSHA256 && reloaded?.meshRetention == report,
+                  "Original hash and retention report survive library reload")
+            let copy = try store.saveOriginalCopy(of: scan, in: project)
+            check(copy.id != scan.id && copy.faceCount == mesh.faceCount && copy.latitude == scan.latitude && copy.sceneFrame == scan.sceneFrame,
+                  "Restore creates a separate metric copy with capture reference intact")
+            check(copy.textureQuality == nil && copy.originalMeshSHA256 == nil, "Original copy does not claim a baked photo atlas or inherited measurements")
+            check(try store.loadSurfaceLabels(for: copy, in: project)?.classifications == mesh.faceClassifications,
+                  "Restored original retains semantic labels")
+            guard let duplicate = store.duplicateScan(scan, from: project, to: project) else { check(false, "Duplicate original fixture"); return }
+            check(duplicate.originalMeshSHA256 == scan.originalMeshSHA256 && duplicate.meshRetention == report,
+                  "Duplicate retains original and cleanup report")
+            check(store.moveScan(duplicate, from: project, to: destination), "Move carries original mesh to destination")
+            let movedCopy = try store.saveOriginalCopy(of: duplicate, in: destination)
+            check(movedCopy.faceCount == mesh.faceCount, "Moved original remains restorable")
+            let originalURL = store.getScanFileURL(scan: duplicate, project: destination).deletingLastPathComponent()
+                .appendingPathComponent((duplicate.fileName as NSString).deletingPathExtension + "_original.mesh")
+            try Data("corrupt".utf8).write(to: originalURL, options: .atomic)
+            let count = store.projects.reduce(0) { $0 + $1.scans.count }
+            do { _ = try store.saveOriginalCopy(of: duplicate, in: destination); check(false, "Reject corrupt original") }
+            catch { check(store.projects.reduce(0) { $0 + $1.scans.count } == count, "Corrupt original creates no misleading copy") }
+            store.deleteScan(duplicate, from: destination)
+            check(!FileManager.default.fileExists(atPath: originalURL.path), "Deleting a scan removes its original companion")
+        } catch { check(false, "Mesh retention fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {
@@ -435,7 +802,7 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "walk", "joysticks", "quality", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "object", "object-wall", "object-rejected", "object-expanded", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }

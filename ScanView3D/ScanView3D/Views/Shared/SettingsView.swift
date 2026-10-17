@@ -21,7 +21,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    FieldHero(eyebrow: "ScanView 3D", title: "Make it yours.",
+                    FieldHero(eyebrow: AppConstants.brandName, title: "Make it yours.",
                               subtitle: "Your workspace. Your preferences.", icon: "slider.horizontal.3")
                         .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 }
@@ -71,6 +71,7 @@ struct SettingsView: View {
                 // About
                 Section("About") {
                     LabeledContent("App", value: AppConstants.appName)
+                    LabeledContent("By", value: AppConstants.companyName)
                     LabeledContent("Version", value: versionLabel)
 
                     HStack {

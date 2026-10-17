@@ -38,7 +38,7 @@ class OBJExporter {
         let mtlURL = exportDir.appendingPathComponent("\(name).mtl")
 
         let out = try StreamWriter(url: objURL)
-        out.write("# ScanView 3D - OBJ Export\n# Vertices: \(meshData.vertexCount)\n# Faces: \(meshData.faceCount)\n")
+        out.write("# TinyScanner by TinyCorp - OBJ Export\n# Vertices: \(meshData.vertexCount)\n# Faces: \(meshData.faceCount)\n")
         out.write("mtllib \(name).mtl\no \(name)\n")
         let colored = includeColors && meshData.colors.count == meshData.vertices.count
         for i in 0..<meshData.vertices.count {
@@ -61,7 +61,7 @@ class OBJExporter {
         }
         try out.close()
 
-        let mtl = "# ScanView 3D - Material Library\n\nnewmtl scan_material\nKa 0.2 0.2 0.2\nKd 0.8 0.8 0.8\nKs 0.05 0.05 0.05\nNs 5.0\nd 1.0\nillum 2\n"
+        let mtl = "# TinyScanner by TinyCorp - Material Library\n\nnewmtl scan_material\nKa 0.2 0.2 0.2\nKd 0.8 0.8 0.8\nKs 0.05 0.05 0.05\nNs 5.0\nd 1.0\nillum 2\n"
         try? mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
         return objURL
     }
@@ -88,7 +88,7 @@ class OBJExporter {
         }
 
         let out = try StreamWriter(url: objURL)
-        out.write("# ScanView 3D - Textured OBJ Export\n# Vertices: \(meshData.vertexCount)  Faces: \(meshData.faceCount)\n")
+        out.write("# TinyScanner by TinyCorp - Textured OBJ Export\n# Vertices: \(meshData.vertexCount)  Faces: \(meshData.faceCount)\n")
         out.write("mtllib \(name).mtl\no \(name)\n")
         for v in meshData.vertices { out.write("v \(v.x) \(v.y) \(v.z)\n") }
         let hasNormals = !meshData.normals.isEmpty
@@ -106,7 +106,7 @@ class OBJExporter {
         }
         try out.close()
 
-        let mtl = "# ScanView 3D - Material Library\n\nnewmtl scan_material\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nd 1.0\nillum 1\nmap_Kd \(texName)\n"
+        let mtl = "# TinyScanner by TinyCorp - Material Library\n\nnewmtl scan_material\nKa 1.0 1.0 1.0\nKd 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nd 1.0\nillum 1\nmap_Kd \(texName)\n"
         try? mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
         return objURL
     }
@@ -119,7 +119,7 @@ class OBJExporter {
         let plyURL = exportDir.appendingPathComponent("\(sanitizeFileName(fileName)).ply")
         let hasColors = !meshData.colors.isEmpty
 
-        var header = "ply\nformat binary_little_endian 1.0\ncomment ScanView 3D Export\n"
+        var header = "ply\nformat binary_little_endian 1.0\ncomment TinyScanner by TinyCorp Export\n"
         header += "element vertex \(meshData.vertexCount)\n"
         header += "property float x\nproperty float y\nproperty float z\n"
         header += "property float nx\nproperty float ny\nproperty float nz\n"
@@ -155,7 +155,7 @@ class OBJExporter {
         let plyURL = exportDir.appendingPathComponent("\(sanitizeFileName(fileName)).ply")
         let hasColors = !meshData.colors.isEmpty
 
-        var header = "ply\nformat binary_little_endian 1.0\ncomment ScanView 3D Point Cloud\n"
+        var header = "ply\nformat binary_little_endian 1.0\ncomment TinyScanner by TinyCorp Point Cloud\n"
         header += "element vertex \(meshData.vertices.count)\nproperty float x\nproperty float y\nproperty float z\n"
         if hasColors { header += "property uchar red\nproperty uchar green\nproperty uchar blue\n" }
         header += "end_header\n"

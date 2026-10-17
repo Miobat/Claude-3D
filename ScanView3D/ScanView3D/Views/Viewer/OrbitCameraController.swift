@@ -40,6 +40,9 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
 
     /// Returns the model surface under a screen point (for double-tap focus).
     var surfacePoint: ((CGPoint) -> SIMD3<Float>?)?
+    var selectionEditing = false {
+        didSet { orbitPan?.isEnabled = !selectionEditing; if selectionEditing { stopInertia() } }
+    }
 
     private var orbitPan: UIPanGestureRecognizer!
     private var movePan: UIPanGestureRecognizer!
@@ -214,6 +217,7 @@ final class OrbitCameraController: NSObject, UIGestureRecognizerDelegate {
     }
 
     @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) {
+        guard !selectionEditing else { return }
         guard walkGround == nil, !choosingWalkStart else { return }
         guard let view = view, let p = surfacePoint?(g.location(in: view)) else { return }
         stopInertia()

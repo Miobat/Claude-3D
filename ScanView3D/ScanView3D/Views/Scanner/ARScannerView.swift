@@ -5,7 +5,7 @@ import RealityKit
 
 struct ARScannerViewRepresentable: UIViewRepresentable {
     @ObservedObject var scanner: LiDARScanner
-    @Binding var showMeshOverlay: Bool
+    var overlayMode: CaptureOverlayMode
     var previewRange: Float
 
     func makeUIView(context: Context) -> ARView {
@@ -40,7 +40,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
             view.session = scanner.arSession
             for case let coaching as ARCoachingOverlayView in view.subviews { coaching.session = scanner.arSession }
         }
-        context.coordinator.showCoverage = showMeshOverlay
+        context.coordinator.overlayMode = overlayMode
         context.coordinator.previewRange = previewRange
     }
 
@@ -55,7 +55,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         weak var view: ARView?
         weak var scanner: LiDARScanner?
         let feedback = LiveCaptureFeedback()
-        var showCoverage = true
+        var overlayMode: CaptureOverlayMode = .combined
         var previewRange: Float = 3
         var link: CADisplayLink?
 
@@ -71,7 +71,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
             feedback?.update(frame: frame, accepted: scanner.acceptedDepthFrame, viewport: view.bounds.size,
                 orientation: view.window?.windowScene?.interfaceOrientation ?? .portrait,
                 range: scanner.isScanning ? scanner.rangeMeters : previewRange,
-                showCoverage: showCoverage && scanner.isScanning)
+                showCoverage: scanner.isScanning, mode: overlayMode)
         }
     }
 }

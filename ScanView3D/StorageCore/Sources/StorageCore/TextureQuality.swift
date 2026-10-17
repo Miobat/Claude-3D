@@ -47,6 +47,29 @@ struct TextureFrameQuality: Equatable {
     }
 }
 
+/// Per-depth-pixel exposure check for the live photo overlay. Flat, correctly
+/// exposed walls are allowed: lack of texture is not evidence of defocus.
+/// This is a usable-photo candidate mask, not a guarantee of final texture detail.
+enum PhotoPatchQuality {
+    static func mask(luma: [UInt8], width: Int, height: Int) -> [UInt8] {
+        guard width > 0, height > 0, width <= 4096, height <= 4096,
+              luma.count == width * height else { return [] }
+        var result = [UInt8](repeating: 0, count: luma.count)
+        guard width >= 3, height >= 3 else { return result }
+        for y in 1..<(height - 1) { for x in 1..<(width - 1) {
+            let centre = luma[y * width + x]
+            guard centre > 8 && centre < 250 else { continue }
+            var usable = 0
+            for dy in -1...1 { for dx in -1...1 {
+                let value = luma[(y + dy) * width + x + dx]
+                if value > 8 && value < 250 { usable += 1 }
+            } }
+            if usable >= 7 { result[y * width + x] = 255 }
+        } }
+        return result
+    }
+}
+
 enum TextureQualityMath {
     static func motionBlur(turn: Double, move: Double, seconds: Double,
                            exposure: Double, focalPixels: Double, distance: Double) -> Double {

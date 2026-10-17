@@ -1,4 +1,4 @@
-# ScanView 3D — Developer Handover
+# TinyScanner by TinyCorp — Developer Handover
 
 Native iOS LiDAR scanning app (SwiftUI + ARKit + SceneKit + RealityKit), in
 `ScanView3D/`. Requires an iPhone/iPad Pro with LiDAR, iOS 17+.
@@ -36,7 +36,7 @@ The Xcode project is edited by hand. A new file needs **4 entries** in
 a child entry in the right `PBXGroup` (Models / Services / Viewer / Scanner …),
 and a line in the Sources build phase. Copy an existing file's lines (e.g.
 `OrbitCameraController.swift`, `A10028`/`B10028`) and use the next free number
-(currently `A10045`/`B10045`). Deleting a file = remove those 4 lines too.
+(currently `A10050`/`B10050`). Deleting a file = remove those 4 lines too.
 
 ### Checking your work without Xcode
 - A tree-sitter Swift parser (`pip install tree-sitter tree-sitter-swift`) catches
@@ -183,34 +183,198 @@ build from "Previous Builds", or run the TestFlight workflow on that commit.
 See `ScanView3D/CAPTURE_TRUST.md`. Fast colour coverage now distinguishes shape
 (blue) from shape plus a retained sharp photo (mint). A photo is committed only
 after its JPEG write, using its own depth pose. Every kept mesh face must fit
-a recorded range sphere. (Smoothing and near low-confidence evidence: see §13.)
+a recorded range sphere. (Smoothing and near low-confidence evidence: see §18.)
 Lightweight recovery retains sampled vertex colour (not the temporary photo
 atlas). Required scan metadata commits with the first library write. Native
 Metal / recovery / navigation checks now gate every release branch.
 
-## 13. Owner decisions — do not reverse without asking
+## 13. Automatic measurement foundation (not the selection UI yet)
+
+Branch `codex/automatic-measurements` starts from the exact published
+`codex/texture-quality-polish` tip `7a709d2`, including capture-trust-recovery.
+No integration branches have been merged and no TestFlight release is requested.
+
+- `MeshData.faceClassifications` is optional packed Data, one byte per kept
+  triangle. Capture, cleanup, vertex welding, component filtering, clustering,
+  colour changes, scene transforms and recovery retain/remap it. Conflicting
+  labels on collapsed duplicate faces become unknown. Point conversion drops it.
+- New mesh saves write `<base>_surfaces.json` before publishing the scan in the
+  library. It contains labels and hashes of BOTH the exported model and native
+  viewer; a changed/reordered reconstruction must never reuse that mapping.
+  Legacy / point-cloud / photogrammetry scans use shape-only analysis.
+- `StorageCore/AutomaticMeasurementCore.swift` (A10045/B10045) defines upright
+  selection bounds and a separate versioned `<base>_automatic-measurements.json`
+  contract. It is NOT an object detector. Bounds follow the object's bottom/top,
+  not the floor, and preserve supported protrusions rather than trimming 1%.
+- Every dimension has explicit evidence: observed span, partial, confirmed flush
+  to wall assumption, adjusted, or unavailable. Bounds alone cannot prove a
+  complete object. Unknown depth has no numeric value; wall depth requires
+  explicit confirmation. Metric results reject estimated/unverified scale.
+- Results bind to model bytes, native viewer bytes (when present), and the world
+  transform. Stale, corrupt, or newer files throw and cannot be silently replaced.
+  Only explicit reviewed replacement can supersede stale results. Heavy hashing
+  must run on a worker queue when the UI is connected.
+- Both sidecars participate in move/delete/duplicate/reconstruction retention.
+  Valid version-1 duplication rebinds the model hash after OBJ material-reference
+  renaming; unknown future or already-stale data is retained without reinterpretation.
+- Existing manual `_measurements.json` and its enum types are unchanged. Older
+  app versions can still open manual measurements, but do not manage the new
+  companions: use the updated app for moving/duplicating scans with automatic data.
+
+Next: tapped-object region growing, connected-noise rejection, highlight and
+add/remove selection corrections, evidence-backed dimensions and aligned
+front/side/top views. Then multi-height room boundaries and plan export; finally
+a separate RoomPlan capture trial. Do not promise centimetre field accuracy until
+repeat scans have been checked against physical measurements on LiDAR hardware.
+
+## 14. Object measurement tool (Codex stage 2)
+
+Branch `codex/object-measurement` builds on the validated measurement foundation
+`3b1902e` on `codex/automatic-measurements`; it does not merge unrelated branches.
+
+- Measure → Object uses worker-thread connected-surface selection. Floor/ceiling
+  labels need horizontal normals; large background planes need geometric support.
+  Unknown/legacy labels fall back to shape, not invented semantic identities.
+- Mint highlight contains exact selected triangles/points. Stored packed source
+  IDs are optional on each automatic region and bound to the document revision
+  plus a digest of the opened geometry's positions, indices and world frame.
+  Legacy results still reopen as bounds-only; unreadable/stale files are read-only.
+- Select reach limits growing; clipped and point-cloud selections are Partial.
+  Mesh values are Scanned spans, not proof of a closed physical object. Depth
+  below 2 cm is Unknown. A supported wall behind the object offers front-to-wall
+  depth ONLY after explicit flush-contact confirmation, labelled Wall assumption.
+- Add/Remove supports taps and one-finger painting; two-finger pan/pinch remains.
+  Undo, local front-axis turning, named saved objects and explicit Adjusted bounds
+  are separate from legacy manual measurements. Upright/gravity-aligned only.
+- Front/Side/Top are orthographic and framed around the selection, reserving room
+  for the tool panel. Selection overlay nodes never participate in surface picking.
+- Safety limits: 500k source points, 300k triangles, 100k selected primitives,
+  4 MB measurement document. Limits fail explicitly; geometry is not silently thinned.
+- New Xcode IDs: A/B10046 ObjectSelectionCore, 10047 ObjectMeasurement, 10048
+  ObjectMeasurementPanel. Next free ID 10049. Pure tests cover segmentation and
+  format contracts; native simulator checks cover actual SceneKit/UI session wiring.
+
+Remaining plan: room outlines from multiple slices/planes, drawing exports, and a
+separate RoomPlan capture trial. Tilted-object frames are not implemented here.
+Physical accuracy still needs iPhone/tape tests.
+Development pushes validate only; TestFlight publication remains an explicit action.
+
+## 15. Automatic object boundaries
+
+`codex/object-surface-boundaries` improves the Object tool after phone feedback.
+There is no user-set selection reach. Robust plane fitting identifies broad floor,
+wall and ceiling patches in meshes and point clouds; corroborated floor labels
+can support smaller floor patches. Exact source geometry then supplies the connected
+deviation from those planes, retaining measured coordinates and IDs.
+
+- Mesh connectivity includes small surface gaps (2 cm), including vertices meeting
+  triangle interiors. Symmetric component joining makes the result independent of
+  whether a seat or a leg was tapped. A bounding-volume tree bounds surface queries.
+- Cloud connectivity uses observed point spacing, with a 7.5 cm maximum gap;
+  detected background points cannot connect otherwise separate objects.
+- An upright minimum-area footprint chooses the box orientation automatically.
+  The camera chooses the equivalent Front direction, not the box angle or size.
+- `AutomaticMeasuredRegion.wallProjection` is optional and backwards compatible.
+  It records front-to-wall distance separately from observed depth. If only a front
+  face is captured, the display box and third card show "Out from wall"; any hidden
+  gap is included. Confirmed flush contact remains a separate explicit assumption.
+- Saved selections, paint corrections and manual dimensions retain their existing
+  contracts. Editing extents clears the wall projection; refitting recomputes it.
+- A10049/B10049 registers ObjectSupportSurfaces.swift. New geometric regressions
+  cover noisy floors, chairs, separate nearby objects, missing wall patches,
+  cloud boundaries and orientation; native UI checks include a 3.8 m cabinet.
+
+This is geometric segmentation, not semantic recognition of individual furniture.
+Touching objects and genuinely missing surfaces may still need Add/Remove. Plane
+sampling never removes points from the final selection or dimension fit. Existing
+working limits and explicit failure behaviour are retained.
+
+## 16. Preserve surfaces, photo feedback, thin objects
+
+`codex/scan-retention-photo-feedback` starts from published `090d93d`, not main.
+Phone recordings showed High Quality cleanup discarding sparse walls; the user
+confirmed Quick gave substantially fewer holes. This change does not fill holes
+with invented geometry or relax capture range/confidence filtering.
+
+- Fast saves default to **Preserve** (the `.quick` enum case): only degenerate
+  faces are removed and normals rebuilt. No weld, component deletion or detail
+  clustering. Balanced/Strong retain physically large components even with few
+  vertices. Strong is explicitly not a scan-quality setting.
+- New Fast scans keep `<base>_original.mesh`, a packed binary MeshData before
+  cleanup but AFTER capture acceptance, transformed into the same saved frame.
+  Optional `Scan.originalMeshSHA256` verifies it; `meshRetention` records face
+  counts and physical area before cleanup, after cleanup and after thinning.
+  Info → Mesh retention can save an original as a NEW scan, with vertex colour
+  and labels, not the photo atlas/measurements. Duplicate/move/delete include
+  this companion; reconstruction replacement clears active original/report and
+  retains old files through its existing recovery list. Old scans stay readable.
+- Fast camera recolouring now uses `MeshData.replacingColors` so classifications
+  survive. Previously that constructor silently dropped the floor/wall labels.
+- Tighter robust support-plane fitting separates thin wall projections from the
+  wall; corroborated wall labels also support incomplete-height wall patches.
+  A smaller parallel face just in front of a larger wall is not itself a wall
+  boundary, even when ARKit labels it wall. This is geometry, not TV recognition.
+- Existing 2 cm gap joins remain. Up to 6 cm is allowed only at the aligned end
+  of an elongated narrow component (lamp stem); such results remain Partial.
+  Add part explicitly unions a tapped component with the current selection.
+  Paint +/− remain available. Rejected/missed Select taps clear stale boxes and
+  Save state; the old selection can be recovered with Undo.
+- Shape/Photos/Combined/Off modes replace the world grid with subtle shape tint,
+  green photo-candidate dots and amber missing-photo hatching. Symbols are stable
+  screen-space marks clipped to the existing reprojected depth evidence. Range
+  blur remains in Off. Shape is accepted depth, NOT guaranteed final triangles.
+  Starting/resetting a scan with no accepted depth clears cached textures, so
+  prior-session marks cannot flash onto the new camera view.
+- Green requires a retained written JPEG, low estimated motion blur, and local
+  exposure checks in the corresponding depth patch. It does not certify focus,
+  fine texture resolution or measurement accuracy. Plain low-texture walls are
+  not classified as blurred just for being plain. Technical HUD stats are in
+  Capture details; high-capacity/recovery/tracking warnings remain visible.
+- A10050/B10050 registers MeshRetention.swift. New pure and native regressions
+  cover thin TVs, broken lamp stems, partial labelled walls, local photo masks,
+  original-copy lifecycle/corruption, metadata retention and failed-pick UI.
+
+On-device acceptance is still required: the exact TV/lamp may have no separable
+depth geometry (especially reflective screens/thin metal). Use Preserve, capture
+their sides slowly, then test Select/Add part; do not claim unknown physical depth.
+
+## 17. Compact Object panel
+
+`codex/compact-object-panel` starts from published `2ec66bc`. The Object panel
+defaults to 190 pt instead of 320 pt (220 pt with accessibility text), keeping
+selection, Add part, Undo, Save and dimension evidence in a compact layout.
+The chevron expands the existing review/paint/axis/saved-object tools and collapses
+them again. Leaving Object/Measure resets to compact. Large text scrolls instead
+of shrinking tap targets. No selection maths, scan storage or capture changes.
+CI covers compact and expanded portrait/landscape/large-text screenshots.
+## 18. Claude integration decisions
 
 Decided by the owner after testing on the phone:
-- **Fast meshes keep light smoothing** (`postProcess` / `clusterVertices` without
-  `preservePositions`). Without it meshes look blocky. It moves vertices by mm.
+- **Balanced/Strong Fast cleanup keeps smoothing and detail averaging**
+  (`postProcess` / `clusterVertices` without `preservePositions`). Preserve
+  remains the loss-minimising default from the later surface-retention work;
+  it keeps observed positions and skips detail thinning. All retain an original.
 - **Low-confidence depth within 1.5 m creates coverage evidence** (never saved
   points). Dark / shiny / thin objects rarely reach medium confidence; without it
   they become holes in Fast meshes. Farther weak depth only retains old coverage.
 - Normal-size scans must behave as before any capacity / large-area work.
 - Every change must keep a way back (TestFlight previous builds; known-good commits).
 
-## 14. CI cost and timing
+## 19. CI timing
 
-The repo is **public**, so GitHub-hosted runners (macOS included) cost nothing;
-the concern is wall-clock time. A publishing push runs the validate job without
-its separate device/simulator compile (`compile: false`; the TestFlight archive
-compiles anyway). `codex/**` pushes and pull requests still compile. Doc-only
-changes (`ScanView3D/**/*.md`) don't trigger a build. Private repos would bill
-macOS minutes at 10× — keep this in mind before adding steps.
+Publishing runs skip the redundant unsigned device compile (`compile: false`)
+because the signed TestFlight archive compiles for devices. The simulator build
+and native checks ALWAYS run. Development pushes and pull requests compile both.
+Doc-only changes (`ScanView3D/**/*.md`) don't trigger the TestFlight workflow.
 
-## 15. Roadmap (agreed plans, in order)
+## 20. Claude roadmap (historical proposal; see implemented contracts above)
 
 Coordinate before starting: one tool per area; merge branch by branch.
+
+The object tool and face labels are now implemented in §§13–17. Those sections
+supersede older proposed percentile trimming, floor-based object height and
+unqualified wall depth below. Occupancy, room outlines and planning remain future
+work; field-accuracy targets are not guarantees.
 
 ### A. Save more on new scans (small, first)
 - Per-face ARKit classification (floor/wall/ceiling/table/seat/door/window),
@@ -271,3 +435,16 @@ Coordinate before starting: one tool per area; merge branch by branch.
 - Step 3 thinning: areas left behind simplified (flat surfaces sparse,
   edges/objects dense); setting "Full detail" / "Detail at edges only".
 - Step 4: saved world map to continue later; join scans (3 point pairs + ICP).
+
+## 21. TinyScanner integration and branding
+
+`codex/tinyscanner-branding` combines published Codex `31f18a9` and Claude
+`7f64bf0`, preserving both histories. It retains the Object tool, compact panel,
+original mesh recovery, photo feedback, thin-object fixes, capture safeguards,
+texture work and Claude's near-depth coverage / optional smoothing behaviour.
+
+The phone display name is **TinyScanner**; in-app and export branding is
+**TinyScanner by TinyCorp**. The existing bundle ID `com.michael.scanview3d`,
+signing profile, build target and storage paths are intentionally unchanged.
+This is an update to the existing app, not a new installation or library migration.
+App Store Connect listing metadata is separate from the binary display name.

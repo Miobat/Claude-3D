@@ -122,7 +122,7 @@ struct ProjectListView: View {
     }
 
     private var libraryHero: some View {
-        FieldHero(eyebrow: "Workspace", title: typeSize.isAccessibilitySize ? "Your projects" : "Your world.\nIn three dimensions.",
+        FieldHero(eyebrow: AppConstants.brandName, title: typeSize.isAccessibilitySize ? "Your projects" : "Your world.\nIn three dimensions.",
                   subtitle: "Capture, organize, and explore your spaces.", icon: "square.stack.3d.up")
     }
 

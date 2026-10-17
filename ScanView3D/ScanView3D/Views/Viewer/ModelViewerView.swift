@@ -2,6 +2,86 @@ import SwiftUI
 import SceneKit
 import simd
 
+private struct MeshRetentionSheet: View {
+    let scan: Scan
+    let project: Project
+    @ObservedObject var store: StorageManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var busy = false
+    @State private var error: String?
+    @State private var originalCopy: Scan?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let report = scan.meshRetention {
+                    Section("Surface retention · " + report.cleanup) {
+                        stage("Captured before cleanup", report.captured)
+                        stage("After cleanup", report.cleaned)
+                        stage("Saved mesh", report.saved)
+                        LabeledContent("Surface area removed", value: report.removedAreaFraction.formatted(.percent.precision(.fractionLength(1))))
+                    }
+                    Section {
+                        Text("These are stages of the accepted scan, not room completeness. The original already obeys capture range and confidence limits. It cannot restore surfaces the sensor did not capture.")
+                            .font(.callout)
+                        if report.removedAreaFraction > 0.05 {
+                            Label("Cleanup removed significant surface area. Compare the original before measuring thin objects.", systemImage: "exclamationmark.triangle")
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                } else {
+                    Text("This scan has no cleanup report. Reports and originals are kept for new Fast scans; older holes cannot be restored from metadata.")
+                }
+                if scan.originalMeshSHA256 != nil {
+                    Section("Original captured mesh") {
+                        if let copy = originalCopy {
+                            Label("Original saved as a separate scan", systemImage: "checkmark.circle")
+                            NavigationLink("Open original copy") {
+                                ModelViewerView(scan: copy, project: project).environmentObject(store)
+                            }
+                        } else {
+                            Button { restore() } label: {
+                                HStack {
+                                    Label("Save original as copy", systemImage: "arrow.uturn.backward")
+                                    if busy { Spacer(); ProgressView() }
+                                }
+                            }.disabled(busy)
+                        }
+                        Text("Keeps the current scan and all its measurements unchanged. The copy uses captured vertex colour, without the photo atlas or measurements.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if let error { Text(error).foregroundStyle(.red) }
+            }
+            .navigationTitle("Mesh retention").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() }.disabled(busy) } }
+            .interactiveDismissDisabled(busy)
+        }
+    }
+
+    private func stage(_ title: String, _ stage: MeshRetentionReport.Stage) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.subheadline.weight(.semibold))
+            Text("\(stage.faces.formatted()) triangles · \(String(format: "%.2f", stage.area)) m²")
+                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }.accessibilityElement(children: .combine)
+    }
+
+    private func restore() {
+        busy = true; error = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try store.saveOriginalCopy(of: scan, in: project) }
+            DispatchQueue.main.async {
+                busy = false
+                switch result {
+                case .success(let copy): originalCopy = copy
+                case .failure(let failure): error = "Original was not restored: " + failure.localizedDescription
+                }
+            }
+        }
+    }
+}
+
 private struct MeasurePanelHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 200
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
@@ -31,6 +111,9 @@ struct ModelViewerView: View {
 
     // Measuring
     @StateObject private var session = MeasurementSession()
+    @StateObject private var objects = ObjectMeasurementSession()
+    @State private var measuringObjects = false
+    @State private var objectPanelExpanded = false
     @StateObject private var navigation = WalkNavigation()
     @Environment(\.scenePhase) private var scenePhase
     @State private var measurementUnit: ScanSettings.MeasurementUnit = .preferred
@@ -44,6 +127,7 @@ struct ModelViewerView: View {
     // Share
     @State private var showingShareSheet = false
     @State private var showingTextureQuality = false
+    @State private var showingMeshRetention = false
     @State private var shareURL: URL?
 
     // More menu
@@ -89,8 +173,10 @@ struct ModelViewerView: View {
                 showGrid: $showGrid,
                 showBoundingBox: $showBoundingBox,
                 vizMode: $vizMode,
+                cameraProjection: $cameraProjection,
                 activeTool: $activeTool,
                 session: session,
+                objects: objects,
                 navigation: navigation
             )
             .id(reloadToken)
@@ -180,6 +266,9 @@ struct ModelViewerView: View {
                         }
                     }
                     Section("Scan Info") {
+                        Button { showingMeshRetention = true } label: {
+                            Label("Mesh retention & original", systemImage: "square.stack.3d.up")
+                        }
                         Button { showingTextureQuality = true } label: {
                             Label("Texture quality", systemImage: "photo.badge.checkmark")
                         }
@@ -222,25 +311,59 @@ struct ModelViewerView: View {
         .sheet(isPresented: $showingTextureQuality) {
             TextureQualitySheet(report: scan.textureQuality, scanName: scan.name)
         }
+        .sheet(isPresented: $showingMeshRetention) {
+            MeshRetentionSheet(scan: scan, project: project, store: storageManager)
+        }
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)
             if DesignPreview.screen == "measure" { activeTool = .measure }
+            if DesignPreview.screen?.hasPrefix("object") == true { activeTool = .measure; measuringObjects = true }
+            if DesignPreview.screen == "object-expanded" { objectPanelExpanded = true }
             if DesignPreview.screen == "joysticks" { showJoysticks = true }
             if DesignPreview.screen == "walk" { navigation.enabled = true }
             if DesignPreview.screen == "quality" {
                 // Let the simulator fixture apply its requested orientation first.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingTextureQuality = true }
             }
+            if DesignPreview.screen == "retention" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { showingMeshRetention = true }
+            }
             #endif
             session.unit = measurementUnit
+            objects.unit = measurementUnit
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
             session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
         }
         .onChange(of: activeTool) { _, tool in
-            session.isActive = (tool == .measure)
+            if tool != .measure { objectPanelExpanded = false }
+            session.isActive = (tool == .measure && !measuringObjects)
+            objects.active = (tool == .measure && measuringObjects)
             if tool == .measure { navigation.enabled = false }
         }
+        .onChange(of: measuringObjects) { _, enabled in
+            if !enabled { objectPanelExpanded = false }
+            session.isActive = activeTool == .measure && !enabled
+            objects.active = activeTool == .measure && enabled
+        }
+        #if DEBUG && targetEnvironment(simulator)
+        .onChange(of: objects.ready) { _, ready in
+            if ready, DesignPreview.screen?.hasPrefix("object") == true {
+                let point = DesignPreview.screen == "object-wall" ? SIMD3<Float>(0,1.5,0.6) : SIMD3<Float>(0,0.65,0.3)
+                objects.pick(point: point, normal: SIMD3(0, 0, 1), cameraFront: SIMD3(0, 0, 1))
+            }
+        }
+        .onChange(of: objects.draft) { _, region in
+            if DesignPreview.screen?.hasPrefix("object") == true, let region {
+                objects.alignView?("front", region.displayBounds)
+                if DesignPreview.screen == "object-rejected" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        objects.pick(point: SIMD3(1.5,0,1.5), normal: SIMD3(0,1,0), cameraFront: SIMD3(0,0,1))
+                    }
+                }
+            }
+        }
+        #endif
         .onChange(of: navigation.enabled) { _, enabled in
             stopNavigationInputs()
             navigation.isWalking = false
@@ -530,13 +653,25 @@ struct ModelViewerView: View {
         VStack(spacing: 8) {
             if activeTool == .measure {
                 ScrollView {
-                    measurePanel.background {
+                    VStack(spacing: 8) {
+                        Picker("Measurement type", selection: $measuringObjects) {
+                            Text("Manual").tag(false)
+                            Text("Object").tag(true)
+                        }.pickerStyle(.segmented).padding(.horizontal, 12)
+                            .accessibilityIdentifier("measurementType")
+                        if measuringObjects { ObjectMeasurementPanel(session: objects, unit: measurementUnit, expanded: $objectPanelExpanded) }
+                        else { measurePanel }
+                    }.background {
                         GeometryReader { proxy in
                             Color.clear.preference(key: MeasurePanelHeightKey.self, value: proxy.size.height)
                         }
                     }
                 }
-                .frame(height: min(measurePanelHeight, compact ? 200 : 260))
+                // Compact by default; full correction/help tools are opt-in.
+                // Keep the scroll viewport explicit so content measurement
+                // cannot grow the panel over the model or clip its controls.
+                .frame(height: measuringObjects ? ObjectPanelLayout.height(expanded: objectPanelExpanded,
+                    landscape: compact, accessibility: typeSize.isAccessibilitySize) : min(measurePanelHeight, compact ? 230 : 290))
                 .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 
