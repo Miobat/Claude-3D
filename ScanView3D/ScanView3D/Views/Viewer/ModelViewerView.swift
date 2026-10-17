@@ -440,8 +440,8 @@ struct ModelViewerView: View {
                                 .fontWeight(.medium)
                                 .padding(.horizontal, 10)
                                 .frame(minHeight: 44)
-                                .background(selected ? Color.yellow : Color.white.opacity(0.15))
-                                .foregroundColor(selected ? .black : .white)
+                                .background(selected ? FieldStyle.cyan : Color.white.opacity(0.10))
+                                .foregroundColor(selected ? FieldStyle.ink : .white)
                                 .cornerRadius(8)
                         }.accessibilityAddTraits(selected ? .isSelected : [])
                     }
@@ -466,8 +466,8 @@ struct ModelViewerView: View {
 
                 Button { session.placeAtCrosshair() } label: {
                     ZStack {
-                        Circle().fill(Color.yellow).frame(width: 58, height: 58)
-                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(.black)
+                        Circle().fill(FieldStyle.cyan).frame(width: 58, height: 58)
+                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(FieldStyle.ink)
                     }
                 }
                 .accessibilityLabel("Add point at crosshair")
@@ -507,7 +507,7 @@ struct ModelViewerView: View {
                                         .padding(.horizontal, 8)
                                         .frame(minHeight: 44)
                                         .background(selected ? Color.orange : Color.black.opacity(0.7))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(selected ? FieldStyle.ink : .white)
                                         .cornerRadius(8)
                                 }
                             }
@@ -938,9 +938,9 @@ struct VirtualJoystick: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color.black.opacity(0.3))
+                .fill(FieldStyle.panel.opacity(0.94))
                 .frame(width: joystickRadius * 2, height: joystickRadius * 2)
-                .overlay(Circle().stroke(Color.white.opacity(0.3), lineWidth: 1.5))
+                .overlay(Circle().stroke(isDragging ? FieldStyle.cyan : Color.white.opacity(0.24), lineWidth: 1.5))
 
             ForEach(0..<4) { i in
                 let angle = Double(i) * .pi / 2
@@ -949,7 +949,8 @@ struct VirtualJoystick: View {
             }
 
             Circle()
-                .fill(Color.white.opacity(isDragging ? 0.8 : 0.5))
+                .fill(LinearGradient(colors: isDragging ? [FieldStyle.cyan, FieldStyle.cyan.opacity(0.75)] : [Color(white: 0.90), Color(white: 0.62)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
                 .frame(width: knobRadius * 2, height: knobRadius * 2)
                 .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
                 .offset(effectiveOffset)
