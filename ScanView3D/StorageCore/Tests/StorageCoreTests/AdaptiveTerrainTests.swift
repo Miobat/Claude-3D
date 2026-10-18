@@ -204,6 +204,8 @@ final class AdaptiveTerrainTests: XCTestCase {
         let metadata = TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: Float(5).nextUp, adaptive: true)
         let normalized = try metadata.normalized()
         XCTAssertEqual(normalized.adaptive, true); XCTAssertEqual(normalized.captureRangeMetres, 5)
+        XCTAssertEqual(normalized.version, 2)
+        XCTAssertEqual(try normalized.normalized(), normalized)
         let manifest = try TerrainExportManifest(metadata: metadata, modelFile: "model.ply",
             modelSHA256: String(repeating: "a", count: 64), pointCount: 100)
         let data = try JSONEncoder().encode(manifest)
@@ -227,6 +229,16 @@ final class AdaptiveTerrainTests: XCTestCase {
             modelSHA256: String(repeating: "a", count: 64), pointCount: 1)
         XCTAssertEqual(manifest.schemaVersion, 1); XCTAssertEqual(manifest.spacingMetres, 0.2)
         XCTAssertNil(manifest.minimumSpacingMetres)
+    }
+
+    func testUnsupportedOrAmbiguousAdaptiveMetadataIsRejected() {
+        var metadata = TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: 3)
+        metadata.version = 2
+        XCTAssertThrowsError(try metadata.normalized())
+        metadata.adaptive = false
+        XCTAssertThrowsError(try metadata.normalized())
+        metadata.adaptive = true; metadata.version = 3
+        XCTAssertThrowsError(try metadata.normalized())
     }
 
     func testSyntheticBenchmarkReportsRetentionAndWorkerCost() {

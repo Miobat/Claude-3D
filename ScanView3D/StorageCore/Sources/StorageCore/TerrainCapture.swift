@@ -84,8 +84,11 @@ struct TerrainCaptureMetadata: Codable, Equatable {
     }
 
     func normalized() throws -> Self {
-        guard version == 1 else { throw Failure.unsupportedVersion }
+        guard version == 1 || (version == 2 && adaptive == true) else { throw Failure.unsupportedVersion }
         var result = self
+        // Existing exporters reject unknown storage versions instead of stripping
+        // the adaptive flag and advertising the fallback spacing as uniform.
+        if adaptive == true { result.version = 2 }
         result.captureRangeMetres = try CaptureRangeSetting.normalized(captureRangeMetres)
         return result
     }

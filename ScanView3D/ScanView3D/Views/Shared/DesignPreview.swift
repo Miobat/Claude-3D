@@ -1021,7 +1021,7 @@ enum DesignPreview {
             guard let project = store.createProject(name: "Adaptive"), let target = store.createProject(name: "Moved") else {
                 check(false, "Adaptive fixture projects"); return
             }
-            let metadata = TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: restored.settings.rangeValue, adaptive: true)
+            let metadata = try TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: restored.settings.rangeValue, adaptive: true).normalized()
             store.failSceneWrite = true
             do {
                 _ = try store.savePointCloud(meshData: points, name: "Failed adaptive save", toProject: project) {
@@ -1040,7 +1040,7 @@ enum DesignPreview {
                 $0.recordTerrainCapture(metadata, frame: frame)
             }
             let reload = StorageManager(directory: root.appendingPathComponent("library")).projects.first?.scans.first
-            check(reload?.terrainCapture?.adaptive == true && reload?.vertexCount == cloud.vertexCount,
+            check(reload?.terrainCapture?.adaptive == true && reload?.terrainCapture?.version == 2 && reload?.vertexCount == cloud.vertexCount,
                   "Adaptive library reload retains density metadata and point count")
             let url = store.getScanFileURL(scan: scan, project: project)
             let scene = try SCNScene(url: url.deletingPathExtension().appendingPathExtension("scn"), options: nil)

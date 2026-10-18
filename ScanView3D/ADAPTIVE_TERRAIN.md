@@ -62,6 +62,10 @@ as fixed Terrain; no additional downsampling, levelling or smoothing is applied.
 
 Native PLY sharing includes a schema-2 terrain manifest. See
 `TERRAIN_EXPORT_CONTRACT.md`; no uniform spacing is asserted for adaptive data.
+Saved adaptive library metadata is also version 2, so previous exporters reject
+it instead of labelling the cloud as fixed-density. Fixed metadata remains version 1.
+Use this or a newer app to recover/export adaptive captures: older app versions
+do not understand the adaptive setting in unfinished capture manifests.
 
 ## Automated release gates
 

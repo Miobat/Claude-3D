@@ -28,7 +28,7 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 170 and not r["failures"], "Native capture / navigation / recovery / terrain / texture / automatic measurement / branding checks failed"' "$OUT/navigation-checks.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 237 and not r["failures"], "Native capture / navigation / recovery / adaptive terrain / texture / automatic measurement / branding checks failed"' "$OUT/navigation-checks.json"
 SCREENS="projects settings scanner capture-active capture-settings viewer measure object object-wall object-rejected object-expanded quality retention terrain-ready terrain-settings terrain-active adaptive-settings adaptive-active"
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/tinyscanner-visual-identity" || "${GITHUB_HEAD_REF:-}" == "codex/tinyscanner-visual-identity" ]]; then
   SCREENS="$SCREENS library project empty"
