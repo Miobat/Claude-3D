@@ -621,7 +621,7 @@ class StorageManager: ObservableObject {
         let node = MeshProcessor.createPointCloudNode(from: meshData)
         let scene = SCNScene()
         scene.rootNode.addChildNode(node)
-        guard scene.write(to: scnURL, delegate: nil) else { throw CoordinateError.incompleteExport }
+        guard writePointCloudScene(scene, to: scnURL) else { throw PointCloudSaveError.nativeSceneWriteFailed }
 
         scan.thumbnailData = generateThumbnail(fromModelURL: scnURL)
 
@@ -630,10 +630,15 @@ class StorageManager: ObservableObject {
             scan.splatBundleName = bundleURL.lastPathComponent
         }
         metadata?(&scan)   // stored in the same index write as the scan itself
-        try scan.terrainCapture?.validate()
+        scan.terrainCapture = try scan.terrainCapture?.normalized()
         try addScan(scan, to: project)
         committed = true
         return scan
+    }
+
+    /// Native-test seam for a failed SceneKit write; production uses the same writer.
+    func writePointCloudScene(_ scene: SCNScene, to url: URL) -> Bool {
+        scene.write(to: url, delegate: nil)
     }
 
     /// Render a thumbnail from a model file (USDZ/OBJ/SCN).

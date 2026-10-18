@@ -22,6 +22,76 @@ final class TerrainCaptureTests: XCTestCase {
         XCTAssertEqual(TerrainSpacing.validated(50), .detailed)
         XCTAssertEqual(TerrainSpacing.validated(200), .overview)
     }
+    func testEveryRangeSliderTickIsCanonicalAndWithinBounds() throws {
+        for tick in 3...50 {
+            let metres = CaptureRangeSetting.metres(forSliderTick: Double(tick))
+            XCTAssertEqual(metres, Float(tick) / 10)
+            XCTAssertGreaterThanOrEqual(metres, 0.3)
+            XCTAssertLessThanOrEqual(metres, 5)
+            XCTAssertEqual(try CaptureRangeSetting.normalized(metres), metres)
+            XCTAssertEqual(CaptureRangeSetting.sliderTick(for: metres), Double(tick))
+        }
+    }
+    func testOldSliderEndpointRoundoffIsRecoverable() throws {
+        let oldUpper = Float(0.3) + Float(47) * Float(0.1)
+        XCTAssertEqual(String(format: "%.1f", oldUpper), "5.0")
+        // The exact stored bit pattern that the old strict <= 5 guard rejected.
+        let rejectedUpper = Float(5).nextUp
+        XCTAssertGreaterThan(rejectedUpper, 5)
+        XCTAssertEqual(String(format: "%.1f", rejectedUpper), "5.0")
+        for value in [oldUpper, rejectedUpper, Float(5) + 4 * Float(5).ulp] {
+            XCTAssertEqual(try CaptureRangeSetting.normalized(value), 5)
+        }
+        for value in [Float(0.3).nextDown, Float(0.3) - 4 * Float(0.3).ulp] {
+            XCTAssertEqual(try CaptureRangeSetting.normalized(value), 0.3)
+        }
+        XCTAssertEqual(try CaptureRangeSetting.normalized(Float(3).nextUp), 3)
+    }
+    func testInvalidRecordedRangesAreRejectedNotClamped() {
+        for value in [Float.nan, .infinity, -.infinity, 0, -1, 0.29, 5.00001, 5.01, .greatestFiniteMagnitude] {
+            XCTAssertThrowsError(try CaptureRangeSetting.normalized(value))
+            XCTAssertThrowsError(try TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: value).normalized())
+        }
+    }
+    func testValidLegacyRangeBetweenSliderTicksIsNotChanged() throws {
+        for value in [Float(0.35), 1.2345, 4.9876] {
+            XCTAssertEqual(try CaptureRangeSetting.normalized(value), value)
+        }
+    }
+    func testSliderConversionBoundsOnlyUserInput() {
+        XCTAssertEqual(CaptureRangeSetting.metres(forSliderTick: -1), 0.3)
+        XCTAssertEqual(CaptureRangeSetting.metres(forSliderTick: 100), 5)
+        XCTAssertEqual(CaptureRangeSetting.metres(forSliderTick: .nan), 3)
+        XCTAssertEqual(CaptureRangeSetting.metres(forSliderTick: .infinity), 3)
+        XCTAssertEqual(CaptureRangeSetting.sliderTick(for: .nan), 30)
+        XCTAssertEqual(CaptureRangeSetting.sliderTick(for: .greatestFiniteMagnitude), 50)
+    }
+    func testTerrainMetadataAndManifestNormalizeTinyRangeRoundoff() throws {
+        let old = TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: Float(5).nextUp)
+        let normalized = try old.normalized()
+        XCTAssertEqual(normalized.version, 1)
+        XCTAssertEqual(normalized.spacing, .overview)
+        XCTAssertEqual(normalized.captureRangeMetres, 5)
+        XCTAssertEqual(try JSONDecoder().decode(TerrainCaptureMetadata.self,
+            from: JSONEncoder().encode(normalized)), normalized)
+        let manifest = try TerrainExportManifest(metadata: old, modelFile: "model.ply",
+            modelSHA256: String(repeating: "a", count: 64), pointCount: 100)
+        XCTAssertEqual(manifest.captureRangeMetres, 5)
+        XCTAssertEqual(manifest.spacingMetres, 0.2)
+    }
+    func testPointCloudFailuresDescribeTheActualProblem() {
+        let url = directory.appendingPathComponent("invalid.ply")
+        func checkFailure(_ expected: PointCloudSaveError, positions: [SIMD3<Float>], colors: [SIMD4<Float>]) {
+            XCTAssertThrowsError(try PointCloudPLYWriter.write(positions: positions, colors: colors, to: url)) {
+                XCTAssertEqual($0 as? PointCloudSaveError, expected)
+                XCTAssertFalse($0.localizedDescription.contains("No partial export was shared"))
+            }
+        }
+        checkFailure(.noPoints, positions: [], colors: [])
+        checkFailure(.colorCountMismatch, positions: [.zero, .zero], colors: [SIMD4(1, 1, 1, 1)])
+        checkFailure(.nonFinitePosition, positions: [SIMD3(.nan, 0, 0)], colors: [])
+        checkFailure(.nonFiniteColor, positions: [.zero], colors: [SIMD4(0, .infinity, 0, 1)])
+    }
     func testNoMinimumBudgetOverridesLowMemory() {
         for memory in [Double.nan, .infinity, -10, 0, 599, 600] {
             let limits = TerrainCapture.limits(spacing: .standard, availableMB: memory)

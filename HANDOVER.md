@@ -7,6 +7,37 @@ web prototype and are not part of the app.)
 
 ---
 
+## Terrain save endpoint fix (2026-10-18, `codex/terrain-save-fix`)
+
+Based on published Terrain commit `033bf66`, build `202610180644`. The owner
+reported a point-cloud save error at 5.0 m / 20 cm. Reproduced the range bug:
+old Float slider arithmetic can produce `5.00000048`, displayed as `5.0` but
+rejected by Terrain's strict `<= 5` guard. The screenshot alone cannot rule out
+a separate native SceneKit write failure, so the save errors now distinguish it.
+
+- The range slider uses integer decimetre ticks (3...50), converted to metres
+  once. Accessibility still announces metres, not raw ticks.
+- `CaptureRangeSetting.normalized` repairs at most four floating-point ULPs
+  around a decimetre value, including both endpoints. Genuine invalid/nonfinite
+  ranges are rejected, never silently clamped as capture metadata. Legitimate
+  older values between ticks stay unchanged.
+- Settings/checkpoint decoding, Terrain save metadata and the export manifest
+  share normalization. Existing checkpoint bytes and measured positions are not
+  rewritten. Existing affected captures can be recovered after updating.
+- Point-data, range/version and native viewer-write errors have distinct messages;
+  point-cloud failure diagnostics record counts and the full-precision range.
+  Failed saves retain the pending capture and recovery; only candidate UUID files
+  are removed. Native fixtures inject a partial viewer write and retry it.
+- Regression coverage includes every slider tick, both limits, all Terrain
+  spacing presets with/without colour, checkpoint recovery, saved/reopened point
+  counts, canonical export metadata and rejection of genuinely invalid ranges.
+
+On-device acceptance: update (do not uninstall), Recover the affected unfinished
+capture, save and reopen it, then try a short fresh 5.0 m / 20 cm scan. If saving
+still fails, Settings > Debug Log now identifies the stage and actual range.
+
+---
+
 ## Terrain capture v1 (2026-10-18, `codex/terrain-capture`)
 
 Based on the published visual identity branch at `d455594`; no latest Claude or

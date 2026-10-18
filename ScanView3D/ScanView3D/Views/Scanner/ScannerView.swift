@@ -481,8 +481,12 @@ struct ScannerView: View {
                 }
                 Section {
                     LabeledContent("Capture range", value: String(format: "%.1f m", settings.rangeValue))
-                    Slider(value: $settings.rangeValue, in: 0.3...5.0, step: 0.1)
+                    Slider(value: Binding(
+                        get: { CaptureRangeSetting.sliderTick(for: settings.rangeValue) },
+                        set: { settings.rangeValue = CaptureRangeSetting.metres(forSliderTick: $0) }
+                    ), in: CaptureRangeSetting.sliderTicks, step: 1)
                         .accessibilityLabel("Capture range in metres")
+                        .accessibilityValue(String(format: "%.1f metres", settings.rangeValue))
                 } header: { Text("Range") } footer: {
                     Text(settings.captureMode == .terrain
                          ? "Distance from the phone. Blurred areas are out of range. Blue marks observed depth, not a filled ground surface. Unknown depth is not captured."
@@ -612,6 +616,8 @@ struct ScannerView: View {
             } else {
                 Button {
                     guard activeDraft == nil else { showingSaveDialog = true; return }
+                    do { settings.rangeValue = try CaptureRangeSetting.normalized(settings.rangeValue) }
+                    catch { failSave("Cannot start scan: \(error.localizedDescription)"); return }
                     captureLocation = nil
                     recoveredDraft = false
                     recoveredPoses = []
@@ -1152,6 +1158,7 @@ struct ScannerView: View {
     }
 
     private func failSave(_ message: String) {
+        DebugLogger.shared.error(message, category: "Capture save")
         isSaving = false
         savingProgress = ""
         errorMessage = message
@@ -1292,7 +1299,7 @@ struct ScannerView: View {
         isSaving = true
         savingProgress = "Saving point cloud…"
         let detailMeters = max(0.001, settings.detailMM / 1000.0)
-        let terrain: TerrainCaptureMetadata? = settings.captureMode == .terrain
+        let recordedTerrain: TerrainCaptureMetadata? = settings.captureMode == .terrain
             ? TerrainCaptureMetadata(spacing: settings.terrainSpacing, captureRangeMetres: settings.rangeValue) : nil
         let grey = !settings.captureTexture
         let name = scanName
@@ -1300,13 +1307,13 @@ struct ScannerView: View {
         let fix = north ? captureLocation : nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                let terrain = try recordedTerrain?.normalized()
                 // Terrain was already thinned while capturing. A second grid could
                 // merge adjacent bins and drop small breaks; preserve those samples.
                 var points = terrain == nil ? MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters) : cloud
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
                 let frame: simd_float4x4
-                if let terrain {
-                    try terrain.validate()
+                if terrain != nil {
                     let values = try TerrainCapture.localFrame(minimum: points.boundingBoxMin, maximum: points.boundingBoxMax)
                     guard let translation = Scan.matrix(values.map(Float.init)) else { throw CoordinateError.invalidTransform }
                     frame = translation
@@ -1321,7 +1328,14 @@ struct ScannerView: View {
                 }
                 DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {
-                DispatchQueue.main.async { failSave("Failed to save point cloud: \(error.localizedDescription)") }
+                let recordedRange = recordedTerrain.map { String(format: "%.9g", $0.captureRangeMetres) } ?? "not terrain"
+                let failure = error as NSError
+                DebugLogger.shared.error("Point-cloud save failed: range=\(recordedRange), points=\(cloud.vertexCount), " +
+                    "colours=\(cloud.colors.count), error=\(failure.domain)/\(failure.code): \(error.localizedDescription)",
+                    category: "Storage")
+                DispatchQueue.main.async {
+                    failSave("Failed to save point cloud: \(error.localizedDescription) Your pending capture has been kept. Try again or choose Keep for Later.")
+                }
             }
         }
     }

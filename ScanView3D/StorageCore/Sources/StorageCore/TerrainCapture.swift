@@ -63,12 +63,19 @@ struct TerrainCaptureMetadata: Codable, Equatable {
     var spacing: TerrainSpacing
     var captureRangeMetres: Float
 
-    func validate() throws {
-        guard version == 1, captureRangeMetres.isFinite,
-              captureRangeMetres >= 0.3, captureRangeMetres <= 5 else {
-            throw CoordinateError.incompleteExport
-        }
+    enum Failure: LocalizedError {
+        case unsupportedVersion
+        var errorDescription: String? { "This terrain metadata version is not supported by this app." }
     }
+
+    func normalized() throws -> Self {
+        guard version == 1 else { throw Failure.unsupportedVersion }
+        var result = self
+        result.captureRangeMetres = try CaptureRangeSetting.normalized(captureRangeMetres)
+        return result
+    }
+
+    func validate() throws { _ = try normalized() }
 }
 
 /// Optional terrain.json alongside model.ply and coordinates.json in a delivery.
@@ -104,7 +111,7 @@ struct TerrainExportManifest: Codable {
     ]
 
     init(metadata: TerrainCaptureMetadata, modelFile: String, modelSHA256: String, pointCount: Int) throws {
-        try metadata.validate()
+        let metadata = try metadata.normalized()
         guard modelFile == (modelFile as NSString).lastPathComponent, modelFile.hasSuffix(".ply"),
               !modelFile.contains("\\"), !modelFile.contains(":"),
               modelSHA256.count == 64, modelSHA256.allSatisfy({ $0.isHexDigit }), pointCount > 0 else {
@@ -118,14 +125,30 @@ struct TerrainExportManifest: Codable {
     }
 }
 
+/// Save failures must identify the stage instead of claiming that a share failed.
+enum PointCloudSaveError: LocalizedError, Equatable {
+    case noPoints, colorCountMismatch, nonFinitePosition, nonFiniteColor, nativeSceneWriteFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noPoints: return "There are no captured points to save."
+        case .colorCountMismatch: return "The point cloud has a different number of colours and positions."
+        case .nonFinitePosition: return "The point cloud contains an invalid position."
+        case .nonFiniteColor: return "The point cloud contains an invalid colour value."
+        case .nativeSceneWriteFailed: return "The in-app viewer file could not be saved. The scan was not added to the library."
+        }
+    }
+}
+
 /// Stream binary PLY to a sibling staging file. A failed write never exposes a
 /// truncated model. Explicit replacement is used only for retryable derived splat
 /// files, after the complete staged file has been synchronized.
 enum PointCloudPLYWriter {
     static func write(positions: [SIMD3<Float>], colors: [SIMD4<Float>], to destination: URL,
                       replacingExisting: Bool = false) throws {
-        guard !positions.isEmpty, colors.isEmpty || colors.count == positions.count else {
-            throw CoordinateError.incompleteExport
+        guard !positions.isEmpty else { throw PointCloudSaveError.noPoints }
+        guard colors.isEmpty || colors.count == positions.count else {
+            throw PointCloudSaveError.colorCountMismatch
         }
         let fm = FileManager.default
         let staged = destination.deletingLastPathComponent().appendingPathComponent(".ply-\(UUID().uuidString).partial")
@@ -142,7 +165,7 @@ enum PointCloudPLYWriter {
         var buffer = Data(); buffer.reserveCapacity(65_536)
         for i in positions.indices {
             let p = positions[i]
-            guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { throw CoordinateError.incompleteExport }
+            guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { throw PointCloudSaveError.nonFinitePosition }
             for value in [p.x, p.y, p.z] {
                 let b = value.bitPattern
                 buffer.append(contentsOf: [UInt8(truncatingIfNeeded: b), UInt8(truncatingIfNeeded: b >> 8),
@@ -150,7 +173,7 @@ enum PointCloudPLYWriter {
             }
             if !colors.isEmpty {
                 let c = colors[i]
-                guard c.x.isFinite, c.y.isFinite, c.z.isFinite else { throw CoordinateError.incompleteExport }
+                guard c.x.isFinite, c.y.isFinite, c.z.isFinite else { throw PointCloudSaveError.nonFiniteColor }
                 buffer.append(contentsOf: [c.x, c.y, c.z].map { UInt8(max(0, min(255, $0 * 255))) })
             }
             if buffer.count >= 65_520 { try output.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true) }

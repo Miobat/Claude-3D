@@ -342,6 +342,7 @@ enum DesignPreview {
         checkFeedbackShader(check)
         checkRecoveryAndSave(check)
         checkTerrainCapture(check)
+        checkTerrainRangeRecovery(check)
         checkMeshRetention(check)
         checkTextureQuality(check)
         checkObjects(view: view, coordinator: coordinator, check: check) {
@@ -851,6 +852,106 @@ enum DesignPreview {
             check(afterFailure == before && recoveryAfterFailure.1?.vertices == cloud.vertices,
                   "Failed point save preserves earlier scans and the recoverable terrain checkpoint")
         } catch { check(false, "Terrain native fixtures: \(error)") }
+    }
+
+    private final class FailingPointCloudSceneStore: StorageManager {
+        var failSceneWrite = false
+        override func writePointCloudScene(_ scene: SCNScene, to url: URL) -> Bool {
+            if failSceneWrite {
+                try? Data("incomplete scene fixture".utf8).write(to: url)
+                return false
+            }
+            return super.writePointCloudScene(scene, to: url)
+        }
+    }
+
+    /// Reproduces the phone report: a persisted 5.0 m / 20 cm capture whose Float
+    /// range is one representable value above 5. Recovery must not modify XYZ or
+    /// the on-disk checkpoint, and a failed native viewer write must stay retryable.
+    private static func checkTerrainRangeRecovery(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("terrain-range-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func files(_ directory: URL) throws -> [String: Data] {
+            try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(at: directory,
+                includingPropertiesForKeys: nil).map { ($0.lastPathComponent, try Data(contentsOf: $0)) })
+        }
+        do {
+            let store = FailingPointCloudSceneStore(directory: root.appendingPathComponent("library"))
+            guard let project = store.createProject(name: "Range regression") else {
+                check(false, "Range regression project"); return
+            }
+            for spacing in TerrainSpacing.allCases {
+                for rawRange in [Float(0.3).nextDown, Float(5).nextUp] {
+                    for hasColor in [true, false] {
+                        let label = "\(spacing.label), \(String(format: "%.1f", rawRange)) m, colour=\(hasColor)"
+                        var settings = ScanSettings()
+                        settings.captureMode = .terrain; settings.rangeValue = rawRange
+                        settings.terrainSpacing = spacing; settings.captureTexture = hasColor
+                        let cloud = MockLiDARScanner.generateTerrainPoints(spacing: spacing)
+                        let draft = CaptureDraft(id: UUID(), startedAt: Date(), checkpointAt: Date(), name: label,
+                            settings: settings, photoFolderName: nil, location: nil, isFinalized: true)
+                        let checkpoint = CaptureCheckpointStore<CaptureDraft, MeshData>(
+                            directory: root.appendingPathComponent(draft.id.uuidString))
+                        try checkpoint.save(draft, payload: cloud)
+                        let before = try files(checkpoint.directory)
+                        let (restored, recovered) = try checkpoint.load()
+                        guard let recovered else { check(false, "Recovery has points: \(label)"); return }
+                        let expectedRange: Float = rawRange < 1 ? 0.3 : 5
+                        check(restored.settings.rangeValue == expectedRange && recovered.vertices == cloud.vertices,
+                              "Recovered endpoint range is canonical without changing XYZ: \(label)")
+                        let matrix = try TerrainCapture.localFrame(minimum: recovered.boundingBoxMin, maximum: recovered.boundingBoxMax)
+                        guard let frame = Scan.matrix(matrix.map(Float.init)) else { throw CoordinateError.invalidTransform }
+                        var points = recovered.transformed(by: frame)
+                        if !hasColor { points = MeshProcessor.makeUniformGrey(points) }
+                        let rawMetadata = TerrainCaptureMetadata(spacing: spacing, captureRangeMetres: rawRange)
+                        let saved = try store.savePointCloud(meshData: points, name: label, toProject: project) {
+                            $0.recordTerrainCapture(rawMetadata, frame: frame)
+                        }
+                        let url = store.getScanFileURL(scan: saved, project: project)
+                        let scene = try SCNScene(url: url.deletingPathExtension().appendingPathExtension("scn"), options: nil)
+                        check(saved.terrainCapture?.captureRangeMetres == expectedRange &&
+                              saved.terrainCapture?.spacing == spacing && saved.vertexCount == recovered.vertexCount &&
+                              scene.rootNode.childNodes.first?.geometry?.elements.first?.primitiveCount == recovered.vertexCount,
+                              "Native cloud save retains points and canonical metadata: \(label)")
+                        check(try files(checkpoint.directory) == before, "Recovery leaves original checkpoint bytes intact: \(label)")
+
+                        if spacing == .overview && rawRange > 5 && hasColor {
+                            let directory = url.deletingLastPathComponent()
+                            let libraryFiles = try files(directory)
+                            let count = store.projects.first?.scans.count
+                            store.failSceneWrite = true
+                            do {
+                                _ = try store.savePointCloud(meshData: points, name: "Interrupted viewer save", toProject: project) {
+                                    $0.recordTerrainCapture(rawMetadata, frame: frame)
+                                }
+                                check(false, "Failed viewer write must reject the library save")
+                            } catch {
+                                check(error as? PointCloudSaveError == .nativeSceneWriteFailed,
+                                      "Failed native scene reports viewer-save failure, not a share error")
+                            }
+                            let afterFailure = try files(directory), recoveryAfterFailure = try files(checkpoint.directory)
+                            check(store.projects.first?.scans.count == count && afterFailure == libraryFiles &&
+                                  recoveryAfterFailure == before,
+                                  "Failed viewer save preserves earlier scans and the affected checkpoint")
+                            store.failSceneWrite = false
+                            let retried = try store.savePointCloud(meshData: points, name: "Retry recovered terrain", toProject: project) {
+                                $0.recordTerrainCapture(rawMetadata, frame: frame)
+                            }
+                            check(retried.terrainCapture?.captureRangeMetres == 5 && retried.vertexCount == recovered.vertexCount,
+                                  "The same recovered 5 m / 20 cm capture saves after a viewer-write retry")
+                            let delivery = try store.exportScan(retried, from: project)
+                            let manifestURL = delivery.deletingLastPathComponent().appendingPathComponent("Models")
+                                .appendingPathComponent(retried.id.uuidString).appendingPathComponent("terrain.json")
+                            let manifest = try JSONDecoder().decode(TerrainExportManifest.self, from: Data(contentsOf: manifestURL))
+                            check(manifest.captureRangeMetres == 5 && manifest.spacingMetres == 0.2 &&
+                                  manifest.pointCount == recovered.vertexCount, "Recovered terrain exports canonical range and original count")
+                        }
+                    }
+                }
+            }
+            let invalid = try JSONDecoder().decode(ScanSettings.self, from: Data("{\"captureMode\":\"Terrain\",\"rangeValue\":5.01}".utf8))
+            check(invalid.rangeValue == 5.01, "Recovery does not silently clamp genuinely invalid recorded ranges")
+        } catch { check(false, "Terrain range recovery fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {

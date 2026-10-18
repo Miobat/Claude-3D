@@ -245,7 +245,10 @@ struct ScanSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = ScanSettings()
         captureMode = (try? c.decodeIfPresent(CaptureMode.self, forKey: .captureMode)) ?? d.captureMode
-        rangeValue = (try? c.decodeIfPresent(Float.self, forKey: .rangeValue)) ?? d.rangeValue
+        let storedRange = (try? c.decodeIfPresent(Float.self, forKey: .rangeValue)) ?? d.rangeValue
+        // Also used by CaptureDraft decoding: recover the old slider's 5 m endpoint
+        // without rewriting its geometry or masking genuinely invalid metadata.
+        rangeValue = (try? CaptureRangeSetting.normalized(storedRange)) ?? storedRange
         detailMM = (try? c.decodeIfPresent(Float.self, forKey: .detailMM)) ?? d.detailMM
         terrainSpacing = (try? c.decodeIfPresent(TerrainSpacing.self, forKey: .terrainSpacing)) ?? d.terrainSpacing
         meshMode = (try? c.decodeIfPresent(MeshMode.self, forKey: .meshMode)) ?? d.meshMode

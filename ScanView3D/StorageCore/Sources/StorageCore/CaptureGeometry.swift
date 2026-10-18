@@ -1,6 +1,47 @@
 import Foundation
 import simd
 
+/// UI range ticks are integer decimetres, avoiding Float(0.3) + 47 * Float(0.1)
+/// becoming 5.00000048 at the upper slider stop. Old checkpoint values can have
+/// that rounding error too. Repair only a few representable steps, never clamp
+/// genuinely invalid capture metadata or change measured point positions.
+enum CaptureRangeSetting {
+    static let minimumMetres: Float = 0.3
+    static let maximumMetres: Float = 5
+    static let sliderTicks: ClosedRange<Double> = 3...50
+
+    enum Failure: LocalizedError {
+        case invalidRange
+        var errorDescription: String? {
+            "The recorded capture range is invalid. It must be between 0.3 and 5.0 metres."
+        }
+    }
+
+    static func normalized(_ metres: Float) throws -> Float {
+        guard metres.isFinite,
+              metres >= minimumMetres - 4 * minimumMetres.ulp,
+              metres <= maximumMetres + 4 * maximumMetres.ulp else {
+            throw Failure.invalidRange
+        }
+        let rounded = (metres * 10).rounded() / 10
+        if abs(metres - rounded) <= 4 * max(metres.ulp, rounded.ulp) { return rounded }
+        // Preserve legitimate older in-range values between decimetre ticks.
+        return metres
+    }
+
+    static func sliderTick(for metres: Float) -> Double {
+        guard metres.isFinite else { return 30 }
+        return min(sliderTicks.upperBound, max(sliderTicks.lowerBound, (Double(metres) * 10).rounded()))
+    }
+
+    /// Clamping is appropriate for a UI gesture, but not for loaded scan metadata.
+    static func metres(forSliderTick tick: Double) -> Float {
+        guard tick.isFinite else { return 3 }
+        let bounded = min(sliderTicks.upperBound, max(sliderTicks.lowerBound, tick.rounded()))
+        return Float(bounded) / 10
+    }
+}
+
 /// Distance means a sphere around the camera, not the depth sensor's optical Z.
 enum CaptureRange {
     /// Coverage evidence only; saved point clouds still require reliable depth.
