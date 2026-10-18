@@ -227,6 +227,8 @@ struct ScanSettings: Codable, Equatable {
     var rangeValue: Float = 3.0        // metres (0.3 – 5.0)
     var detailMM: Float = 10.0         // grid spacing, Fast / Point Cloud (5 fine – 20 coarse)
     var terrainSpacing: TerrainSpacing = .standard
+    var terrainAdaptive: Bool = false
+    var terrainDetailOverlay: Bool = true
     var meshMode: MeshMode = .free     // Fast only
     var captureTexture: Bool = true    // colour for Fast / Point Cloud
     var reconstructQuality: ReconstructQuality = .best
@@ -236,7 +238,20 @@ struct ScanSettings: Codable, Equatable {
     init() {}
 
     var effectiveDetailMM: Float {
-        captureMode == .terrain ? Float(terrainSpacing.rawValue) : detailMM
+        captureMode == .terrain ? Float(terrainAdaptive ? 200 : terrainSpacing.rawValue) : detailMM
+    }
+
+    var terrainSamplingLabel: String { terrainAdaptive ? "Adaptive 5–20 cm" : terrainSpacing.label }
+    var terrainSamplingChoice: TerrainSamplingChoice {
+        get {
+            if terrainAdaptive { return .adaptive }
+            switch terrainSpacing {
+            case .detailed: return .detailed
+            case .standard: return .standard
+            case .overview: return .overview
+            }
+        }
+        set { terrainAdaptive = newValue == .adaptive; terrainSpacing = newValue.spacing }
     }
 
     // Tolerant decoding: settings saved by an older version keep their values,
@@ -251,6 +266,8 @@ struct ScanSettings: Codable, Equatable {
         rangeValue = (try? CaptureRangeSetting.normalized(storedRange)) ?? storedRange
         detailMM = (try? c.decodeIfPresent(Float.self, forKey: .detailMM)) ?? d.detailMM
         terrainSpacing = (try? c.decodeIfPresent(TerrainSpacing.self, forKey: .terrainSpacing)) ?? d.terrainSpacing
+        terrainAdaptive = (try? c.decodeIfPresent(Bool.self, forKey: .terrainAdaptive)) ?? d.terrainAdaptive
+        terrainDetailOverlay = (try? c.decodeIfPresent(Bool.self, forKey: .terrainDetailOverlay)) ?? d.terrainDetailOverlay
         meshMode = (try? c.decodeIfPresent(MeshMode.self, forKey: .meshMode)) ?? d.meshMode
         captureTexture = (try? c.decodeIfPresent(Bool.self, forKey: .captureTexture)) ?? d.captureTexture
         reconstructQuality = (try? c.decodeIfPresent(ReconstructQuality.self, forKey: .reconstructQuality)) ?? d.reconstructQuality

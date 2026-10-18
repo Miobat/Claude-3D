@@ -161,6 +161,7 @@ class LiDARScanner: NSObject, ObservableObject {
         rangeMeters: Float = 3.0,
         captureMode: ScanSettings.CaptureMode = .fast,
         detailMM: Float = 10,
+        adaptiveTerrain: Bool = false,
         highResPhotos: Bool = false,
         alignToNorth: Bool = false
     ) {
@@ -209,7 +210,8 @@ class LiDARScanner: NSObject, ObservableObject {
         // All modes retain capture-time depth evidence. Raw ARKit anchor extents
         // and the camera's walked path must never expand the accepted range.
         depthCloud.configure(voxelSize: limits.voxelSize, maxPoints: limits.points, coverageCells: limits.coverageCells,
-                             coverageCellSize: terrain ? limits.voxelSize : 0.025, reliableCoverageOnly: terrain)
+                             coverageCellSize: terrain ? limits.voxelSize : 0.025, reliableCoverageOnly: terrain,
+                             adaptiveTerrain: terrain && adaptiveTerrain)
 
         let configuration = ARWorldTrackingConfiguration()
         // Terrain needs depth samples, not a second, independently growing mesh.
@@ -1197,6 +1199,7 @@ final class DepthPointAccumulator {
     private let epoch = CaptureEpoch()
     private let lock = NSLock()
     private var cells: [SIMD3<Int32>: Cell] = [:]
+    private var adaptive: AdaptiveTerrainSampler?
     private var voxelSize: Float = 0.01
     /// 0 = coverage only (Fast / HQ), no saved point cloud is kept.
     private var maxPoints = 2_000_000
@@ -1239,18 +1242,20 @@ final class DepthPointAccumulator {
 
     private func fraction() -> Double {
         let cover = Double(evidence.cells.count) / Double(max(1, evidence.capacity))
-        let points = maxPoints > 0 ? Double(cells.count) / Double(maxPoints) : 0
+        let points = adaptive?.budgetFraction ?? (maxPoints > 0 ? Double(cells.count) / Double(maxPoints) : 0)
         return min(1, max(cover, points))
     }
 
     func configure(voxelSize: Float, maxPoints: Int, coverageCells: Int,
-                   coverageCellSize: Float = 0.025, reliableCoverageOnly: Bool = false) {
+                   coverageCellSize: Float = 0.025, reliableCoverageOnly: Bool = false,
+                   adaptiveTerrain: Bool = false) {
         lock.lock()
         self.voxelSize = voxelSize
         self.maxPoints = max(0, maxPoints)
         self.coverageCells = max(1, coverageCells)
         self.coverageCellSize = coverageCellSize
         self.reliableCoverageOnly = reliableCoverageOnly
+        adaptive = adaptiveTerrain ? AdaptiveTerrainSampler(capacity: maxPoints) : nil
         // Only an empty index is resized; captured coverage is never dropped.
         if evidence.cells.isEmpty { evidence = CapturedSurfaceIndex(cellSize: coverageCellSize, capacity: self.coverageCells) }
         lock.unlock()
@@ -1261,6 +1266,7 @@ final class DepthPointAccumulator {
         inFlight = false
         lock.lock()
         cells.removeAll()
+        if let old = adaptive { adaptive = AdaptiveTerrainSampler(capacity: old.capacity) }
         evidence = CapturedSurfaceIndex(cellSize: coverageCellSize, capacity: coverageCells)
         coverageLock.lock()
         coverage = nil
@@ -1306,7 +1312,11 @@ final class DepthPointAccumulator {
                 var acceptedDepth = [Float](repeating: 0, count: sensor.depth.count)
                 var photoDepth = [Float](repeating: 0, count: photoCoverage ? sensor.depth.count : 0)
                 let keepsPoints = self.maxPoints > 0
-                for (p, c, pixel, reliable) in batch {
+                let adaptiveAccepted = self.adaptive?.integrate(batch.map {
+                    AdaptiveTerrainSampler.Observation(position: $0.0, color: $0.1, reliable: $0.3)
+                }, camera: transform.position, range: maxDistance, timestamp: sensor.timestamp)
+                for (index, entry) in batch.enumerated() {
+                    let (p, c, pixel, reliable) = entry
                     // Weak depth far away is noise and only retains OLD coverage below.
                     // Keep Claude's near-depth coverage fallback for dark/shiny/thin
                     // surfaces. It is not a precision guarantee and is never saved
@@ -1314,7 +1324,9 @@ final class DepthPointAccumulator {
                     guard CaptureRange.allowsCoverage(reliable: reliable,
                         distance: simd_distance(p, transform.position)) else { continue }
                     if self.reliableCoverageOnly && !reliable { continue }
-                    if keepsPoints && reliable {
+                    if let adaptiveAccepted {
+                        guard adaptiveAccepted[index] else { continue }
+                    } else if keepsPoints && reliable {
                         guard let key = TerrainCapture.key(p, spacing: self.voxelSize) else { continue }
                         if var cell = self.cells[key] {
                             // Keep a real accepted point (not an average that can
@@ -1332,7 +1344,7 @@ final class DepthPointAccumulator {
                     }
                 }
                 // Full = a real capacity limit, not a point rejected at the range edge.
-                if (keepsPoints && self.cells.count >= self.maxPoints)
+                if self.adaptive?.isFull == true || (keepsPoints && self.adaptive == nil && self.cells.count >= self.maxPoints)
                     || self.evidence.cells.count >= self.evidence.capacity { self.full = true }
                 // Confidence can fluctuate on a surface already captured. Keep
                 // its coverage if current depth still agrees with stored world
@@ -1353,13 +1365,23 @@ final class DepthPointAccumulator {
                         }
                     }
                 }
+                var terrainDetail: [Float]?
+                if let adaptive = self.adaptive {
+                    var mask = [Float](repeating: 0, count: sensor.depth.count)
+                    for pixel in sensor.depth.indices where acceptedDepth[pixel] > 0 {
+                        let w = sensor.cameraToWorld * SIMD4(sensor.cameraPoint(at: pixel), 1)
+                        mask[pixel] = adaptive.level(at: SIMD3(w.x, w.y, w.z))?.rawValue ?? 0
+                    }
+                    terrainDetail = mask
+                }
                 self.coverageLock.lock()
-                self.coverage = AcceptedDepthFrame(frame: sensor, depth: acceptedDepth, photoDepth: photoCoverage ? photoDepth : nil)
-                self.publishedPointCount = self.cells.count
+                self.coverage = AcceptedDepthFrame(frame: sensor, depth: acceptedDepth,
+                    photoDepth: photoCoverage ? photoDepth : nil, terrainDetail: terrainDetail)
+                self.publishedPointCount = self.adaptive?.pointCount ?? self.cells.count
                 self.publishedCoverageCount = self.evidence.cells.count
                 self.publishedBudgetFraction = self.fraction()
                 self.coverageLock.unlock()
-                count = self.cells.count
+                count = self.publishedPointCount
                 isFull = self.full
                 used = self.fraction()
             }
@@ -1464,6 +1486,18 @@ final class DepthPointAccumulator {
     /// One observed position per voxel, with averaged colour, ready to save / view.
     func pointCloud() -> MeshData? {
         lock.lock()
+        if let adaptive {
+            let samples = adaptive.snapshot()
+            lock.unlock()
+            guard !samples.isEmpty else { return nil }
+            let vertices = samples.map(\.position)
+            let colors = samples.map { sample -> SIMD4<Float> in
+                let c = sample.averagedColor; return SIMD4(c.x, c.y, c.z, 1)
+            }
+            let bounds = MeshData.bounds(of: vertices)
+            return MeshData(vertices: vertices, normals: [], faces: [], colors: colors,
+                            boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+        }
         let snapshot = cells
         lock.unlock()
         guard !snapshot.isEmpty else { return nil }

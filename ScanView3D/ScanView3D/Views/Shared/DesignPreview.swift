@@ -620,6 +620,7 @@ enum DesignPreview {
         encoder.setTexture(source, index: 0); encoder.setTexture(output, index: 1)
         encoder.setTexture(depth, index: 2); encoder.setTexture(accepted, index: 3)
         encoder.setTexture(accepted, index: 4)
+        encoder.setTexture(accepted, index: 5)
         var uniforms = Uniforms()
         encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         encoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
@@ -638,6 +639,7 @@ enum DesignPreview {
         referenceEncoder.setTexture(source, index: 0); referenceEncoder.setTexture(baseline, index: 1)
         referenceEncoder.setTexture(depth, index: 2); referenceEncoder.setTexture(accepted, index: 3)
         referenceEncoder.setTexture(accepted, index: 4)
+        referenceEncoder.setTexture(accepted, index: 5)
         referenceEncoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         referenceEncoder.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
         referenceEncoder.endEncoding(); referenceCommand.commit(); referenceCommand.waitUntilCompleted()
@@ -674,6 +676,7 @@ enum DesignPreview {
             enc.setComputePipelineState(pipeline)
             enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
             enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3); enc.setTexture(photo, index: 4)
+            enc.setTexture(accepted, index: 5)
             enc.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
             enc.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
             enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
@@ -1045,7 +1048,7 @@ struct DesignPreviewRoot: View {
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings", "terrain-ready", "terrain-settings", "terrain-active"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings", "terrain-ready", "terrain-settings", "terrain-active", "adaptive-settings", "adaptive-active"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
         .onAppear {

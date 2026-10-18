@@ -33,6 +33,7 @@ class MockLiDARScanner: ObservableObject {
     private var meshData: MeshData?
     private var captureMode: ScanSettings.CaptureMode = .fast
     private var terrainSpacing: TerrainSpacing = .standard
+    private var adaptiveTerrain = false
     private(set) var rangeMeters: Float = 3.0
     private(set) var meshMode: ScanSettings.MeshMode = .free
     private(set) var scanOrigin: SIMD3<Float> = SIMD3<Float>(0, 0, 0)
@@ -58,6 +59,7 @@ class MockLiDARScanner: ObservableObject {
         rangeMeters: Float = 3.0,
         captureMode: ScanSettings.CaptureMode = .fast,
         detailMM: Float = 10,
+        adaptiveTerrain: Bool = false,
         highResPhotos: Bool = false,
         alignToNorth: Bool = false
     ) {
@@ -66,6 +68,7 @@ class MockLiDARScanner: ObservableObject {
         self.meshMode = meshMode
         self.captureMode = captureMode
         self.terrainSpacing = .validated(detailMM)
+        self.adaptiveTerrain = adaptiveTerrain
         depthPointCount = 0
         isScanning = true
         isPaused = false
@@ -166,8 +169,25 @@ class MockLiDARScanner: ObservableObject {
     private(set) var capturedPoses: [CapturedPose] = []
 
     private func sampleData() -> MeshData {
-        captureMode == .terrain ? Self.generateTerrainPoints(spacing: terrainSpacing)
+        if captureMode == .terrain && adaptiveTerrain { return Self.generateAdaptiveTerrainPoints() }
+        return captureMode == .terrain ? Self.generateTerrainPoints(spacing: terrainSpacing)
             : Self.generateSampleRoomMesh(range: rangeMeters)
+    }
+
+    static func generateAdaptiveTerrainPoints() -> MeshData {
+        let sampler = AdaptiveTerrainSampler(capacity: 200_000)
+        var observations: [AdaptiveTerrainSampler.Observation] = []
+        for z in 0..<80 { for x in 0..<80 {
+            let px = Float(x) * 0.05 - 2 + 0.003, pz = Float(z) * 0.05 - 2 + 0.003
+            let y: Float = px < 0 ? -1 : -0.85
+            observations.append(.init(position: SIMD3(px, y, pz), color: SIMD3(0.35, 0.55, 0.4)))
+        } }
+        for frame in 0..<8 { sampler.integrate(observations, camera: .zero, range: 5, timestamp: Double(frame) * 0.3) }
+        let samples = sampler.snapshot(), points = samples.map(\.position)
+        let bounds = MeshData.bounds(of: points)
+        return MeshData(vertices: points, normals: [], faces: [], colors: samples.map {
+            let c = $0.averagedColor; return SIMD4(c.x, c.y, c.z, 1)
+        }, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
     }
 
     /// Synthetic slope for simulator save/recovery/UI checks, not LiDAR validation.

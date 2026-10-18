@@ -20,6 +20,18 @@ enum TerrainSpacing: Int, Codable, CaseIterable {
     }
 }
 
+enum TerrainSamplingChoice: String, CaseIterable {
+    case adaptive, detailed, standard, overview
+    var spacing: TerrainSpacing {
+        switch self {
+        case .detailed: return .detailed
+        case .standard: return .standard
+        case .adaptive, .overview: return .overview
+        }
+    }
+    var label: String { self == .adaptive ? "Auto" : spacing.label }
+}
+
 enum TerrainCapture {
     /// Stage 1 deliberately stays bounded through final save/recovery/viewing.
     /// Coverage uses the selected voxel size too; the old 25 mm evidence budget
@@ -62,6 +74,9 @@ struct TerrainCaptureMetadata: Codable, Equatable {
     var version = 1
     var spacing: TerrainSpacing
     var captureRangeMetres: Float
+    /// Optional so existing library records and recovery drafts remain readable.
+    var adaptive: Bool? = nil
+    var samplingLabel: String { adaptive == true ? "Adaptive 5–20 cm" : spacing.label }
 
     enum Failure: LocalizedError {
         case unsupportedVersion
@@ -92,7 +107,12 @@ struct TerrainExportManifest: Codable {
     var handedness = "right"
     var coordinateFrame = "scanLocal"
     var transformsAlreadyApplied = true
-    var spacingMetres: Float
+    /// Omitted for schema 2: adaptive samples do NOT have one uniform spacing.
+    var spacingMetres: Float?
+    var minimumSpacingMetres: Float?
+    var maximumSpacingMetres: Float?
+    var transitionSpacingMetres: Float?
+    var adaptiveAlgorithmVersion: Int?
     var pointCount: Int
     var captureRangeMetres: Float
     var sampling = "oneObservedPointPerCaptureVoxel"
@@ -121,6 +141,14 @@ struct TerrainExportManifest: Codable {
         self.modelSHA256 = modelSHA256
         self.spacingMetres = metadata.spacing.metres
         self.captureRangeMetres = metadata.captureRangeMetres
+        if metadata.adaptive == true {
+            schemaVersion = 2
+            spacingMetres = nil
+            minimumSpacingMetres = 0.05; maximumSpacingMetres = 0.2; transitionSpacingMetres = 0.1
+            adaptiveAlgorithmVersion = 1
+            sampling = "adaptiveObservedPointVoxels"
+            limitations.append("Adaptive density is geometry-driven, not ground classification or exported breaklines. Uncertain patches may retain fine samples. Infer local density conservatively; spacing is not a triangle-edge permission or a coverage mask.")
+        }
         self.pointCount = pointCount
     }
 }

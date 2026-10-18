@@ -13,6 +13,7 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
                             texture2d<float, access::sample> depth [[texture(2)]],
                             texture2d<float, access::sample> accepted [[texture(3)]],
                             texture2d<float, access::sample> photographed [[texture(4)]],
+                            texture2d<float, access::sample> terrain [[texture(5)]],
                             constant CaptureUniforms &u [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= output.get_width() || gid.y >= output.get_height()) return;
     constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
@@ -52,7 +53,8 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
             if (committedDepth > 0 && abs(committedDepth - z) < 0.035 + z * 0.012) {
                 float edge = smoothstep(0.0, 0.018, u.parameters.x - distance);
                 float photoDepth = photographed.sample(nearestSampler, previousUV).r;
-                bool photoMode = u.parameters.y > 1.5;
+                bool terrainMode = u.parameters.y > 3.5;
+                bool photoMode = u.parameters.y > 1.5 && !terrainMode;
                 bool hasPhoto = photoDepth > 0 && abs(photoDepth - z) < 0.035 + z * 0.012;
                 // Screen-space symbols sit ON the reprojected surface mask.
                 // Unlike the old 3D grid they cannot shimmer from sub-pixel
@@ -65,7 +67,15 @@ kernel void captureFeedback(texture2d<float, access::sample> source [[texture(0)
                 float hatch = 1.0 - smoothstep(0.65, 1.65, stripe);
                 float3 ink = float3(0.12, 0.52, 1.0);
                 float alpha = 0.24;
-                if (photoMode && hasPhoto) {
+                if (terrainMode) {
+                    float detail = terrain.sample(nearestSampler, previousUV).r;
+                    if (detail > 0 && detail < 0.075) {
+                        // Ice-cyan dots = retained detail, never green photo quality.
+                        ink = float3(0.32, 0.91, 1.0); alpha = 0.2 + dotMark * 0.5;
+                    } else if (detail < 0) {
+                        ink = mix(ink, float3(1.0, 0.68, 0.16), hatch); alpha = 0.18 + hatch * 0.35;
+                    }
+                } else if (photoMode && hasPhoto) {
                     ink = float3(0.10, 0.94, 0.67); alpha = 0.25 + dotMark * 0.5;
                 } else if (photoMode) {
                     // Combined keeps shape blue, with amber hatching for the

@@ -73,6 +73,7 @@ struct AcceptedDepthFrame {
     let frame: CaptureDepthFrame
     let depth: [Float] // zero means NOT committed to the capture
     let photoDepth: [Float]? // nil outside Fast + colour; zero means needs photo
+    var terrainDetail: [Float]? = nil // 0 unknown, -1 revisit, .05/.1/.2 sampling targets
 }
 
 /// Display-only effect: accepted depth reprojects into the current camera every
@@ -90,6 +91,7 @@ final class LiveCaptureFeedback {
         let current: MTLTexture
         let accepted: MTLTexture
         let photographed: MTLTexture
+        let terrain: MTLTexture
         let uniforms: Uniforms
     }
     private let device: MTLDevice
@@ -99,6 +101,7 @@ final class LiveCaptureFeedback {
     private var acceptedTime: TimeInterval = -1
     private var acceptedTexture: MTLTexture?
     private var photoTexture: MTLTexture?
+    private var terrainTexture: MTLTexture?
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let library = device.makeDefaultLibrary(),
@@ -110,23 +113,26 @@ final class LiveCaptureFeedback {
     func reset() {
         lock.lock(); state = nil; lock.unlock()
         acceptedTime = -1; acceptedTexture = nil; photoTexture = nil
+        terrainTexture = nil
     }
 
     // Each texture is immutable after publication to the render thread.
     func update(frame: ARFrame, accepted: AcceptedDepthFrame?, viewport: CGSize,
-                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool, mode: CaptureOverlayMode = .combined) {
+                orientation: UIInterfaceOrientation, range: Float, showCoverage: Bool,
+                mode: CaptureOverlayMode = .combined, showTerrainDetail: Bool = true) {
         guard let sensor = CaptureDepthFrame(frame), let current = texture(sensor.depth, width: sensor.width, height: sensor.height) else {
             lock.lock(); state = nil; lock.unlock(); return
         }
         if let accepted, accepted.frame.timestamp != acceptedTime {
             acceptedTexture = texture(accepted.depth, width: accepted.frame.width, height: accepted.frame.height)
             photoTexture = accepted.photoDepth.flatMap { texture($0, width: accepted.frame.width, height: accepted.frame.height) }
+            terrainTexture = accepted.terrainDetail.flatMap { texture($0, width: accepted.frame.width, height: accepted.frame.height) }
             acceptedTime = accepted.frame.timestamp
         }
         if accepted == nil {
             // Start/reset can keep the same ARSession instance. Do not project
             // the previous scan's texture using the new camera's pose.
-            acceptedTexture = nil; photoTexture = nil; acceptedTime = -1
+            acceptedTexture = nil; photoTexture = nil; terrainTexture = nil; acceptedTime = -1
         }
         let previous = accepted?.frame ?? sensor
         let t = frame.displayTransform(for: orientation, viewportSize: viewport).inverted()
@@ -138,16 +144,17 @@ final class LiveCaptureFeedback {
         var reliable = false
         if case .normal = frame.camera.trackingState { reliable = true }
         let needsPhotoMask = accepted?.photoDepth != nil
-        let coverage = mode.shaderValue(hasPhotos: needsPhotoMask,
+        var coverage = mode.shaderValue(hasPhotos: needsPhotoMask,
             hasGeometry: showCoverage && accepted != nil && acceptedTexture != nil,
             trackingReliable: reliable, photoMaskReady: photoTexture != nil)
+        if coverage > 0, showTerrainDetail, terrainTexture != nil { coverage = 4 }
         let uniforms = Uniforms(cameraToWorld: sensor.cameraToWorld,
             worldToAcceptedCamera: previous.cameraToWorld.inverse, displayToImage: displayToImage,
             intrinsics: sensor.intrinsics, acceptedIntrinsics: normalizedK,
             parameters: SIMD4(range, coverage,
                 Float(sensor.width), Float(sensor.height)))
         let newState = State(current: current, accepted: acceptedTexture ?? current,
-                             photographed: photoTexture ?? current, uniforms: uniforms)
+                             photographed: photoTexture ?? current, terrain: terrainTexture ?? current, uniforms: uniforms)
         lock.lock(); state = newState; lock.unlock()
     }
 
@@ -169,7 +176,7 @@ final class LiveCaptureFeedback {
         // Source and destination may have different pixel formats; a blit-copy
         // is not a valid passthrough. Let the shader do the conversion instead.
         let state = currentState ?? State(current: context.sourceColorTexture, accepted: context.sourceColorTexture,
-            photographed: context.sourceColorTexture,
+            photographed: context.sourceColorTexture, terrain: context.sourceColorTexture,
             uniforms: Uniforms(cameraToWorld: matrix_identity_float4x4, worldToAcceptedCamera: matrix_identity_float4x4,
                 displayToImage: matrix_identity_float3x3, intrinsics: .zero, acceptedIntrinsics: .zero,
                 parameters: SIMD4(-1, 0, 1, 1)))
@@ -180,6 +187,7 @@ final class LiveCaptureFeedback {
         encoder.setTexture(state.current, index: 2)
         encoder.setTexture(state.accepted, index: 3)
         encoder.setTexture(state.photographed, index: 4)
+        encoder.setTexture(state.terrain, index: 5)
         var uniforms = state.uniforms
         encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
         let width = pipeline.threadExecutionWidth

@@ -7,6 +7,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
     @ObservedObject var scanner: LiDARScanner
     var overlayMode: CaptureOverlayMode
     var previewRange: Float
+    var showTerrainDetail: Bool = true
 
     func makeUIView(context: Context) -> ARView {
         let view = ARView(frame: .zero)
@@ -42,6 +43,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         }
         context.coordinator.overlayMode = overlayMode
         context.coordinator.previewRange = previewRange
+        context.coordinator.showTerrainDetail = showTerrainDetail
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -57,6 +59,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
         let feedback = LiveCaptureFeedback()
         var overlayMode: CaptureOverlayMode = .combined
         var previewRange: Float = 3
+        var showTerrainDetail = true
         var link: CADisplayLink?
 
         func start() {
@@ -71,7 +74,7 @@ struct ARScannerViewRepresentable: UIViewRepresentable {
             feedback?.update(frame: frame, accepted: scanner.acceptedDepthFrame, viewport: view.bounds.size,
                 orientation: view.window?.windowScene?.interfaceOrientation ?? .portrait,
                 range: scanner.isScanning ? scanner.rangeMeters : previewRange,
-                showCoverage: scanner.isScanning, mode: overlayMode)
+                showCoverage: scanner.isScanning, mode: overlayMode, showTerrainDetail: showTerrainDetail)
         }
     }
 }
