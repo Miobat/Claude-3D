@@ -208,7 +208,10 @@ final class AdaptiveTerrainSampler {
         for key in touched {
             guard let cell = cells[key], let plane = cell.plane,
                   cell.samples.values.filter({ $0.observations >= 2 }).count >= 6 else { continue }
-            var neighbours = 0, changes = 0
+            var neighbours = 0, changes = 0, support = 0
+            let reference = abs(plane.normal.y) < 0.9 ? SIMD3<Float>(0, 1, 0) : SIMD3<Float>(0, 0, 1)
+            let tangent = simd_normalize(simd_cross(plane.normal, reference))
+            let bitangent = simd_cross(plane.normal, tangent)
             // 60 cm vertical reach catches adjacent levels of a kerb/ditch; the
             // distance/plane checks prevent comparing unrelated remote surfaces.
             for dx: Int32 in -1...1 { for dy: Int32 in -3...3 { for dz: Int32 in -1...1 {
@@ -217,6 +220,10 @@ final class AdaptiveTerrainSampler {
                 guard let other = cells[otherKey]?.plane, other.residual <= 0.012,
                       simd_distance_squared(other.center, plane.center) < 0.5 * 0.5 else { continue }
                 neighbours += 1
+                let delta = other.center - plane.center
+                let u = simd_dot(delta, tangent), v = simd_dot(delta, bitangent)
+                if u > 0.08 { support |= 1 }; if u < -0.08 { support |= 2 }
+                if v > 0.08 { support |= 4 }; if v < -0.08 { support |= 8 }
                 let angle = abs(simd_dot(plane.normal, other.normal))
                 let separation = max(abs(simd_dot(other.center - plane.center, plane.normal)),
                                      abs(simd_dot(plane.center - other.center, other.normal)))
@@ -226,7 +233,7 @@ final class AdaptiveTerrainSampler {
             } } }
             // Isolated roughness/vegetation is uncertain, not a semantic edge.
             if neighbours >= 2 && (changes >= 1 || plane.residual > 0.015) { features.insert(key) }
-            else if neighbours >= 2 && plane.residual <= 0.008 { smooth.insert(key) }
+            else if support == 15 && plane.residual <= 0.008 { smooth.insert(key) }
         }
         for key in touched {
             guard let cell = cells[key] else { continue }

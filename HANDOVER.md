@@ -7,6 +7,28 @@ web prototype and are not part of the app.)
 
 ---
 
+## Adaptive Terrain (2026-10-18, `codex/adaptive-terrain`)
+
+Based on published `e3a1172`; retains the confirmed 5 m save/recovery fix and all
+prior scanner improvements. Terrain settings add Auto alongside fixed 5/10/20 cm.
+Existing settings remain fixed. Geometry-driven sampling keeps 20 cm on supported
+smooth surfaces/slopes, 5 cm around confirmed shape changes, 10 cm transitions,
+and fine observations for uncertain patches. No inferred ground or generated XYZ.
+
+Implementation/acceptance: `ScanView3D/ADAPTIVE_TERRAIN.md`. The bounded shared core
+is `StorageCore/AdaptiveTerrain.swift` (A/B10052). Existing depth confidence/range,
+worker lifecycle, recovery and capacity pause remain in place. Optional cyan dots
+mean retained detail, not photo quality; amber means revisit, not missing ground.
+
+Adaptive native shares use terrain schema 2 with min/max/transition spacing and
+NO uniform `spacingMetres`; fixed shares remain schema 1. See the updated
+`ScanView3D/TERRAIN_EXPORT_CONTRACT.md` and copyable
+`ScanView3D/LBG_ADAPTIVE_TERRAIN_PROMPT.md`. Planner work is separate; no planner
+changes are included here. Field accuracy and hardware performance require the
+documented iPhone acceptance checks; CI is not a physical terrain scan.
+
+---
+
 ## Terrain save endpoint fix (2026-10-18, `codex/terrain-save-fix`)
 
 Based on published Terrain commit `033bf66`, build `202610180644`. The owner

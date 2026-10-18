@@ -33,7 +33,8 @@ final class AdaptiveTerrainTests: XCTestCase {
     func testFlatGroundBecomesCoarseWithoutMovingAnyPoint() {
         let source = surface { _, _ in 0.25 }, sampler = scan(source)
         let output = sampler.snapshot().map(\.position)
-        XCTAssertLessThanOrEqual(output.count, fixedCount(source, spacing: 0.2) * 2)
+        // Unobserved outer margins stay fine/uncertain; supported interior is coarse.
+        XCTAssertLessThan(output.count, fixedCount(source, spacing: 0.05) / 2)
         XCTAssertTrue(Set(output).isSubset(of: Set(source.map(\.position))))
         XCTAssertEqual(output.count, sampler.pointCount)
         XCTAssertEqual(sampler.level(at: SIMD3(0.003, 0.25, 0.003)), .coarse)
@@ -116,6 +117,15 @@ final class AdaptiveTerrainTests: XCTestCase {
         let sampler = scan(source)
         XCTAssertFalse(sampler.snapshot().contains { abs($0.position.x) <= 0.25 })
         XCTAssertNil(sampler.level(at: SIMD3(0.003, 0.25, 0.003)))
+        XCTAssertEqual(sampler.level(at: SIMD3(0.303, 0.25, 0.003)), .uncertain)
+    }
+
+    func testUnobservedBoundaryKeepsFineGeometryWithoutCallingItAnEdge() {
+        let source = surface { _, _ in 0.25 }, sampler = scan(source)
+        let outer = source.filter { $0.position.x < -1.05 }
+        let kept = Set(sampler.snapshot().map(\.position))
+        XCTAssertTrue(outer.allSatisfy { kept.contains($0.position) })
+        XCTAssertEqual(sampler.level(at: SIMD3(-1.197, 0.25, 0.003)), .uncertain)
     }
 
     func testFineMarkRequiresNearbyRepeatedRetainedPoint() {

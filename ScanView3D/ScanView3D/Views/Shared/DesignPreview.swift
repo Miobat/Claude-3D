@@ -343,6 +343,7 @@ enum DesignPreview {
         checkRecoveryAndSave(check)
         checkTerrainCapture(check)
         checkTerrainRangeRecovery(check)
+        checkAdaptiveTerrain(check)
         checkMeshRetention(check)
         checkTextureQuality(check)
         checkObjects(view: view, coordinator: coordinator, check: check) {
@@ -688,6 +689,40 @@ enum DesignPreview {
             check(simd_distance(pixels[8 * 16 + 13], reference[8 * 16 + 13]) < 0.00001,
                   "Photo mode \(mode) cannot mark uncaptured geometry")
         } }
+        for detail: Float in [0.05, -1, 0.2] {
+            guard let mask = texture(.r32Float), let cmd = queue.makeCommandBuffer(),
+                  let enc = cmd.makeComputeCommandEncoder() else { check(false, "Adaptive coverage command"); return }
+            let values = [Float](repeating: detail, count: 256)
+            values.withUnsafeBytes { mask.replace(region: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0,
+                                                  withBytes: $0.baseAddress!, bytesPerRow: 64) }
+            uniforms.parameters = SIMD4(1.5, 4, 16, 16)
+            enc.setComputePipelineState(pipeline)
+            enc.setTexture(source, index: 0); enc.setTexture(output, index: 1)
+            enc.setTexture(depth, index: 2); enc.setTexture(accepted, index: 3)
+            enc.setTexture(accepted, index: 4); enc.setTexture(mask, index: 5)
+            enc.setBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+            enc.dispatchThreads(MTLSize(width: 16, height: 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+            enc.endEncoding(); cmd.commit(); cmd.waitUntilCompleted()
+            var pixels = [SIMD4<Float>](repeating: .zero, count: 256)
+            pixels.withUnsafeMutableBytes { output.getBytes($0.baseAddress!, bytesPerRow: 256,
+                from: MTLRegionMake2D(0, 0, 16, 16), mipmapLevel: 0) }
+            check(cmd.status == .completed, "Adaptive sampling overlay GPU: \(detail)")
+            check(simd_distance(pixels[8 * 16 + 13], reference[8 * 16 + 13]) < 0.00001 &&
+                  simd_distance(pixels[8 * 16 + 9], reference[8 * 16 + 9]) < 0.00001,
+                  "Adaptive marks cannot fill unknown or uncommitted geometry: \(detail)")
+            check(simd_distance(pixels[outside], result[outside]) < 0.00001,
+                  "Adaptive detail stops at the same blurred range boundary: \(detail)")
+            if detail == 0.05 {
+                check(pixels[8 * 16 + 1].y > result[8 * 16 + 1].y + 0.03,
+                      "Confirmed adaptive detail has a distinct cyan pattern")
+            } else if detail == 0.2 {
+                check(simd_distance(pixels[8 * 16 + 1], result[8 * 16 + 1]) < 0.00001,
+                      "Smooth adaptive terrain keeps the ordinary blue observed-depth tint")
+            } else {
+                check(pixels.enumerated().contains { $0.offset % 16 < 4 && $0.element.x > result[$0.offset].x + 0.05 },
+                      "Uncertain adaptive patches have visible amber revisit hatching")
+            }
+        }
     }
 
     private static func checkMeshRetention(_ check: (Bool, String) -> Void) {
@@ -955,6 +990,83 @@ enum DesignPreview {
             let invalid = try JSONDecoder().decode(ScanSettings.self, from: Data("{\"captureMode\":\"Terrain\",\"rangeValue\":5.01}".utf8))
             check(invalid.rangeValue == 5.01, "Recovery does not silently clamp genuinely invalid recorded ranges")
         } catch { check(false, "Terrain range recovery fixtures: \(error)") }
+    }
+
+    private static func checkAdaptiveTerrain(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("adaptive-terrain-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            let legacy = try JSONDecoder().decode(ScanSettings.self, from: Data("{\"captureMode\":\"Terrain\",\"terrainSpacing\":200}".utf8))
+            check(!legacy.terrainAdaptive && legacy.terrainSamplingChoice == .overview,
+                  "Existing fixed terrain settings never silently become adaptive")
+            var settings = ScanSettings(); settings.captureMode = .terrain
+            settings.terrainSamplingChoice = .adaptive; settings.rangeValue = Float(5).nextUp
+            check(settings.terrainAdaptive && settings.effectiveDetailMM == 200 && settings.terrainDetailOverlay,
+                  "Auto selects bounded adaptive capture with the detail overlay")
+            let cloud = MockLiDARScanner.generateAdaptiveTerrainPoints()
+            check(cloud.faces.isEmpty && cloud.vertices.contains { $0.y == -1 } && cloud.vertices.contains { $0.y == -0.85 },
+                  "Production adaptive sampler preserves both measured kerb levels")
+            let draft = CaptureDraft(id: UUID(), startedAt: Date(), checkpointAt: Date(), name: "Adaptive checkpoint",
+                settings: settings, photoFolderName: nil, location: nil, isFinalized: true)
+            let checkpoint = CaptureCheckpointStore<CaptureDraft, MeshData>(directory: root.appendingPathComponent("checkpoint"))
+            try checkpoint.save(draft, payload: cloud)
+            let (restored, recovered) = try checkpoint.load()
+            guard let recovered else { check(false, "Adaptive checkpoint has geometry"); return }
+            check(restored.settings.terrainAdaptive && restored.settings.rangeValue == 5 && recovered.vertices == cloud.vertices,
+                  "Recovery retains adaptive choice, canonical range and exact variable-density XYZ")
+            let frameValues = try TerrainCapture.localFrame(minimum: recovered.boundingBoxMin, maximum: recovered.boundingBoxMax)
+            guard let frame = Scan.matrix(frameValues.map(Float.init)) else { throw CoordinateError.invalidTransform }
+            let points = recovered.transformed(by: frame)
+            let store = FailingPointCloudSceneStore(directory: root.appendingPathComponent("library"))
+            guard let project = store.createProject(name: "Adaptive"), let target = store.createProject(name: "Moved") else {
+                check(false, "Adaptive fixture projects"); return
+            }
+            let metadata = TerrainCaptureMetadata(spacing: .overview, captureRangeMetres: restored.settings.rangeValue, adaptive: true)
+            store.failSceneWrite = true
+            do {
+                _ = try store.savePointCloud(meshData: points, name: "Failed adaptive save", toProject: project) {
+                    $0.recordTerrainCapture(metadata, frame: frame)
+                }
+                check(false, "Adaptive scene failure must reject save")
+            } catch {
+                check(error as? PointCloudSaveError == .nativeSceneWriteFailed && store.projects.first?.scans.isEmpty == true,
+                      "Failed adaptive save leaves no library record")
+            }
+            let afterFailure = try checkpoint.load()
+            check(afterFailure.1?.vertices == cloud.vertices && afterFailure.0.settings.terrainAdaptive,
+                  "Failed adaptive save preserves the recoverable variable-density cloud")
+            store.failSceneWrite = false
+            let scan = try store.savePointCloud(meshData: points, name: "Adaptive retry", toProject: project) {
+                $0.recordTerrainCapture(metadata, frame: frame)
+            }
+            let reload = StorageManager(directory: root.appendingPathComponent("library")).projects.first?.scans.first
+            check(reload?.terrainCapture?.adaptive == true && reload?.vertexCount == cloud.vertexCount,
+                  "Adaptive library reload retains density metadata and point count")
+            let url = store.getScanFileURL(scan: scan, project: project)
+            let scene = try SCNScene(url: url.deletingPathExtension().appendingPathExtension("scn"), options: nil)
+            check(scene.rootNode.childNodes.first?.geometry?.elements.first?.primitiveCount == cloud.vertexCount,
+                  "Adaptive native viewer reopens every retained sample")
+            let delivery = try store.exportScan(scan, from: project)
+            let folder = delivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(scan.id.uuidString)
+            let bytes = try Data(contentsOf: folder.appendingPathComponent("model.ply"))
+            let manifest = try JSONDecoder().decode(TerrainExportManifest.self, from: Data(contentsOf: folder.appendingPathComponent("terrain.json")))
+            let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            check(bytes == (try Data(contentsOf: url)) && manifest.modelSHA256 == hash && manifest.pointCount == cloud.vertexCount,
+                  "Adaptive native share preserves exact PLY bytes and SHA-bound count")
+            check(manifest.schemaVersion == 2 && manifest.spacingMetres == nil && manifest.minimumSpacingMetres == 0.05 &&
+                  manifest.maximumSpacingMetres == 0.2 && manifest.transitionSpacingMetres == 0.1,
+                  "Planner receives variable-density schema, never a false uniform spacing")
+            check(manifest.transformsAlreadyApplied && manifest.registrationRequired && !manifest.interpolated &&
+                  manifest.groundClassification == "unclassified", "Adaptive export makes no coverage, ground or survey claim")
+            guard let duplicate = store.duplicateScan(scan, from: project, to: target) else {
+                check(false, "Adaptive duplicate succeeds"); return
+            }
+            check(duplicate.terrainCapture == metadata && duplicate.vertexCount == scan.vertexCount,
+                  "Adaptive duplicate retains metadata and samples")
+            check(store.moveScan(scan, from: project, to: target), "Adaptive move succeeds")
+            let moved = store.projects.first { $0.id == target.id }?.scans.first { $0.id == scan.id }
+            check(moved?.terrainCapture == metadata, "Adaptive metadata survives project move")
+        } catch { check(false, "Adaptive native fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {

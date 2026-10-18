@@ -1,4 +1,53 @@
-# TinyScanner Terrain v1 — planner handoff
+# TinyScanner Terrain — planner handoff (fixed v1 / adaptive v2)
+
+## Adaptive addition (2026-10-18, `codex/adaptive-terrain`)
+
+Fixed-spacing deliveries remain **schemaVersion 1**, unchanged. Adaptive deliveries
+use **schemaVersion 2**. PLY encoding, coordinate provenance, units, gravity, hash
+binding and native ZIP layout are unchanged. Plain PLY readers still work.
+
+The schema-2 differences are:
+
+```json
+{
+  "schemaVersion": 2,
+  "sampling": "adaptiveObservedPointVoxels",
+  "minimumSpacingMetres": 0.05,
+  "maximumSpacingMetres": 0.2,
+  "transitionSpacingMetres": 0.1,
+  "adaptiveAlgorithmVersion": 1
+}
+```
+
+`spacingMetres` is **omitted**, not 0.2 or a mean. All other v1 fields below remain,
+including `modelFile`, `modelSHA256`, `pointCount`, `coordinatesFile`, `units`,
+`upAxis`, `handedness`, `coordinateFrame`, `transformsAlreadyApplied`,
+`captureRangeMetres`, `groundClassification`, `coverage`, `interpolated`,
+`unknownAreas`, `verticalDatum`, `registrationRequired` and `limitations`.
+
+The 5/10/20 cm values are retention voxel targets, NOT maximum point gaps,
+guaranteed feature resolution, vertical error, or permission to bridge triangles.
+The sampler examines repeated reliable depth before reducing smooth cells to 20 cm.
+Persistent shape changes retain 5 cm observations and a 10 cm transition margin.
+Uncertain patches retain fine observations too: density alone does not prove a
+detected edge. Samples are actual observed XYZ, not averaged/generated positions.
+
+There are **no exported breaklines, per-point ground labels, coverage footprints,
+or free-space masks**. Live cyan/amber feedback is not exported as evidence of
+survey accuracy or fully observed cells. A missing region remains unknown.
+
+Planner requirements: validate schema and hash/count against the actual delivered
+PLY; preserve scale/Y-up and do not reapply baked transforms; estimate local
+sampling support rather than assuming a global spacing; avoid cross-gap or
+cross-surface triangulation, and retain user-controlled clipping/breaklines.
+Sparse-to-dense transitions must work without imposing 5 cm density everywhere.
+Unsupported/corrupt metadata must leave ordinary PLY import available with an
+explicit warning, never silently modify coordinates or certify coverage.
+
+Full scanner algorithm and field checks: `ADAPTIVE_TERRAIN.md`.
+Copyable planner task: `LBG_ADAPTIVE_TERRAIN_PROMPT.md`.
+
+---
 
 Implementation branch: `codex/terrain-capture`. This contract is the proposed and
 implemented scanner-side v1; the planner should independently validate it. It does
