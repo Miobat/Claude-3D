@@ -25,6 +25,8 @@ routes only Adaptive Terrain to it; existing fixed modes keep their old path.
 
 Incoming reliable, in-range positions are binned at 5 cm before classification in
 20 cm 3D parents. Only observed XYZ is retained; colour alone is averaged. The
+coarse representative favours repeatedly observed, plane-supported real samples,
+rather than blindly choosing a noisy corner; no fitted position is generated. The
 parent grid is 3D, so walls and stacked surfaces are not collapsed to an XY raster.
 Repeated observations must be separated by 0.12 s; analysis runs at most every
 0.25 s. Local covariance fits require two-dimensional support, and the 80th

@@ -154,7 +154,20 @@ final class AdaptiveTerrainSampler {
     }
 
     private func retained(_ cell: Cell) -> [(key: SIMD3<Int32>, value: Sample)] {
-        let ordered = cell.samples.sorted { Self.less($0.key, $1.key) }
+        let ordered = cell.samples.sorted { a, b in
+            if cell.level == .coarse || cell.level == .transition, let plane = cell.plane {
+                // Prefer repeatedly observed, plane-supported real samples. A
+                // single noisy corner must not define the elevation of a flat cell.
+                let aSupported = a.value.observations >= 2, bSupported = b.value.observations >= 2
+                if aSupported != bSupported { return aSupported }
+                let ar = simd_dot(a.value.position - plane.center, plane.normal)
+                let br = simd_dot(b.value.position - plane.center, plane.normal)
+                let aScore = simd_distance_squared(a.value.position, plane.center) + 16 * ar * ar
+                let bScore = simd_distance_squared(b.value.position, plane.center) + 16 * br * br
+                if aScore != bScore { return aScore < bScore }
+            }
+            return Self.less(a.key, b.key)
+        }
         if cell.level == .coarse { return Array(ordered.prefix(1)) }
         if cell.level == .transition {
             var seen: Set<SIMD3<Int32>> = []
@@ -167,7 +180,13 @@ final class AdaptiveTerrainSampler {
     }
 
     private func updateCount(_ cell: Cell) {
-        let count = retained(cell).count
+        let count: Int
+        switch cell.level {
+        case .coarse: count = min(1, cell.samples.count)
+        case .transition:
+            count = Set(cell.samples.values.compactMap { TerrainCapture.key($0.position, spacing: 0.1) }).count
+        case .detail, .uncertain: count = cell.samples.count
+        }
         pointCount += count - cell.retainedCount; cell.retainedCount = count
     }
 

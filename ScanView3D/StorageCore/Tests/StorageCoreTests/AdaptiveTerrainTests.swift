@@ -94,6 +94,20 @@ final class AdaptiveTerrainTests: XCTestCase {
         XCTAssertLessThan(sampler.pointCount, fixedCount(source, spacing: 0.05) / 2)
     }
 
+    func testCoarseRepresentativeIsObservedAndNotAnIsolatedNoisyCorner() {
+        var source = surface { _, _ in 0.25 }
+        let corner = SIMD3<Float>(0.003, 0.27, 0.003)
+        source.removeAll { $0.position.x == corner.x && $0.position.z == corner.z }
+        source.insert(.init(position: corner), at: 0)
+        let sampler = scan(source)
+        let parent = TerrainCapture.key(corner, spacing: 0.2)
+        let selected = sampler.snapshot().filter { TerrainCapture.key($0.position, spacing: 0.2) == parent }
+        XCTAssertEqual(selected.count, 1)
+        XCTAssertNotEqual(selected.first?.position, corner)
+        XCTAssertTrue(selected.allSatisfy { $0.position.y == 0.25 })
+        XCTAssertTrue(Set(selected.map(\.position)).isSubset(of: Set(source.map(\.position))))
+    }
+
     func testSingleFrameAndDuplicateTimestampDoNotCertifyDetail() {
         let source = surface { x, _ in x < 0 ? 0.25 : 0.4 }
         let sampler = AdaptiveTerrainSampler(capacity: 200_000)
