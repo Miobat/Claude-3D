@@ -17,7 +17,11 @@ This pass hardens library paths/collisions, complete duplication, failed-save
 rollback, import safety, checkpoint integrity, low-memory photo behavior,
 geometry readers, viewer lifecycle and manual measurement retries. A bundled
 privacy manifest occupies resource IDs A/B10053. Shared tests use the same
-implementation as the app. Validation results will be recorded here when complete.
+implementation as the app. Code `9952a75` passed
+[run 42308101059](https://github.com/Miobat/Claude-3D/actions/runs/42308101059):
+275 Swift tests, 290 native checks, independent OpenUSD verification, device and
+simulator builds, and the screenshot tour. TestFlight upload was skipped.
+The audit document includes a separate physical-device acceptance checklist.
 
 New checkpoint records bind payload bytes with SHA-256 and size; legacy
 checkpoints remain readable. Invalid library references fail read-only rather

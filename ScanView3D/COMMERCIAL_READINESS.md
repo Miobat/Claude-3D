@@ -66,7 +66,19 @@ Run `swift test --package-path ScanView3D/StorageCore` on a supported Swift host
 GitHub Actions builds both device and simulator targets, checks USDZ through an
 independent OpenUSD reader, runs the native regression fixtures, and captures the
 light/dark/large-text/landscape layouts. Development pushes do not upload builds.
-Final run results are recorded in the handover after validation completes.
+Verified code commit: `9952a75f4e02931f161e352424736342f1033e63`.
+[GitHub Actions run 42308101059](https://github.com/Miobat/Claude-3D/actions/runs/42308101059)
+passed with 275 Swift tests (zero failures), 290 native app checks (zero
+failures), unsigned device and simulator builds, and the independent OpenUSD
+checks. The simulator screenshot tour completed. TestFlight upload was skipped.
+The tour produced 66 screenshots; 15 representative scanner, viewer, measurement,
+project and settings previews were visually reviewed across dark/light, large
+text and landscape, with no blocking visual regression found. Large-text density
+and interaction checks remain in the release gates below.
+The checked-in changes add 60 Swift tests and 53 native checks over the baseline.
+Local Swift syntax/project/workflow checks also passed; Xcode validation above
+is authoritative. Existing ARPlaneAnchor extent deprecation and simulator/build
+metadata warnings remain; they are not test failures.
 
 ## Before a paid customer release
 
@@ -104,6 +116,11 @@ Final run results are recorded in the handover after validation completes.
    terms, paid licensing/purchase model, customer data-retention expectations and
    App Store disclosures. The binary manifest is not a privacy policy or legal
    review. Recheck declarations if cloud/AI/analytics or payments are later added.
+9. **Accessibility and view space.** The reviewed large-text scanner preview keeps
+   its controls readable but the capture overlay occupies most of the viewport.
+   Improve its compact/collapsible presentation and check VoiceOver, scrolling
+   and touch targets on devices. Static screenshots alone do not verify those
+   interactions or live camera visibility in field conditions.
 
 ## Privacy declaration basis
 
@@ -115,3 +132,28 @@ logs can contain customer information; review them before sharing.
 
 References: [Apple required-reason API declarations](https://developer.apple.com/documentation/bundleresources/app-privacy-configuration/nsprivacyaccessedapitypes/nsprivacyaccessedapitype)
 and [Apple privacy-manifest structure](https://developer.apple.com/documentation/technotes/tn3183-adding-required-reason-api-entries-to-your-privacy-manifest).
+
+## Physical-device acceptance checklist
+
+Run on iPhone 16 Pro and one older supported LiDAR device. Record the device,
+iOS version, app build, starting free space and the result of each case. Install
+as an update, without uninstalling. Use a separate QA project and disposable
+scans; keep a verified device/app-data backup. Model exports alone are not that
+backup. These checks have NOT been performed by the automated simulator suite.
+
+| Test | Steps | Expected result |
+| --- | --- | --- |
+| Existing library | Open older textured OBJ, point-cloud PLY and HQ scans, then restart | Projects, textures, scale, orientation and saved measurements remain intact |
+| Every capture mode | Short Fast, Points, Terrain Auto, HQ and Splat captures; Finish → Keep for Later; reopen; Unfinished captures → Recover → Save | Recoverable geometry/photos, successful save/reopen, no continuation in an obsolete AR coordinate frame; recovered Fast scans may use vertex colour instead of the original atlas |
+| Interrupted capture | Wait for Capture details to show a completed checkpoint, then force-close the disposable capture; also exercise background/lock/tab changes | Last completed checkpoint recovers; observations after it may be lost; interruption is not silently treated as continuous tracking |
+| Finalization/reset | Finish HQ while photos are active, Continue Scanning, finish again; separately confirm Reset and begin a new capture | Finalization completes, counts settle, no geometry/photos leak between captures; already accepted in-flight photos may finish |
+| Library operations | Duplicate a textured/measured QA scan, move the copy, restart and reopen; delete only the copy | All registered companions survive; original stays intact; failed operations never publish a misleading usable record |
+| Low space | Use deterministic write-failure injection in a disposable development container/test build | Clear failure; previous library/checkpoint preserved; pending capture remains; retry succeeds after the simulated fault is removed |
+| Longer capture/memory | Increase disposable scan duration gradually; record heat, warnings, save/checkpoint time and responsiveness | HQ/Splat photo counts stop after in-flight work drains when photos pause; critical pressure pauses capture while allowing Finish/Save; Points/Terrain show no false photo warning |
+| Independent exports | Share OBJ/PLY/HQ and Terrain Auto; open in an independent reader and LBG; check known dimensions, textures, elevations and terrain metadata; cancel/retry once | Complete exports only, correct coordinates/scale, no damage after cancellation; terrain hash/count and mixed-spacing metadata agree |
+| Rejected import | Import a deliberately malformed disposable OBJ/PLY | Clear failure and unchanged existing library |
+
+Do not fill or deliberately overheat the user's primary phone, or damage its
+library to induce failures. If a condition is not reached, record **not exercised**,
+not passed. For a failure, retain the exact steps, recording and Settings → Debug
+Log → Export Logs; review names/paths in logs before sharing.
