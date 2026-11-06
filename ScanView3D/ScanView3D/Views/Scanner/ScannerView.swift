@@ -74,28 +74,20 @@ struct ScannerView: View {
 
             GeometryReader { geometry in
                 Group {
-                    if scanner.isScanning && typeSize.isAccessibilitySize {
-                        VStack(spacing: 8) {
-                            ScrollView {
-                                VStack(spacing: 12) {
-                                    captureDashboard
-                                    statusMessages
-                                    topStatusBar
-                                }.padding(.top, 8)
-                            }
-                            bottomControls
-                        }
-                    } else if geometry.size.width > geometry.size.height {
+                    if geometry.size.width > geometry.size.height {
                         HStack(alignment: .top, spacing: 0) {
                             VStack(spacing: 8) {
                                 topStatusBar
-                                statusMessages
+                                ScrollView { statusMessages }
+                                    .scrollIndicators(.visible)
                                 Spacer(minLength: 0)
                             }
                             VStack(spacing: 8) {
                                 if scanner.isScanning {
                                     Spacer(minLength: 0)
-                                    captureDashboard
+                                    ScrollView { captureDashboard }
+                                        .scrollIndicators(.visible)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 } else {
                                     ScrollView { prescanControls }
                                         .scrollIndicators(.hidden)
@@ -108,13 +100,17 @@ struct ScannerView: View {
                     } else {
                         VStack(spacing: 10) {
                             topStatusBar
-                            statusMessages
+                            ScrollView { statusMessages }
+                                .scrollIndicators(.visible)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxHeight: geometry.size.height * 0.30)
                             Spacer(minLength: 8)
                             if scanner.isScanning {
                                 captureDashboard
                             } else {
                                 ScrollView { prescanControls }
                                     .scrollIndicators(.hidden)
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .frame(maxHeight: min(370, geometry.size.height * 0.62))
                                     .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
                             }
@@ -133,6 +129,9 @@ struct ScannerView: View {
             #endif
         }
         .onAppear {
+            #if DEBUG && targetEnvironment(simulator)
+            if DesignPreview.screen != nil { settings = ScanSettings() }
+            #endif
             if settings.captureMode == .highQuality && !highQualitySupported {
                 settings.captureMode = .fast
             }
@@ -150,14 +149,21 @@ struct ScannerView: View {
                     scanner.scanProgress = "Scanning"
                 }
             }
-            if DesignPreview.screen == "capture-active" {
+            if ["capture-active", "capture-details", "capture-warning"].contains(DesignPreview.screen ?? "") {
                 settings.captureMode = .fast; settings.captureTexture = true
                 scanner.isScanning = true; scanner.vertexCount = 48_210; scanner.faceCount = 80_450
                 scanner.capturedFrameCount = 28; scanner.scanCapacityPercent = 24
                 scanner.sharpTextureFrameCount = 25
                 scanner.scanProgress = "Scanning"
                 scanner.captureHint = "Move slowly for sharper colour"
-                checkpointWarning = "Checkpoint delayed by memory pressure — stop and save soon."
+                if DesignPreview.screen != "capture-active" {
+                    checkpointWarning = "Checkpoint delayed by memory pressure — stop and save soon."
+                }
+                if DesignPreview.screen == "capture-details" { showingCaptureDetails = true }
+                if DesignPreview.screen == "capture-warning" {
+                    scanner.trackingWarning = "Move slowly — tracking is limited"
+                    scanner.textureCaptureIssue = "Photos paused to protect memory — shape capture continues"
+                }
             }
             #endif
             if activeDraft != nil, !scanner.isScanning { showingSaveDialog = true }
@@ -185,6 +191,7 @@ struct ScannerView: View {
         }
         .sheet(isPresented: $showingRecovery) { recoverySheet }
         .sheet(isPresented: $showingCaptureSettings) { captureSettingsSheet }
+        .sheet(isPresented: $showingCaptureDetails) { captureDetailsSheet }
         .confirmationDialog("Discard this capture?", isPresented: $showingResetConfirmation, titleVisibility: .visible) {
             Button("Discard Capture", role: .destructive) { discardCurrentCapture() }
             Button("Cancel", role: .cancel) {}
@@ -216,86 +223,195 @@ struct ScannerView: View {
     }
 
     @ViewBuilder private var statusMessages: some View {
-        if settings.alignToNorth, scanner.isScanning, showingCaptureDetails {
-            Text(location.status).font(.caption).foregroundStyle(.white).padding(10).fieldPanel()
-        }
         if !scanner.isScanning, !recovery.drafts.isEmpty {
-            Button("Unfinished captures (\(recovery.drafts.count))") { showingRecovery = true }
-                .buttonStyle(.bordered).tint(FieldStyle.cyan).padding(.horizontal, 20)
-                .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
+            Button { showingRecovery = true } label: {
+                Label("Unfinished captures (\(recovery.drafts.count))", systemImage: "arrow.clockwise.circle")
+                    .font(.subheadline.weight(.medium)).padding(.horizontal, 14).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fieldPanel()
+            }
+            .buttonStyle(.plain).foregroundStyle(FieldStyle.cyan).padding(.horizontal, 16)
+            .disabled(isPreparingMesh || isSaving || scanner.isFinalizing)
         }
-        if scanner.isScanning, let warning = scanner.trackingWarning ?? scanner.captureHint {
-            trackingBanner(warning)
+        if scanner.isScanning {
+            VStack(spacing: 6) {
+                if let warning = checkpointWarning {
+                    captureNotice("Recovery delayed — save soon", detail: warning, symbol: "externaldrive.badge.exclamationmark", warning: true)
+                }
+                if let warning = scanner.trackingWarning {
+                    captureNotice(warning, detail: warning, symbol: "viewfinder", warning: true)
+                }
+                if let issue = scanner.textureCaptureIssue, settings.captureMode == .fast && settings.captureTexture {
+                    captureNotice(issue, detail: issue, symbol: "photo.badge.exclamationmark", warning: true)
+                }
+                // Hints are guidance; avoid repeating them over a higher-priority warning.
+                if checkpointWarning == nil, scanner.trackingWarning == nil, scanner.textureCaptureIssue == nil,
+                   let hint = scanner.captureHint {
+                    captureNotice(hint, detail: hint, symbol: "hand.draw", warning: false)
+                }
+            }
+            .padding(.horizontal, 16)
         }
     }
 
     private var captureDashboard: some View {
-        VStack(spacing: 8) {
-            if let warning = checkpointWarning {
-                Text(warning).font(.caption2).foregroundStyle(.orange)
-                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 16)
-            }
-            coverageLegend
-            if settings.captureMode == .terrain {
-                Text("\(scanner.depthPointCount.formatted()) points · \(settings.terrainSamplingLabel) sampling")
-                    .font(.caption.weight(.medium)).foregroundStyle(.white)
-                    .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("terrainCaptureCount")
-            }
-            if scanner.scanCapacityPercent >= 75 && !showingCaptureDetails { scanCapacityGauge }
-            if settings.captureMode == .fast && settings.captureTexture {
-                VStack(spacing: 5) {
-                    Text("\(scanner.sharpTextureFrameCount) clear photo candidates kept")
-                        .font(.caption.weight(.medium)).foregroundStyle(.white)
-                    if let issue = scanner.textureCaptureIssue {
-                        Text(issue).font(.caption2).foregroundStyle(.orange)
-                    } else if scanner.sharpTextureFrameCount == 0 {
-                        Text("Move slowly to add clear photo detail").font(.caption2).foregroundStyle(.white.opacity(0.75))
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Menu {
+                    Picker("Live overlay", selection: $overlayMode) {
+                        ForEach(availableOverlayModes, id: \.self) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
                     }
+                } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "square.3.layers.3d")
+                        Text(overlayMode.rawValue)
+                        Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+                    }
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 12).frame(minHeight: 44)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
                 }
-                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 16)
-                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Live overlay").accessibilityValue(overlayMode.rawValue)
+                .accessibilityIdentifier("captureOverlayMode")
+                Spacer(minLength: 0)
+                Button { showingCaptureDetails = true } label: {
+                    Group {
+                        if typeSize.isAccessibilitySize {
+                            Image(systemName: "info.circle").font(.title3)
+                        } else {
+                            Label("Details", systemImage: "info.circle").font(.subheadline.weight(.medium))
+                        }
+                    }
+                    .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.plain).foregroundStyle(FieldStyle.cyan)
+                .accessibilityLabel("Capture details and overlay legend")
+                .accessibilityIdentifier("captureDetailsButton")
             }
-            DisclosureGroup("Capture details", isExpanded: $showingCaptureDetails) {
-                VStack(spacing: 8) {
+            if scanner.scanCapacityPercent >= 75 {
+                Label("Capacity \(String(format: "%.0f", scanner.scanCapacityPercent))% — save soon", systemImage: "externaldrive.badge.exclamationmark")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !typeSize.isAccessibilitySize {
+                compactCoverageLegend
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(String(format: "%.1f", settings.rangeValue)) m range")
+                    Spacer(minLength: 0)
+                    Text(captureSummary)
+                        .multilineTextAlignment(.trailing)
+                }
+                .font(.caption).foregroundStyle(.white.opacity(0.72))
+            } else {
+                Text("\(String(format: "%.1f", settings.rangeValue)) m range")
+                    .font(.caption).foregroundStyle(.white.opacity(0.75))
+            }
+        }
+        .padding(12).fieldPanel().padding(.horizontal, 16)
+        .onAppear { if !hasPhotoOverlay && overlayMode != .off { overlayMode = .shape } }
+    }
+
+    private var hasPhotoOverlay: Bool { settings.captureMode == .fast && settings.captureTexture }
+
+    private var availableOverlayModes: [CaptureOverlayMode] {
+        CaptureOverlayMode.allCases.filter { hasPhotoOverlay || $0 == .shape || $0 == .off }
+    }
+
+    private var captureSummary: String {
+        if settings.captureMode == .terrain { return "\(scanner.depthPointCount.formatted()) points" }
+        if hasPhotoOverlay { return "\(scanner.sharpTextureFrameCount) clear photo candidates" }
+        if usesPhotos { return "\(scanner.highResFrameCount) photos" }
+        return "\((scanner.depthPointCount > 0 ? scanner.depthPointCount : scanner.vertexCount).formatted()) points"
+    }
+
+    @ViewBuilder private var compactCoverageLegend: some View {
+        if overlayMode == .off {
+            Text("Overlay off · range blur stays on").foregroundStyle(.white.opacity(0.7))
+                .font(.caption2)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { compactLegendItems }
+                VStack(alignment: .leading, spacing: 5) { compactLegendItems }
+            }
+            .font(.caption2.weight(.medium))
+        }
+    }
+
+    @ViewBuilder private var compactLegendItems: some View {
+        if hasPhotoOverlay && overlayMode != .shape {
+            Label("Photo candidate", systemImage: "circle.grid.3x3.fill").foregroundStyle(FieldStyle.mint)
+            Label("Needs photo", systemImage: "line.diagonal").foregroundStyle(.orange)
+        } else if settings.captureMode == .terrain && settings.terrainAdaptive && settings.terrainDetailOverlay {
+            terrainLegendItems
+        } else {
+            Label("Observed depth", systemImage: "square.fill").foregroundStyle(.cyan)
+        }
+    }
+
+    private var captureDetailsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Capture status") {
+                    LabeledContent("Mode", value: settings.captureMode.rawValue)
+                    LabeledContent("Status", value: captureStatusTitle)
+                    if settings.captureMode.usesMeshMode && settings.meshMode != .free {
+                        LabeledContent("Surfaces", value: settings.meshMode.rawValue)
+                    }
+                    if let warning = checkpointWarning { Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                    if let warning = scanner.trackingWarning { Label(warning, systemImage: "viewfinder").foregroundStyle(.orange) }
+                    if let issue = scanner.textureCaptureIssue { Label(issue, systemImage: "photo").foregroundStyle(.orange) }
+                    if let hint = scanner.captureHint { Text(hint).foregroundStyle(.secondary) }
+                    if settings.alignToNorth { Text(location.status).foregroundStyle(.secondary) }
+                }
+                Section("Live overlay") {
+                    Picker("Show", selection: $overlayMode) {
+                        ForEach(availableOverlayModes, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+                    }
+                    coverageLegend
+                }
+                Section("Captured so far") {
+                    captureCounts
+                    if hasPhotoOverlay {
+                        LabeledContent("Clear photo candidates", value: scanner.sharpTextureFrameCount.formatted())
+                        if scanner.sharpTextureFrameCount == 0 {
+                            Text("Move slowly to add clear photo detail").foregroundStyle(.secondary)
+                        }
+                    }
+                    if settings.captureMode == .terrain {
+                        LabeledContent("Sampling", value: settings.terrainSamplingLabel)
+                            .accessibilityIdentifier("terrainCaptureCount")
+                    }
                     scanCapacityGauge
-                    scanningInfoBar
-                    captureCounts.font(.caption).foregroundStyle(.white.opacity(0.7))
                     if checkpointWarning == nil, let date = activeDraft?.geometryCheckpointAt {
                         (Text("Recovery checkpoint: ") + Text(date, style: .relative) + Text(" ago"))
-                            .font(.caption2).foregroundStyle(.white.opacity(0.7))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
+                }
+                Section {
                     Text(settings.captureMode == .terrain
                          ? "Blue marks observed depth, not continuous ground coverage. Terrain keeps sparse samples, not a filled mesh. Save and start a new scan when capacity is reached."
                          : "Shape marks accepted depth observations, not guaranteed saved triangles. Photo marks saved, low-motion, locally exposed candidates—not final texture resolution.")
-                        .font(.caption2).foregroundStyle(.white.opacity(0.65)).fixedSize(horizontal: false, vertical: true)
-                }.padding(.top, 8)
-            }.font(.caption).tint(FieldStyle.cyan).padding(.horizontal, 16)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .fieldScreen().navigationTitle("Capture details").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { showingCaptureDetails = false }.fontWeight(.semibold)
+            }}
         }
-        .padding(.vertical, 12).fieldPanel().padding(.horizontal, 16)
+        .environment(\.colorScheme, .dark)
+        .presentationDragIndicator(.visible)
     }
 
     private var coverageLegend: some View {
-        let hasPhotos = settings.captureMode == .fast && settings.captureTexture
-        return VStack(spacing: 7) {
-            Picker("Live overlay", selection: $overlayMode) {
-                ForEach(CaptureOverlayMode.allCases.filter { hasPhotos || $0 == .shape || $0 == .off }, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }.pickerStyle(.segmented).accessibilityIdentifier("captureOverlayMode")
-                .onAppear { if !hasPhotos && overlayMode != .off { overlayMode = .shape } }
+        VStack(alignment: .leading, spacing: 10) {
             if overlayMode != .off {
-                if hasPhotos && overlayMode != .shape {
-                    ViewThatFits {
-                        HStack(spacing: 12) { photoLegendItems }
-                        VStack(alignment: .leading, spacing: 5) { photoLegendItems }
-                    }
+                if hasPhotoOverlay && overlayMode != .shape {
+                    photoLegendItems
                 } else if settings.captureMode == .terrain && settings.terrainAdaptive && settings.terrainDetailOverlay {
-                    ViewThatFits {
-                        HStack(spacing: 12) { terrainLegendItems }
-                        VStack(alignment: .leading, spacing: 5) { terrainLegendItems }
-                    }
+                    terrainLegendItems
                 } else {
                     Label("Blue · observed depth", systemImage: "cube.transparent.fill").foregroundStyle(.cyan)
                 }
@@ -303,7 +419,7 @@ struct ScannerView: View {
             Text("Blurred = out of range · \(String(format: "%.1f", settings.rangeValue)) m")
                 .foregroundStyle(.white.opacity(0.65))
         }
-        .font(.caption2.weight(.medium)).padding(.horizontal, 12)
+        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var terrainLegendItems: some View {
@@ -319,42 +435,54 @@ struct ScannerView: View {
 
     // MARK: - Top Status Bar
 
+    private var captureStatusTitle: String {
+        switch scanner.scanProgress {
+        case "Scanning", "Scanning... Move slowly around the area", "Scanning resumed...", "Scanning paused":
+            return scanner.isPaused ? "Paused" : "Capturing"
+        default:
+            // Keep capacity, interruption and memory-pressure states fully visible.
+            return scanner.scanProgress.replacingOccurrences(of: "tap Stop", with: "tap Finish")
+        }
+    }
+
     private var topStatusBar: some View {
-        HStack(alignment: .top, spacing: 12) {
+        HStack(alignment: .center, spacing: 12) {
             if !scanner.isScanning && !typeSize.isAccessibilitySize {
-                TinyScannerMark(size: 46)
+                TinyScannerMark(size: 36)
             }
-            VStack(alignment: .leading, spacing: 7) {
-                if scanner.isScanning || !typeSize.isAccessibilitySize {
-                HStack(spacing: 8) {
-                    if scanner.isScanning {
+            VStack(alignment: .leading, spacing: 3) {
+                if scanner.isScanning {
+                    HStack(spacing: 8) {
                         Circle().fill(scanner.isPaused ? Color.orange : FieldStyle.mint)
-                            .frame(width: 7, height: 7)
+                            .frame(width: 7, height: 7).accessibilityHidden(true)
+                        Text(captureStatusTitle)
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    Text(scanner.isScanning ? (scanner.isPaused ? "PAUSED" : "CAPTURING") : AppConstants.appName.uppercased())
-                        .font(.caption.weight(.bold)).tracking(2)
+                } else if !typeSize.isAccessibilitySize {
+                HStack(spacing: 8) {
+                    Text(AppConstants.appName.uppercased())
+                        .font(.caption2.weight(.bold)).tracking(1.6)
                 }.foregroundStyle(FieldStyle.cyan)
                 }
-                Text(scanner.isScanning ? scanner.scanProgress : "Ready to capture")
-                    .font(scanner.isScanning ? .subheadline.weight(.medium) : (typeSize.isAccessibilitySize ? .headline : .title2.weight(.semibold)))
-                    .foregroundStyle(.white)
+                if !scanner.isScanning {
+                    Text("Ready to capture").font(.headline).foregroundStyle(.white)
+                }
             }
             Spacer(minLength: 0)
+            if scanner.isScanning && !typeSize.isAccessibilitySize {
+                Label(settings.captureMode.shortName, systemImage: settings.captureMode.icon)
+                    .font(.caption.weight(.medium)).foregroundStyle(.white.opacity(0.72))
+            }
             #if targetEnvironment(simulator)
             if !typeSize.isAccessibilitySize {
             Text("SIM").font(.caption2.weight(.bold))
                 .padding(8).background(.white.opacity(0.12), in: Capsule()).foregroundStyle(.white)
             }
-            #else
-            if scanner.isScanning {
-                Button { overlayMode = overlayMode == .off ? (settings.captureMode == .fast && settings.captureTexture ? .combined : .shape) : .off } label: {
-                    FieldIcon(symbol: "square.grid.3x3", selected: overlayMode != .off)
-                }
-                .accessibilityLabel(overlayMode == .off ? "Show capture overlay" : "Hide capture overlay")
-            }
             #endif
         }
-        .padding(18).fieldPanel().padding(.horizontal, 16).padding(.top, 8)
+        .padding(.horizontal, 16).padding(.vertical, scanner.isScanning ? 10 : 12)
+        .fieldPanel().padding(.horizontal, 16).padding(.top, 8)
     }
 
     @ViewBuilder private var captureCounts: some View {
@@ -367,16 +495,23 @@ struct ScannerView: View {
         if usesPhotos { Label("\(scanner.highResFrameCount) photos", systemImage: "photo.stack") }
     }
 
-    private func trackingBanner(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill")
-            .font(.caption)
-            .fontWeight(.semibold)
-            .foregroundColor(.black)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(Color.yellow))
-            .padding(.top, 6)
-            .transition(.opacity)
+    private func captureNotice(_ title: String, detail: String, symbol: String, warning: Bool) -> some View {
+        Button { showingCaptureDetails = true } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                Image(systemName: symbol).foregroundStyle(warning ? Color.orange : FieldStyle.cyan)
+                Text(title).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right").font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+            .font(.caption.weight(.medium)).foregroundStyle(.white)
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .frame(minHeight: 44)
+            .background(FieldStyle.ink.opacity(0.94), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).stroke((warning ? Color.orange : FieldStyle.cyan).opacity(0.4), lineWidth: 1))
+        }
+        .buttonStyle(.plain).accessibilityLabel(detail)
+        .accessibilityHint("Opens capture details")
     }
 
     private var usesPhotos: Bool {
@@ -435,36 +570,35 @@ struct ScannerView: View {
     }
 
     private var prescanControls: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Capture mode").font(.headline)
-                Spacer()
-                Image(systemName: settings.captureMode.icon).foregroundStyle(FieldStyle.cyan)
-            }
-            LazyVGrid(columns: typeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 120), spacing: 8)], spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("CAPTURE MODE").font(.caption2.weight(.semibold)).tracking(1.3)
+                .foregroundStyle(.white.opacity(0.6))
+            Menu {
                 ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
                     let unavailable = mode == .highQuality && !highQualitySupported
-                    let selected = settings.captureMode == mode
                     Button {
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { settings.captureMode = mode }
                     } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: mode.icon).font(.system(size: 18))
-                            Text(mode.shortName).font(.subheadline.weight(.semibold))
-                            Spacer(minLength: 0)
-                            if selected { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
-                        }
-                        .padding(.horizontal, 12).frame(minHeight: 48)
-                        .foregroundStyle(selected ? FieldStyle.ink : .white)
-                        .background(selected ? FieldStyle.cyan : .white.opacity(0.08), in: RoundedRectangle(cornerRadius: 13))
-                        .overlay(RoundedRectangle(cornerRadius: 13).stroke(selected ? Color.clear : .white.opacity(0.10), lineWidth: 1))
-                        .opacity(unavailable ? 0.4 : 1)
+                        Label(mode.rawValue, systemImage: settings.captureMode == mode ? "checkmark" : mode.icon)
                     }
-                    .buttonStyle(.plain).disabled(unavailable)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .disabled(unavailable)
+                    .accessibilityAddTraits(settings.captureMode == mode ? .isSelected : [])
                     .accessibilityHint(unavailable ? "Not supported on this device" : mode.description)
                 }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: settings.captureMode.icon)
+                        .font(.title3).foregroundStyle(FieldStyle.cyan)
+                    Text(settings.captureMode.rawValue).font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold))
+                        .foregroundStyle(FieldStyle.cyan)
+                }
+                .frame(minHeight: 44).contentShape(Rectangle())
             }
+            .accessibilityLabel("Capture mode").accessibilityValue(settings.captureMode.rawValue)
+            .accessibilityIdentifier("captureModeMenu")
             Text(settings.captureMode.description).font(.caption).foregroundStyle(.white.opacity(0.75))
                 .fixedSize(horizontal: false, vertical: true)
             Divider().overlay(.white.opacity(0.12))
@@ -483,7 +617,7 @@ struct ScannerView: View {
                 }.frame(minHeight: 48).contentShape(Rectangle())
             }.buttonStyle(.plain)
         }
-        .foregroundStyle(.white).padding(18).fieldPanel().padding(.horizontal, 16)
+        .foregroundStyle(.white).padding(16).fieldPanel().padding(.horizontal, 16)
     }
 
     private var captureSettingsSheet: some View {
@@ -570,36 +704,6 @@ struct ScannerView: View {
         .presentationDragIndicator(.visible)
     }
 
-    // MARK: - Scanning Info Bar
-
-    private var scanningInfoBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-        HStack(spacing: 10) {
-            chip(settings.captureMode.shortName, icon: settings.captureMode.icon, color: FieldStyle.cyan)
-            chip(String(format: "%.1f m", settings.rangeValue), icon: "scope", color: .cyan)
-            if settings.captureMode.usesMeshMode && settings.meshMode != .free {
-                chip(settings.meshMode.rawValue, icon: settings.meshMode.icon, color: .purple)
-            }
-            if usesPhotos {
-                chip("\(scanner.highResFrameCount)", icon: "photo.stack",
-                     color: scanner.photoLimitReached ? .orange : .green)
-            }
-        }
-        .padding(.horizontal, 20)
-        }.fixedSize(horizontal: false, vertical: true).padding(.bottom, 8)
-    }
-
-    private func chip(_ text: String, icon: String, color: Color) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon).font(.caption2)
-            Text(text).font(.caption2).fontWeight(.medium)
-        }
-        .foregroundColor(color)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(color.opacity(0.2)))
-    }
-
     // MARK: - Bottom Controls
 
     private var bottomControls: some View {
@@ -609,31 +713,33 @@ struct ScannerView: View {
                     if scanner.isPaused { scanner.resumeScanning() } else { scanner.pauseScanning() }
                 } label: {
                     controlLabel(scanner.isPaused ? "Resume" : "Pause",
-                                 icon: scanner.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                                 icon: scanner.isPaused ? "play.fill" : "pause.fill")
                 }
-                .frame(maxWidth: .infinity)
+                .accessibilityLabel(scanner.isPaused ? "Resume scan" : "Pause scan")
 
                 Button {
                     stopAndPrepareSave()
                 } label: {
-                    VStack(spacing: 4) {
-                        ZStack {
-                            Circle().fill(Color.red).frame(width: 64, height: 64)
-                            RoundedRectangle(cornerRadius: 6).fill(Color.white).frame(width: 24, height: 24)
-                        }
-                        Text("Finish").font(.subheadline.weight(.semibold))
-                            .lineLimit(1).minimumScaleFactor(0.65)
+                    HStack(spacing: 10) {
+                        Image(systemName: "stop.fill").font(.body.weight(.semibold))
+                        Text("Finish").font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .foregroundColor(.white)
+                    .foregroundStyle(.white).padding(.horizontal, 18)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: 18))
                 }
                 .frame(maxWidth: .infinity)
+                .accessibilityLabel("Finish scan")
+                .accessibilityHint("Review and save this capture")
 
                 Button {
                     showingResetConfirmation = true
                 } label: {
-                    controlLabel("Reset", icon: "arrow.counterclockwise.circle.fill")
+                    controlLabel("Reset", icon: "arrow.counterclockwise")
                 }
-                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Reset capture")
+                .accessibilityHint("Asks before discarding this capture")
             } else {
                 Button {
                     guard activeDraft == nil else { showingSaveDialog = true; return }
@@ -689,8 +795,9 @@ struct ScannerView: View {
             }
         }
         .disabled(scanner.isFinalizing || isPreparingMesh || isSaving)
-        .padding(.top, 12)
-        .padding(.bottom, 12)
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
         .padding(.horizontal, AppConstants.Layout.padding)
         .frame(maxWidth: .infinity)
         .background(
@@ -701,12 +808,14 @@ struct ScannerView: View {
 
     private func controlLabel(_ title: String, icon: String) -> some View {
         VStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 36))
-            Text(title).font(.caption.weight(.medium))
-                .lineLimit(1).minimumScaleFactor(0.65)
+            Image(systemName: icon).font(.system(size: 22, weight: .semibold))
+                .frame(width: 48, height: 44)
+                .background(FieldStyle.panel, in: RoundedRectangle(cornerRadius: 13))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(.white.opacity(0.15), lineWidth: 1))
+            if !typeSize.isAccessibilitySize { Text(title).font(.caption.weight(.medium)) }
         }
         .foregroundColor(.white)
-        .frame(minWidth: 64, minHeight: 64)
+        .frame(minWidth: 52, minHeight: 56)
     }
 
     // MARK: - LiDAR Unavailable

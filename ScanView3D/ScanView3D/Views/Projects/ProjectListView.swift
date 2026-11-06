@@ -106,7 +106,7 @@ struct ProjectListView: View {
             VStack(spacing: 20) {
                 libraryHero
                 FieldEmptyState(icon: "folder.badge.plus", title: "A place for every capture",
-                                message: "Group your scans by site, object, or room. Everything stays on this device.")
+                                message: "Create a project for a site, room or object. Keep related captures together as your library grows.")
                 VStack(spacing: 10) {
                     Button { showingNewProject = true } label: {
                         Label("Create your first project", systemImage: "plus")
@@ -122,29 +122,40 @@ struct ProjectListView: View {
     }
 
     private var libraryHero: some View {
-        FieldHero(eyebrow: AppConstants.brandName, title: typeSize.isAccessibilitySize ? "Your projects" : "Spaces, captured.",
-                  subtitle: "Your sites, rooms and objects. In detail.", icon: "square.stack.3d.up")
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                if !typeSize.isAccessibilitySize { TinyScannerMark(size: 42) }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your projects").font(.title2.weight(.semibold)).tracking(-0.4)
+                    if !typeSize.isAccessibilitySize {
+                        Text("Sites, rooms and objects. Organised.").font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            if !storageManager.projects.isEmpty {
+                let count = storageManager.projects.reduce(0) { $0 + $1.scanCount }
+                Text("\(storageManager.projects.count) project\(storageManager.projects.count == 1 ? "" : "s") · \(count) scan\(count == 1 ? "" : "s")")
+                    .font(.subheadline.weight(.medium)).monospacedDigit()
+                    .foregroundStyle(FieldStyle.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20).fieldCard()
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Project List
 
     private var projectList: some View {
         List {
+            if searchText.isEmpty {
             Section {
                 libraryHero.listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-                if typeSize.isAccessibilitySize {
-                    Text("\(storageManager.projects.count) projects · \(storageManager.projects.reduce(0) { $0 + $1.scanCount }) scans · On device")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true).padding(.vertical, 8)
-                } else {
-                HStack(spacing: 16) {
-                    StatItem(label: "Projects", value: "\(storageManager.projects.count)", icon: "folder")
-                    StatItem(label: "Scans", value: "\(storageManager.projects.reduce(0) { $0 + $1.scanCount })", icon: "cube")
-                    StatItem(label: "Storage", value: "On device", icon: "iphone")
-                }.padding(.vertical, 8)
-                }
             }.listRowSeparator(.hidden)
-            Section("Recently updated") {
+            }
+            Section(searchText.isEmpty ? "Recently updated" : "Search results") {
             if sortedProjects.isEmpty {
                 FieldEmptyState(icon: "magnifyingglass", title: "No matching projects", message: "Try another name or clear your search.")
             }
@@ -230,49 +241,28 @@ struct ProjectRow: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Thumbnail or icon
+        HStack(alignment: .center, spacing: 14) {
             if !typeSize.isAccessibilitySize {
-            FieldThumbnail(data: project.thumbnailData, icon: "square.stack.3d.up")
-                .frame(width: 68, height: 76)
+                FieldThumbnail(data: project.thumbnailData, icon: "folder")
+                    .frame(width: 70, height: 70)
             }
-
-            // Project info
             VStack(alignment: .leading, spacing: 7) {
                 Text(project.name)
                     .font(.headline)
                     .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) { projectMetadata }
-                    VStack(alignment: .leading, spacing: 4) { projectMetadata }
-                }
-
-                Text(project.modifiedAt.relativeString)
+                Text("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")" +
+                     (project.totalFileSize > 0 ? " · \(project.formattedTotalSize)" : ""))
+                    .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Updated \(project.modifiedAt.formatted(date: .abbreviated, time: .omitted))")
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
             Spacer(minLength: 0)
-
         }
-        .padding(.vertical, 10)
-    }
-
-    @ViewBuilder private var projectMetadata: some View {
-                    if typeSize.isAccessibilitySize {
-                        Text("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                    Label("\(project.scanCount) scan\(project.scanCount == 1 ? "" : "s")", systemImage: "viewfinder")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    }
-
-                    if project.totalFileSize > 0 {
-                        Text(project.formattedTotalSize)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+        .padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
     }
 }

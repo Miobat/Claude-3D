@@ -22,11 +22,10 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
-                    FieldHero(eyebrow: AppConstants.brandName, title: "Your workspace.",
-                              subtitle: "Preferences for the way you capture.", icon: "slider.horizontal.3")
+                    brandHeader
                         .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
                 }
-                Section("Appearance") {
+                Section("Preferences") {
                     Menu {
                         Picker("Color scheme", selection: $appearance) {
                             Text("System").tag("system")
@@ -37,9 +36,6 @@ struct SettingsView: View {
                         preferenceLabel("Color scheme", value: appearance.capitalized, symbol: "circle.lefthalf.filled")
                     }
                     .accessibilityLabel("Color scheme").accessibilityValue(appearance.capitalized)
-                }.listRowBackground(FieldStyle.surface)
-                // Viewer settings
-                Section("Viewer") {
                     Menu {
                         Picker("Measurement unit", selection: $measurementUnit) {
                             ForEach(ScanSettings.MeasurementUnit.allCases, id: \.rawValue) { unit in
@@ -51,7 +47,14 @@ struct SettingsView: View {
                     }
                     .accessibilityLabel("Measurement unit").accessibilityValue(measurementUnit)
 
-                    Toggle("Show grid by default", isOn: $showGridByDefault)
+                    Toggle(isOn: $showGridByDefault) {
+                        HStack(spacing: 12) {
+                            preferenceIcon("square.grid.3x3")
+                            Text("Show grid by default")
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }.listRowBackground(FieldStyle.surface)
 
                 // Storage
@@ -67,43 +70,36 @@ struct SettingsView: View {
                     NavigationLink {
                         DebugLogView()
                     } label: {
-                        HStack {
-                            Image(systemName: "ladybug.fill")
-                                .foregroundStyle(FieldStyle.accent)
-                            Text("Debug Log")
+                        HStack(spacing: 12) {
+                            preferenceIcon("waveform.path.ecg")
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Debug Log")
+                                Text("Review and share diagnostics")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
                             Spacer()
-                            Text("\(DebugLogger.shared.entries.count)")
-                                .foregroundColor(.secondary)
-                                .font(.subheadline)
                         }
+                        .padding(.vertical, 4)
                     }
                 }.listRowBackground(FieldStyle.surface)
 
                 // About
                 Section("About") {
-                    infoRow("App", value: AppConstants.appName)
-                    infoRow("By", value: AppConstants.companyName)
                     infoRow("Version", value: versionLabel)
 
-                    HStack {
-                        Text("LiDAR")
-                        Spacer()
-                        #if targetEnvironment(simulator)
-                        Label("Simulated", systemImage: "desktopcomputer")
-                            .foregroundColor(.orange)
-                            .font(.subheadline)
-                        #else
-                        if LiDARScanner.isLiDARAvailable {
-                            Label("Available", systemImage: "checkmark.circle.fill")
-                                .foregroundColor(.green)
-                                .font(.subheadline)
-                        } else {
-                            Label("Not Available", systemImage: "xmark.circle.fill")
-                                .foregroundColor(.red)
-                                .font(.subheadline)
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            Text("LiDAR")
+                            Spacer()
+                            lidarStatus
                         }
-                        #endif
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("LiDAR")
+                            lidarStatus
+                        }
                     }
+                    .accessibilityElement(children: .combine)
                 }.listRowBackground(FieldStyle.surface)
                 Section {
                     Label("Stored on this device", systemImage: "internaldrive")
@@ -133,19 +129,58 @@ struct SettingsView: View {
         }
     }
 
+    private var brandHeader: some View {
+        HStack(spacing: 14) {
+            if !typeSize.isAccessibilitySize { TinyScannerMark(size: 44) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(AppConstants.appName).font(.headline).foregroundStyle(.white)
+                Text("by \(AppConstants.companyName)")
+                    .font(.subheadline).foregroundStyle(.white.opacity(0.72))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(20)
+        .fieldPanel()
+        .accessibilityElement(children: .combine)
+    }
+
+    private var lidarStatus: some View {
+        Group {
+            #if targetEnvironment(simulator)
+            Label("Simulated", systemImage: "desktopcomputer")
+                .foregroundStyle(.orange)
+            #else
+            if LiDARScanner.isLiDARAvailable {
+                Label("Available", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            } else {
+                Label("Not available", systemImage: "xmark.circle.fill")
+                    .foregroundStyle(.red)
+            }
+            #endif
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private func preferenceIcon(_ symbol: String) -> some View {
+        if !typeSize.isAccessibilitySize {
+            Image(systemName: symbol).font(.body.weight(.medium))
+                .foregroundStyle(FieldStyle.accent)
+                .frame(width: 34, height: 34)
+                .background(FieldStyle.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                .accessibilityHidden(true)
+        }
+    }
+
     /// Stacked at accessibility sizes: neither the name nor its current value is squeezed.
     private func preferenceLabel(_ title: String, value: String, symbol: String) -> some View {
         HStack(spacing: 12) {
-            if !typeSize.isAccessibilitySize {
-                Image(systemName: symbol).font(.body.weight(.medium))
-                    .foregroundStyle(FieldStyle.accent)
-                    .frame(width: 36, height: 36)
-                    .background(FieldStyle.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                    .accessibilityHidden(true)
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title).foregroundStyle(.primary)
-                Text(value).font(.subheadline).foregroundStyle(FieldStyle.accent)
+            preferenceIcon(symbol)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).foregroundStyle(Color(uiColor: .label))
+                Text(value).font(.subheadline).foregroundStyle(Color(uiColor: .secondaryLabel))
             }
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
@@ -166,7 +201,7 @@ struct SettingsView: View {
             } else {
                 LabeledContent(title, value: value)
             }
-        }.accessibilityElement(children: .combine)
+        }.monospacedDigit().accessibilityElement(children: .combine)
     }
 
     private func calculateStorageUsage() {

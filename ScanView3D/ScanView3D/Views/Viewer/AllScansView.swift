@@ -21,20 +21,19 @@ struct AllScansView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if searchText.isEmpty {
-                        FieldHero(eyebrow: "Scan library", title: "A new perspective.",
-                                  subtitle: "Explore and measure your captures.", icon: "cube.transparent")
+                        librarySummary
                     }
-                    HStack {
-                        Text(searchText.isEmpty ? "Latest captures" : "Search results").font(.headline)
-                        Spacer()
-                        Text("\(allScans.count) scans").font(.subheadline).foregroundStyle(.secondary)
+                    if !searchText.isEmpty {
+                        Text("\(allScans.count) matching scan\(allScans.count == 1 ? "" : "s")")
+                            .font(.subheadline.weight(.medium)).foregroundStyle(.secondary)
                     }
                     if allScans.isEmpty {
                         FieldEmptyState(icon: searchText.isEmpty ? "viewfinder" : "magnifyingglass",
-                                        title: searchText.isEmpty ? "Your next perspective starts here" : "No matching scans",
-                                        message: searchText.isEmpty ? "Open Scan to capture something new, or import a model from Projects." : "Search by scan or project name.")
-                    } else if showsGrid {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 280 : 155), spacing: 14)], spacing: 14) {
+                                        title: searchText.isEmpty ? "Your capture library" : "No matching scans",
+                                        message: searchText.isEmpty ? "Capture from the Scan tab, or import a model from Projects. All your saved scans appear here." : "Try a scan name, a project name, or clear your search.")
+                            .fieldCard()
+                    } else if showsGrid && !typeSize.isAccessibilitySize {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 16)], spacing: 16) {
                             ForEach(allScans, id: \.scan.id) { item in
                                 NavigationLink {
                                     ModelViewerView(scan: item.scan, project: item.project)
@@ -48,10 +47,11 @@ struct AllScansView: View {
                                 NavigationLink {
                                     ModelViewerView(scan: item.scan, project: item.project)
                                 } label: {
-                                    VStack(alignment: .leading, spacing: 10) {
-                                        ScanRow(scan: item.scan)
+                                    VStack(alignment: .leading, spacing: 8) {
                                         Label(item.project.name, systemImage: "folder")
                                             .font(.caption).foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        ScanRow(scan: item.scan)
                                     }.padding(16).fieldCard()
                                 }.buttonStyle(.plain)
                             }
@@ -65,29 +65,52 @@ struct AllScansView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "Find a scan or project")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showsGrid.toggle() } label: {
-                        Image(systemName: showsGrid ? "list.bullet" : "square.grid.2x2")
+                if !typeSize.isAccessibilitySize {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { showsGrid.toggle() } label: {
+                            Image(systemName: showsGrid ? "list.bullet" : "square.grid.2x2")
+                        }
+                        .accessibilityLabel(showsGrid ? "Show scans as a list" : "Show scans as a grid")
                     }
-                    .accessibilityLabel(showsGrid ? "Show scans as a list" : "Show scans as a grid")
                 }
             }
         }
     }
 
+    private var librarySummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                if !typeSize.isAccessibilitySize {
+                    Image(systemName: "square.stack.3d.up")
+                        .font(.title3.weight(.medium)).foregroundStyle(FieldStyle.accent)
+                        .accessibilityHidden(true)
+                }
+                Text("Your captures").font(.title2.weight(.semibold)).tracking(-0.4)
+            }
+            Text("\(allScans.count) scan\(allScans.count == 1 ? "" : "s") · Newest first")
+                .font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
     private func scanCard(_ scan: Scan, project: Project) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            FieldThumbnail(data: scan.thumbnailData)
+            FieldThumbnail(data: scan.thumbnailData, icon: ScanLibraryKind.icon(for: scan))
                 .aspectRatio(1.2, contentMode: .fit)
                 .padding(8)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(ScanLibraryKind.title(for: scan).uppercased())
+                    .font(.caption2.weight(.semibold)).tracking(0.5).foregroundStyle(FieldStyle.accent)
                 Text(scan.name).font(.headline).foregroundStyle(.primary).lineLimit(2)
-                Text(project.name).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text(project.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Divider().overlay(FieldStyle.line).padding(.vertical, 3)
                 HStack(spacing: 5) {
                     Text((scan.fileName as NSString).pathExtension.uppercased())
-                        .font(.caption2.weight(.bold)).foregroundStyle(FieldStyle.accent)
+                        .font(.caption2.weight(.medium)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    Text(scan.formattedFileSize).font(.caption2).foregroundStyle(.secondary)
+                    Text(scan.formattedFileSize).font(.caption2).monospacedDigit().foregroundStyle(.secondary)
                 }
             }.padding(.horizontal, 14).padding(.top, 6).padding(.bottom, 16)
             Spacer(minLength: 0)
@@ -95,5 +118,6 @@ struct AllScansView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .fieldCard()
         .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens this scan in the 3D viewer")
     }
 }

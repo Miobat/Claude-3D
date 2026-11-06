@@ -42,11 +42,10 @@ struct ContentView: View {
         }
         .environmentObject(storageManager)
         .disabled(storageManager.isImporting)
+        .accessibilityHidden(storageManager.isImporting)
         .overlay {
             if storageManager.isImporting {
-                ProgressView("Checking and importing models…")
-                    .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-                    .accessibilityLabel("Checking and importing models. Please wait.")
+                ImportProgressOverlay()
             }
         }
         .tint(FieldStyle.accent)
@@ -67,5 +66,12 @@ struct ContentView: View {
         } message: {
             Text(storageManager.storageError ?? "The operation could not be saved.")
         }
+    }
+}
+
+/// The preview and actual import use the same presentation; no simulated progress.
+struct ImportProgressOverlay: View {
+    var body: some View {
+        FieldActivityOverlay(title: "Importing models", message: "Checking geometry and preparing your library. Large models can take a moment.")
     }
 }

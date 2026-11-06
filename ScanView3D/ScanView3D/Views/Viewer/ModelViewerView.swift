@@ -234,11 +234,11 @@ struct ModelViewerView: View {
                     if compact && activeTool == .measure {
                         HStack {
                             Spacer(minLength: 0)
-                            bottomToolbar(compact: true)
-                                .frame(width: min(360, geometry.size.width * 0.46))
+                            bottomToolbar(compact: true, availableHeight: geometry.size.height)
+                                .frame(width: min(400, geometry.size.width * 0.48))
                         }
                     } else {
-                        bottomToolbar(compact: compact)
+                        bottomToolbar(compact: compact, availableHeight: geometry.size.height)
                             .frame(width: geometry.size.width)
                     }
                 }
@@ -338,6 +338,19 @@ struct ModelViewerView: View {
             session.load(storageManager.loadMeasurements(for: scan, in: project))
             let store = storageManager, currentScan = scan, currentProject = project
             session.onSave = { list in try store.saveMeasurements(list, for: currentScan, in: currentProject) }
+            #if DEBUG && targetEnvironment(simulator)
+            if DesignPreview.screen == "measure-retry" {
+                activeTool = .measure
+                measuringObjects = false
+                session.tool = .distance
+                // Exercise the real retry UI without writing a preview record.
+                session.onSave = { _ in throw CocoaError(.fileWriteOutOfSpace) }
+                session.place(SnapResult(point: SIMD3<Float>(-0.5, 0, 0), kind: .surface,
+                                         normal: SIMD3<Float>(0, 1, 0)))
+                session.place(SnapResult(point: SIMD3<Float>(0.5, 0, 0), kind: .surface,
+                                         normal: SIMD3<Float>(0, 1, 0)))
+            }
+            #endif
         }
         .onChange(of: activeTool) { _, tool in
             if tool != .measure { objectPanelExpanded = false }
@@ -432,8 +445,25 @@ struct ModelViewerView: View {
     // MARK: - Measuring Panel
 
     private var measurePanel: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             // Tools
+            if typeSize.isAccessibilitySize {
+                Menu {
+                    ForEach(ScanMeasurement.Kind.allCases, id: \.self) { kind in
+                        Button { session.tool = kind } label: {
+                            Label(kind.rawValue, systemImage: kind.icon)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 10) {
+                        Label(session.tool.rawValue, systemImage: session.tool.icon)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                    .font(.caption.weight(.semibold)).foregroundStyle(FieldStyle.cyan)
+                    .frame(minHeight: 44).padding(.horizontal, 12)
+                }.accessibilityLabel("Measurement tool: \(session.tool.rawValue)")
+            } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(ScanMeasurement.Kind.allCases, id: \.self) { kind in
@@ -452,16 +482,18 @@ struct ModelViewerView: View {
                 }
                 .padding(.horizontal, 12)
             }.fixedSize(horizontal: false, vertical: true)
+            }
 
             Text(session.status)
                 .font(.caption)
                 .foregroundColor(session.message == nil ? .white : .yellow)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.leading)
                 .padding(.horizontal, 12)
-                .frame(minHeight: 30)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
 
             // Actions: Undo · Add point · Done · Snap
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 Button { session.undo() } label: {
                     Image(systemName: "arrow.uturn.backward").font(.title3).frame(minWidth: 44, minHeight: 44)
                 }
@@ -470,22 +502,22 @@ struct ModelViewerView: View {
 
                 Button { session.placeAtCrosshair() } label: {
                     ZStack {
-                        Circle().fill(FieldStyle.cyan).frame(width: 58, height: 58)
-                        Image(systemName: "plus").font(.system(size: 26, weight: .bold)).foregroundColor(FieldStyle.ink)
+                        RoundedRectangle(cornerRadius: 16).fill(FieldStyle.cyan).frame(width: 54, height: 48)
+                        Image(systemName: "plus").font(.system(size: 23, weight: .semibold)).foregroundColor(FieldStyle.ink)
                     }
                 }
                 .accessibilityLabel("Add point at crosshair")
 
-                if session.tool.autoCompleteCount == nil || session.pendingSave != nil {
-                    Button(session.pendingSave == nil ? "Done" : "Retry Save") { session.finish() }
-                        .font(.headline)
-                        .disabled(!session.canFinish)
+                if !typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil || session.pendingSave != nil {
+                    finishMeasurementButton
                 }
 
                 Button { session.snappingEnabled.toggle() } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: "scope").font(.system(size: 22))
-                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
+                    VStack(spacing: 3) {
+                        Image(systemName: "scope").font(.system(size: 20))
+                        if !typeSize.isAccessibilitySize {
+                            Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
+                        }
                     }
                     .frame(minWidth: 44, minHeight: 44)
                     .opacity(session.snappingEnabled ? 1 : 0.55)
@@ -494,6 +526,11 @@ struct ModelViewerView: View {
                 .accessibilityValue(session.snappingEnabled ? "On" : "Off")
             }
             .foregroundColor(.white)
+            .padding(.horizontal, 12)
+
+            if typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil || session.pendingSave != nil {
+                finishMeasurementButton.padding(.horizontal, 12)
+            }
 
             // Saved measurements (tap to select, then delete)
             if !session.measurements.isEmpty {
@@ -510,7 +547,7 @@ struct ModelViewerView: View {
                                         .fontWeight(.medium)
                                         .padding(.horizontal, 8)
                                         .frame(minHeight: 44)
-                                        .background(selected ? Color.orange : Color.black.opacity(0.7))
+                                        .background(selected ? FieldStyle.cyan : Color.white.opacity(0.06))
                                         .foregroundColor(selected ? FieldStyle.ink : .white)
                                         .cornerRadius(8)
                                 }
@@ -532,9 +569,24 @@ struct ModelViewerView: View {
                 .padding(.horizontal, 12)
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
         .fieldPanel()
         .padding(.horizontal, 8)
+    }
+
+    private var finishMeasurementButton: some View {
+        Button { session.finish() } label: {
+            Label(session.pendingSave == nil ? "Done" : "Retry Save",
+                  systemImage: session.pendingSave == nil ? "checkmark" : "arrow.clockwise")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12).frame(minHeight: 44)
+                .frame(maxWidth: typeSize.isAccessibilitySize ? .infinity : nil)
+                .foregroundStyle(FieldStyle.ink)
+                .background(FieldStyle.cyan, in: RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(!session.canFinish)
+        .opacity(session.canFinish ? 1 : 0.45)
+        .accessibilityLabel(session.pendingSave == nil ? "Finish measurement" : "Retry saving measurement")
     }
 
     // MARK: - Processing Overlay
@@ -653,16 +705,16 @@ struct ModelViewerView: View {
 
     // MARK: - Bottom Toolbar
 
-    private func bottomToolbar(compact: Bool) -> some View {
+    private func bottomToolbar(compact: Bool, availableHeight: CGFloat) -> some View {
         VStack(spacing: 8) {
             if activeTool == .measure {
+                Picker("Measurement type", selection: $measuringObjects) {
+                    Text("Manual").tag(false)
+                    Text("Object").tag(true)
+                }.pickerStyle(.segmented).padding(.horizontal, 12)
+                    .accessibilityIdentifier("measurementType")
                 ScrollView {
                     VStack(spacing: 8) {
-                        Picker("Measurement type", selection: $measuringObjects) {
-                            Text("Manual").tag(false)
-                            Text("Object").tag(true)
-                        }.pickerStyle(.segmented).padding(.horizontal, 12)
-                            .accessibilityIdentifier("measurementType")
                         if measuringObjects { ObjectMeasurementPanel(session: objects, unit: measurementUnit, expanded: $objectPanelExpanded) }
                         else { measurePanel }
                     }.background {
@@ -674,12 +726,17 @@ struct ModelViewerView: View {
                 // Compact by default; full correction/help tools are opt-in.
                 // Keep the scroll viewport explicit so content measurement
                 // cannot grow the panel over the model or clip its controls.
-                .frame(height: measuringObjects ? ObjectPanelLayout.height(expanded: objectPanelExpanded,
-                    landscape: compact, accessibility: typeSize.isAccessibilitySize) : min(measurePanelHeight, compact ? 230 : 290))
+                .frame(height: min(measuringObjects ? ObjectPanelLayout.height(expanded: objectPanelExpanded,
+                    landscape: compact, accessibility: typeSize.isAccessibilitySize) - 36 : measurePanelHeight,
+                    compact ? max(100, availableHeight - (typeSize.isAccessibilitySize ? 218 : 132)) : 290))
                 .onPreferenceChange(MeasurePanelHeightKey.self) { measurePanelHeight = max(44, $0) }
             }
 
             if activeTool != .measure && !compact {
+                if typeSize.isAccessibilitySize {
+                    renderingMenu
+                        .padding(.horizontal, 12)
+                } else {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(VisualizationMode.allCases, id: \.self) { mode in
@@ -687,26 +744,20 @@ struct ModelViewerView: View {
                                 vizMode = mode
                                 applyVisualizationMode(mode)
                             } label: {
-                                Text(mode.rawValue).font(.subheadline.weight(.medium))
-                                    .padding(.horizontal, 16).frame(minHeight: 44)
+                                Text(mode.rawValue).font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 14).frame(minHeight: 44)
                                     .foregroundStyle(vizMode == mode ? FieldStyle.ink : .white)
                                     .background(vizMode == mode ? FieldStyle.cyan : Color.clear,
                                                 in: RoundedRectangle(cornerRadius: 13))
                             }.buttonStyle(.plain)
                             .accessibilityAddTraits(vizMode == mode ? .isSelected : [])
                         }
-                    }.padding(6)
+                    }.padding(4)
                 }.fixedSize(horizontal: false, vertical: true).fieldPanel().padding(.horizontal, 12)
-            }
-
-            Group {
-                if typeSize.isAccessibilitySize {
-                    ScrollView(.horizontal) { actionDock(compact: compact) }
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    actionDock(compact: compact)
                 }
             }
+
+            actionDock(compact: compact)
             .padding(.horizontal, 12).padding(.bottom, 12)
         }
         .frame(maxWidth: 660).frame(maxWidth: .infinity)
@@ -743,17 +794,45 @@ struct ModelViewerView: View {
     }
 
     private func actionDock(compact: Bool) -> some View {
-        HStack(spacing: 8) {
-            if compact && activeTool != .measure {
-                Menu {
-                    ForEach(VisualizationMode.allCases, id: \.self) { mode in
-                        Button(mode.rawValue) { vizMode = mode; applyVisualizationMode(mode) }
+        VStack(spacing: 6) {
+            if typeSize.isAccessibilitySize {
+                if compact && activeTool != .measure { renderingMenu }
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                    mainViewerActions
+                }
+            } else {
+                HStack(spacing: 4) {
+                    if compact && activeTool != .measure {
+                        Menu { renderingChoices } label: { viewerAction(vizMode.rawValue, icon: "cube") }
+                            .accessibilityLabel("Rendering style: \(vizMode.rawValue)")
                     }
-                } label: { viewerAction(vizMode.rawValue, icon: "cube") }
-                .accessibilityLabel("Rendering style")
+                    mainViewerActions
+                }
             }
-            mainViewerActions
-        }.buttonStyle(.plain)
+        }
+        .padding(4).fieldPanel().buttonStyle(.plain)
+    }
+
+    private var renderingMenu: some View {
+        Menu { renderingChoices } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "cube").accessibilityHidden(true)
+                Text(vizMode.rawValue).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down").font(.caption2).accessibilityHidden(true)
+            }
+            .font(.caption.weight(.semibold)).foregroundStyle(.white)
+            .padding(.horizontal, 14).frame(minHeight: 48).padding(.vertical, 4).fieldPanel()
+        }.accessibilityLabel("Rendering style: \(vizMode.rawValue)")
+    }
+
+    @ViewBuilder private var renderingChoices: some View {
+        ForEach(VisualizationMode.allCases, id: \.self) { mode in
+            Button { vizMode = mode; applyVisualizationMode(mode) } label: {
+                if vizMode == mode { Label(mode.rawValue, systemImage: "checkmark") }
+                else { Text(mode.rawValue) }
+            }
+        }
     }
 
     @ViewBuilder private var mainViewerActions: some View {
@@ -777,25 +856,32 @@ struct ModelViewerView: View {
                 .opacity(scan.hasKnownScale ? 1 : 0.45)
                 .accessibilityHint(scan.hasKnownScale ? "Measure distances and areas" : "Requires verified model scale")
                 Button { exportAndShare() } label: {
-                    viewerAction("Share", icon: "square.and.arrow.up", selected: true)
+                    viewerAction("Share", icon: "square.and.arrow.up")
                 }
     }
 
     private func viewerAction(_ title: String, icon: String, selected: Bool = false) -> some View {
-        VStack(spacing: 6) {
-            if !typeSize.isAccessibilitySize {
+        Group {
+            if typeSize.isAccessibilitySize {
+                Text(title).font(.caption.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity)
+            } else {
+                VStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 18, weight: .medium))
+                    Text(title).font(.caption2.weight(.medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                }.frame(maxWidth: .infinity)
             }
-            Text(title).font(.caption.weight(.semibold))
-                .fixedSize(horizontal: typeSize.isAccessibilitySize, vertical: true)
         }
-        .padding(.horizontal, typeSize.isAccessibilitySize ? 18 : 4)
-        .frame(minWidth: typeSize.isAccessibilitySize ? 150 : 0, maxWidth: .infinity)
-        .frame(minHeight: 64)
-        .foregroundStyle(selected ? FieldStyle.ink : .white)
-        .background(selected ? FieldStyle.cyan : FieldStyle.panel,
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.12), lineWidth: 1))
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 6).padding(.vertical, 7)
+        .frame(minHeight: 52)
+        .foregroundStyle(selected ? FieldStyle.ink : .white.opacity(0.85))
+        .background(selected ? FieldStyle.cyan : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 14))
+        .accessibilityElement(children: .ignore).accessibilityLabel(title)
     }
 
     private func stopNavigationInputs() {

@@ -30,6 +30,9 @@ done
 cp "$CONTAINER/Documents/navigation-checks.json" "$OUT/navigation-checks.json"
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r); assert r["checks"] >= 290 and not r["failures"], "Native storage / export / capture / navigation / recovery / adaptive terrain / measurement / branding checks failed"' "$OUT/navigation-checks.json"
 SCREENS="projects settings scanner capture-active capture-settings viewer measure object object-wall object-rejected object-expanded quality retention terrain-ready terrain-settings terrain-active adaptive-settings adaptive-active"
+if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-refinement" || "${GITHUB_HEAD_REF:-}" == "codex/design-refinement" ]]; then
+  SCREENS="$SCREENS library project empty importing capture-details capture-warning measure-retry"
+fi
 if [[ "${GITHUB_REF:-}" == "refs/heads/codex/tinyscanner-visual-identity" || "${GITHUB_HEAD_REF:-}" == "codex/tinyscanner-visual-identity" ]]; then
   SCREENS="$SCREENS library project empty"
 fi
@@ -58,6 +61,16 @@ capture object-rejected object-rejected-large-text
 capture object-expanded object-expanded-large-text
 capture retention retention-large-text
 capture quality quality-large-text
+if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-refinement" || "${GITHUB_HEAD_REF:-}" == "codex/design-refinement" ]]; then
+  capture library library-large-text
+  capture project project-large-text
+  capture empty empty-large-text
+  capture importing importing-large-text
+  capture capture-details capture-details-large-text
+  capture capture-warning capture-warning-large-text
+  capture measure measure-large-text
+  capture measure-retry measure-retry-large-text
+fi
 xcrun simctl ui "$DEVICE" content_size large
 capture joysticks viewer-joysticks
 capture walk viewer-walk-selection
@@ -73,4 +86,8 @@ capture object-wall object-wall-landscape --landscape
 capture object-expanded object-expanded-landscape --landscape
 capture quality quality-landscape --landscape
 capture joysticks viewer-joysticks-landscape --landscape
+if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-refinement" || "${GITHUB_HEAD_REF:-}" == "codex/design-refinement" ]]; then
+  capture importing importing-landscape --landscape
+  capture capture-warning capture-warning-landscape --landscape
+fi
 xcrun simctl shutdown "$DEVICE"

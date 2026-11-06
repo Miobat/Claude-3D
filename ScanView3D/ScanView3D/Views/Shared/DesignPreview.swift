@@ -1433,14 +1433,17 @@ struct DesignPreviewRoot: View {
     }
     var body: some View {
         Group {
-            if ["viewer", "measure", "object", "object-wall", "object-rejected", "object-expanded", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
+            if ["viewer", "measure", "measure-retry", "object", "object-wall", "object-rejected", "object-expanded", "walk", "joysticks", "quality", "retention", "navigation-tests"].contains(screen), let project = store.projects.first, let scan = project.scans.first {
                 NavigationStack { ModelViewerView(scan: scan, project: project) }
             } else if screen == "project", let project = store.projects.first {
                 NavigationStack { ProjectDetailView(project: project) }
             } else {
-                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings", "terrain-ready", "terrain-settings", "terrain-active", "adaptive-settings", "adaptive-active"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
+                ContentView(storageManager: store, initialTab: ["scanner", "capture-active", "capture-settings", "capture-details", "capture-warning", "terrain-ready", "terrain-settings", "terrain-active", "adaptive-settings", "adaptive-active"].contains(screen) ? 0 : screen == "library" ? 2 : screen == "settings" ? 3 : 1)
             }
         }.environmentObject(store)
+        .overlay {
+            if screen == "importing" { ImportProgressOverlay() }
+        }
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }

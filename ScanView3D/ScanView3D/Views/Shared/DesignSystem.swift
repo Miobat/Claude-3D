@@ -216,3 +216,38 @@ struct FieldIcon: View {
             .overlay(RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.12), lineWidth: 1))
     }
 }
+
+/// An explicit, readable busy state above a temporarily unavailable workspace.
+struct FieldActivityOverlay: View {
+    let title: String
+    let message: String
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.32).ignoresSafeArea()
+            ViewThatFits(in: .vertical) {
+                activityCard
+                ScrollView { activityCard.frame(maxWidth: .infinity) }
+            }
+        }
+    }
+
+    private var activityCard: some View {
+        VStack(spacing: 16) {
+            ProgressView().controlSize(.large).tint(FieldStyle.accent)
+            VStack(spacing: 8) {
+                Text(title).font(.headline)
+                Text(message).font(.subheadline).foregroundStyle(.secondary)
+            }
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(maxWidth: 340)
+        .fieldCard()
+        .shadow(color: .black.opacity(0.12), radius: 24, y: 8)
+        .padding(24)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isModal)
+    }
+}

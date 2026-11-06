@@ -7,6 +7,17 @@ web prototype and are not part of the app.)
 
 ---
 
+## Design refinement (2026-11-07, `codex/design-refinement`)
+
+Based on verified reliability branch `4879d21`. See
+`ScanView3D/DESIGN_REFINEMENT.md` for the UI changes and acceptance notes.
+This pass reduces scanner/viewer panel density, improves project/library and
+Settings hierarchy, and adds explicit busy/error-state previews. Capture/storage
+algorithms and formats are unchanged. Final validation is pending; this work
+does not publish a TestFlight build.
+
+---
+
 ## Commercial reliability audit (2026-11-06, `codex/commercial-readiness`)
 
 Based on published adaptive terrain `d2e9793`, retaining all prior Codex/Claude

@@ -5,12 +5,10 @@ struct ProjectDetailView: View {
     let project: Project
     @EnvironmentObject var storageManager: StorageManager
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.horizontalSizeClass) private var widthClass
     @State private var showingImporter = false
     @State private var renamingScan: Scan?
     @State private var renameName = ""
     @State private var movingScan: Scan?
-    @State private var showingExportProject = false
     @State private var sortOrder: SortOrder = .dateNewest
     @State private var scansToDelete: [Scan] = []
 
@@ -148,7 +146,7 @@ struct ProjectDetailView: View {
         ScrollView {
             VStack(spacing: 20) {
                 FieldEmptyState(icon: "viewfinder", title: "Ready for your first scan",
-                                message: "Capture from the Scan tab, then choose this project when saving. Already have a model? Import it below.")
+                                message: "Open Scan to capture a room, object or terrain. Choose this project when saving, or bring in an existing model below.")
                 Button { showingImporter = true } label: {
                     Label("Import OBJ or PLY", systemImage: "square.and.arrow.down")
                 }.buttonStyle(FieldButtonStyle(prominent: true))
@@ -160,22 +158,24 @@ struct ProjectDetailView: View {
 
     private var scanList: some View {
         List {
-            // Project stats
             Section {
-                FieldHero(eyebrow: "Project", title: liveProject.name,
-                          subtitle: "Updated \(liveProject.modifiedAt.relativeString)", icon: "folder")
-                    .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: typeSize.isAccessibilitySize ? 1 : (widthClass == .regular ? 4 : 2)), spacing: 20) {
-                    StatItem(label: "Scans", value: "\(liveProject.scanCount)", icon: "viewfinder")
-                    StatItem(label: "Vertices", value: formatCompact(liveProject.totalVertices), icon: "circle.fill")
-                    StatItem(label: "Faces", value: formatCompact(liveProject.totalFaces), icon: "triangle.fill")
-                    StatItem(label: "Size", value: liveProject.formattedTotalSize, icon: "internaldrive")
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("Project overview", systemImage: "folder")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(FieldStyle.accent)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: typeSize.isAccessibilitySize ? 1 : 2), alignment: .leading, spacing: 16) {
+                        StatItem(label: "Captures", value: "\(liveProject.scanCount)")
+                        StatItem(label: "Model files", value: liveProject.formattedTotalSize)
+                    }
+                    Divider().overlay(FieldStyle.line)
+                    Text("\(formatCompact(liveProject.totalVertices)) vertices · \(formatCompact(liveProject.totalFaces)) faces")
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.vertical, 10)
+                .padding(20).fieldCard()
+                .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
             }.listRowSeparator(.hidden)
 
-            // Scans
-            Section("Scans (\(liveProject.scanCount))") {
+            Section {
                 ForEach(sortedScans) { scan in
                     NavigationLink(destination: ModelViewerView(scan: scan, project: liveProject)) {
                         ScanRow(scan: scan)
@@ -219,8 +219,33 @@ struct ProjectDetailView: View {
                 .onDelete { indexSet in
                     scansToDelete = indexSet.map { sortedScans[$0] }
                 }
+            } header: {
+                Group {
+                    if typeSize.isAccessibilitySize {
+                        VStack(alignment: .leading, spacing: 8) { Text("Captures"); sortMenu }
+                    } else {
+                        HStack { Text("Captures"); Spacer(); sortMenu }
+                    }
+                }
+                .textCase(nil)
             }
+            .listRowBackground(FieldStyle.surface)
         }
+        .listStyle(.insetGrouped)
+        .contentMargins(.top, 8)
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort scans", selection: $sortOrder) {
+                ForEach(SortOrder.allCases, id: \.self) { order in Text(order.rawValue).tag(order) }
+            }
+        } label: {
+            Label(sortOrder.rawValue, systemImage: "arrow.up.arrow.down")
+                .font(.caption.weight(.medium)).foregroundStyle(FieldStyle.accent)
+        }
+        .accessibilityLabel("Sort scans")
+        .accessibilityValue(sortOrder.rawValue)
     }
 
     // MARK: - Actions
@@ -258,52 +283,39 @@ struct ProjectDetailView: View {
 
 struct ScanRow: View {
     let scan: Scan
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(spacing: 12) {
-            FieldThumbnail(data: scan.thumbnailData)
-                .frame(width: 64, height: 76)
-
-            // Info
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .center, spacing: 14) {
+            if !typeSize.isAccessibilitySize {
+                FieldThumbnail(data: scan.thumbnailData, icon: ScanLibraryKind.icon(for: scan))
+                    .frame(width: 70, height: 82)
+            }
+            VStack(alignment: .leading, spacing: 8) {
                 Text(scan.name)
                     .font(.headline)
-                    .lineLimit(2)
-
-                HStack(spacing: 6) {
-                    if let dims = scan.shortDimensions {
-                        Text(dims)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.12))
-                            .cornerRadius(3)
-                    }
-
-                    Text(scan.formattedFileSize)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                    .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
+                    .foregroundStyle(.primary)
+                Text("\(ScanLibraryKind.title(for: scan)) · \(scan.formattedFileSize)")
+                    .font(.caption.weight(.medium)).foregroundStyle(FieldStyle.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !scan.hasKnownScale {
+                    Label("Scale unverified", systemImage: "ruler")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if let dims = scan.shortDimensions {
+                    Text(dims).font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                HStack(spacing: 8) {
-                    if scan.vertexCount > 0 {
-                        Label(formatCompactInline(scan.vertexCount) + " verts", systemImage: "circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    if scan.faceCount > 0 {
-                        Label(formatCompactInline(scan.faceCount) + " faces", systemImage: "triangle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+                if scan.vertexCount > 0 {
+                    Text(formatCompactInline(scan.vertexCount) + (scan.faceCount > 0 ? " vertices · \(formatCompactInline(scan.faceCount)) faces" : " points"))
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            Spacer()
-
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
+        .accessibilityElement(children: .combine)
     }
 
     private func formatCompactInline(_ value: Int) -> String {
@@ -316,6 +328,23 @@ struct ScanRow: View {
     }
 }
 
+/// Presentation-only labels; a scan's stored capture and coordinate metadata
+/// remain authoritative. A PLY containing faces is a mesh, not a point cloud.
+enum ScanLibraryKind {
+    static func title(for scan: Scan) -> String {
+        if scan.terrainCapture != nil { return "Terrain" }
+        if scan.splatBundleName != nil { return "Splat source" }
+        if scan.faceCount == 0, (scan.fileName as NSString).pathExtension.lowercased() == "ply" { return "Point cloud" }
+        if scan.hasTexture { return "Textured mesh" }
+        return scan.faceCount > 0 ? "Mesh" : "3D model"
+    }
+    static func icon(for scan: Scan) -> String {
+        if scan.terrainCapture != nil { return "mountain.2" }
+        if scan.faceCount == 0, (scan.fileName as NSString).pathExtension.lowercased() == "ply" { return "circle.grid.3x3" }
+        return "cube.transparent"
+    }
+}
+
 // MARK: - Stat Item
 
 struct StatItem: View {
@@ -324,20 +353,21 @@ struct StatItem: View {
     var icon: String = ""
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             if !icon.isEmpty {
                 Image(systemName: icon)
                     .font(.caption2)
                     .foregroundColor(.accentColor)
             }
             Text(value)
-                .font(.headline)
+                .font(.title3.weight(.semibold))
                 .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 }
