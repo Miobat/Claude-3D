@@ -70,6 +70,9 @@ if [[ "${GITHUB_REF:-}" == "refs/heads/codex/design-refinement" || "${GITHUB_HEA
   capture capture-warning capture-warning-large-text
   capture measure measure-large-text
   capture measure-retry measure-retry-large-text
+  capture capture-warning capture-warning-large-text-landscape --landscape
+  capture measure measure-large-text-landscape --landscape
+  capture object object-large-text-landscape --landscape
 fi
 xcrun simctl ui "$DEVICE" content_size large
 capture joysticks viewer-joysticks
