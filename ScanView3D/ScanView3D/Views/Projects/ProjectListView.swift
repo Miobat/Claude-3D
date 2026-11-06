@@ -104,12 +104,21 @@ struct ProjectListView: View {
     private var emptyState: some View {
         ScrollView {
             VStack(spacing: 20) {
-                libraryHero
-                FieldEmptyState(icon: "folder.badge.plus", title: "A place for every capture",
-                                message: "Create a project for a site, room or object. Keep related captures together as your library grows.")
+                if typeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Your first project").font(.headline)
+                        Text("Keep scans for a site, room or object together.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    libraryHero
+                    FieldEmptyState(icon: "folder.badge.plus", title: "A place for every capture",
+                                    message: "Create a project for a site, room or object. Keep related captures together as your library grows.")
+                }
                 VStack(spacing: 10) {
                     Button { showingNewProject = true } label: {
-                        Label("Create your first project", systemImage: "plus")
+                        Label(typeSize.isAccessibilitySize ? "Create project" : "Create your first project", systemImage: "plus")
                     }.buttonStyle(FieldButtonStyle(prominent: true))
                     Button { showingImporter = true } label: {
                         Label("Import OBJ or PLY", systemImage: "square.and.arrow.down")

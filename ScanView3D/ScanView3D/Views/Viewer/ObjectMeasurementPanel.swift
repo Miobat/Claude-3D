@@ -307,12 +307,17 @@ struct ObjectMeasurementPanel: View {
             let dimension = region.dimensions.first { $0.axis == axis }
             let wall = axis == .depth && region.usesWallProjectionForDisplay ? region.wallProjection : nil
             VStack(alignment: .leading, spacing: 5) {
-                Text(wall == nil ? axis.rawValue.capitalized : "Out from wall")
-                    .font(.caption2.weight(.medium)).foregroundStyle(.white.opacity(0.75))
-                Text((wall?.metres ?? dimension?.metres).map { unit.format(meters: $0) } ?? "Unknown")
-                    .font(.system(.headline, design: .rounded, weight: .semibold)).monospacedDigit()
-                    .foregroundStyle(FieldStyle.cyan)
-                    .fixedSize(horizontal: false, vertical: true)
+                if typeSize.isAccessibilitySize {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        dimensionTitle(axis, wall: wall != nil)
+                        Spacer(minLength: 0)
+                        dimensionValue(wall?.metres ?? dimension?.metres)
+                            .layoutPriority(1)
+                    }
+                } else {
+                    dimensionTitle(axis, wall: wall != nil)
+                    dimensionValue(wall?.metres ?? dimension?.metres)
+                }
                 Text(wall == nil ? evidence(dimension?.evidence) : "Wall reference")
                     .font(.caption2).foregroundStyle(.white.opacity(0.65))
                     .fixedSize(horizontal: false, vertical: true)
@@ -323,6 +328,20 @@ struct ObjectMeasurementPanel: View {
             .accessibilityElement(children: .combine)
         }
     }
+
+    private func dimensionTitle(_ axis: AutomaticDimension.Axis, wall: Bool) -> some View {
+        Text(wall ? "Out from wall" : axis.rawValue.capitalized)
+            .font(.caption2.weight(.medium)).foregroundStyle(.white.opacity(0.75))
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func dimensionValue(_ metres: Float?) -> some View {
+        Text(metres.map { unit.format(meters: $0) } ?? "Unknown")
+            .font(.system(.headline, design: .rounded, weight: .semibold)).monospacedDigit()
+            .foregroundStyle(FieldStyle.cyan)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private func evidence(_ evidence: AutomaticDimension.Evidence?) -> String {
         switch evidence {
         case .observedSpan: return "Scanned span"

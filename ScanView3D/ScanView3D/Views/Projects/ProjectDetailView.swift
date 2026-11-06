@@ -160,11 +160,19 @@ struct ProjectDetailView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 16) {
-                    Label("Project overview", systemImage: "folder")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(FieldStyle.accent)
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: typeSize.isAccessibilitySize ? 1 : 2), alignment: .leading, spacing: 16) {
-                        StatItem(label: "Captures", value: "\(liveProject.scanCount)")
-                        StatItem(label: "Model files", value: liveProject.formattedTotalSize)
+                    if typeSize.isAccessibilitySize {
+                        Text("Project overview")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(FieldStyle.accent)
+                        Text("\(liveProject.scanCount) capture\(liveProject.scanCount == 1 ? "" : "s") · \(liveProject.formattedTotalSize) in model files")
+                            .font(.subheadline).monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Label("Project overview", systemImage: "folder")
+                            .font(.subheadline.weight(.semibold)).foregroundStyle(FieldStyle.accent)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), alignment: .leading), count: 2), alignment: .leading, spacing: 16) {
+                            StatItem(label: "Captures", value: "\(liveProject.scanCount)")
+                            StatItem(label: "Model files", value: liveProject.formattedTotalSize)
+                        }
                     }
                     Divider().overlay(FieldStyle.line)
                     Text("\(formatCompact(liveProject.totalVertices)) vertices · \(formatCompact(liveProject.totalFaces)) faces")
@@ -243,6 +251,7 @@ struct ProjectDetailView: View {
         } label: {
             Label(sortOrder.rawValue, systemImage: "arrow.up.arrow.down")
                 .font(.caption.weight(.medium)).foregroundStyle(FieldStyle.accent)
+                .frame(minHeight: 44).contentShape(Rectangle())
         }
         .accessibilityLabel("Sort scans")
         .accessibilityValue(sortOrder.rawValue)

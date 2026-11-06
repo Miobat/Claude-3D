@@ -6,6 +6,8 @@ enum FieldStyle {
     static let accent = Color("AccentColor")
     static let cyan = Color(red: 0.471, green: 0.871, blue: 0.929)
     static let mint = Color(red: 0.43, green: 0.91, blue: 0.78)
+    // White text stays legible on the active capture's Finish control.
+    static let stopAction = Color(red: 0.72, green: 0.12, blue: 0.16)
     static let ink = Color(red: 0.047, green: 0.063, blue: 0.090)
     static let viewport = Color(red: 0.059, green: 0.078, blue: 0.110)
     static let panel = Color(red: 0.090, green: 0.118, blue: 0.161)

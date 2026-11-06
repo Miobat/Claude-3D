@@ -21,9 +21,11 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    brandHeader
-                        .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                if !typeSize.isAccessibilitySize {
+                    Section {
+                        brandHeader
+                            .listRowInsets(EdgeInsets()).listRowBackground(Color.clear)
+                    }
                 }
                 Section("Preferences") {
                     Menu {
@@ -86,6 +88,10 @@ struct SettingsView: View {
 
                 // About
                 Section("About") {
+                    if typeSize.isAccessibilitySize {
+                        infoRow("App", value: AppConstants.appName)
+                        infoRow("By", value: AppConstants.companyName)
+                    }
                     infoRow("Version", value: versionLabel)
 
                     ViewThatFits(in: .horizontal) {
@@ -180,9 +186,10 @@ struct SettingsView: View {
             preferenceIcon(symbol)
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).foregroundStyle(Color(uiColor: .label))
-                Text(value).font(.subheadline).foregroundStyle(Color(uiColor: .secondaryLabel))
+                Text(value).font(.subheadline).foregroundStyle(Color(uiColor: .label).opacity(0.70))
             }
             .fixedSize(horizontal: false, vertical: true)
+            .multilineTextAlignment(.leading)
             Spacer(minLength: 8)
             Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary).accessibilityHidden(true)

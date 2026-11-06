@@ -78,19 +78,15 @@ struct ScannerView: View {
                         HStack(alignment: .top, spacing: 0) {
                             VStack(spacing: 8) {
                                 topStatusBar
-                                ScrollView { statusMessages }
-                                    .scrollIndicators(.visible)
+                                CapturePanelScroll(maximumHeight: geometry.size.height * 0.60) { statusMessages }
                                 Spacer(minLength: 0)
                             }
                             VStack(spacing: 8) {
                                 if scanner.isScanning {
                                     Spacer(minLength: 0)
-                                    ScrollView { captureDashboard }
-                                        .scrollIndicators(.visible)
-                                        .fixedSize(horizontal: false, vertical: true)
+                                    CapturePanelScroll(maximumHeight: max(80, geometry.size.height - 100)) { captureDashboard }
                                 } else {
-                                    ScrollView { prescanControls }
-                                        .scrollIndicators(.hidden)
+                                    CapturePanelScroll(maximumHeight: max(80, geometry.size.height - 100)) { prescanControls }
                                         .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
                                 }
                                 bottomControls
@@ -100,18 +96,12 @@ struct ScannerView: View {
                     } else {
                         VStack(spacing: 10) {
                             topStatusBar
-                            ScrollView { statusMessages }
-                                .scrollIndicators(.visible)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxHeight: geometry.size.height * 0.30)
+                            CapturePanelScroll(maximumHeight: geometry.size.height * 0.30) { statusMessages }
                             Spacer(minLength: 8)
                             if scanner.isScanning {
                                 captureDashboard
                             } else {
-                                ScrollView { prescanControls }
-                                    .scrollIndicators(.hidden)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxHeight: min(370, geometry.size.height * 0.62))
+                                CapturePanelScroll(maximumHeight: min(370, geometry.size.height * 0.62)) { prescanControls }
                                     .disabled(activeDraft != nil || isPreparingMesh || isSaving || scanner.isFinalizing)
                             }
                             bottomControls
@@ -265,9 +255,9 @@ struct ScannerView: View {
                     }
                 } label: {
                     HStack(spacing: 7) {
-                        Image(systemName: "square.3.layers.3d")
-                        Text(overlayMode.rawValue)
-                        Image(systemName: "chevron.down").font(.caption2.weight(.bold))
+                        if !typeSize.isAccessibilitySize { Image(systemName: "square.3.layers.3d") }
+                        Text(overlayMode.rawValue).fixedSize(horizontal: true, vertical: false)
+                        if !typeSize.isAccessibilitySize { Image(systemName: "chevron.down").font(.caption2.weight(.bold)) }
                     }
                     .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
                     .padding(.horizontal, 12).frame(minHeight: 44)
@@ -366,9 +356,17 @@ struct ScannerView: View {
                     if settings.alignToNorth { Text(location.status).foregroundStyle(.secondary) }
                 }
                 Section("Live overlay") {
-                    Picker("Show", selection: $overlayMode) {
-                        ForEach(availableOverlayModes, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
-                    }
+                    Menu {
+                        Picker("Live overlay", selection: $overlayMode) {
+                            ForEach(availableOverlayModes, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(overlayMode.rawValue).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.up.chevron.down").font(.caption)
+                        }.frame(minHeight: 44)
+                    }.accessibilityLabel("Live overlay").accessibilityValue(overlayMode.rawValue)
                     coverageLegend
                 }
                 Section("Captured so far") {
@@ -571,8 +569,10 @@ struct ScannerView: View {
 
     private var prescanControls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("CAPTURE MODE").font(.caption2.weight(.semibold)).tracking(1.3)
-                .foregroundStyle(.white.opacity(0.6))
+            if !typeSize.isAccessibilitySize {
+                Text("CAPTURE MODE").font(.caption2.weight(.semibold)).tracking(1.3)
+                    .foregroundStyle(.white.opacity(0.6))
+            }
             Menu {
                 ForEach(ScanSettings.CaptureMode.allCases, id: \.self) { mode in
                     let unavailable = mode == .highQuality && !highQualitySupported
@@ -598,16 +598,21 @@ struct ScannerView: View {
                 .frame(minHeight: 44).contentShape(Rectangle())
             }
             .accessibilityLabel("Capture mode").accessibilityValue(settings.captureMode.rawValue)
+            .accessibilityHint(settings.captureMode.description)
             .accessibilityIdentifier("captureModeMenu")
-            Text(settings.captureMode.description).font(.caption).foregroundStyle(.white.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
+            if !typeSize.isAccessibilitySize {
+                Text(settings.captureMode.description).font(.caption).foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Divider().overlay(.white.opacity(0.12))
             Button { showingCaptureSettings = true } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "slider.horizontal.3").foregroundStyle(FieldStyle.cyan)
+                    if !typeSize.isAccessibilitySize {
+                        Image(systemName: "slider.horizontal.3").foregroundStyle(FieldStyle.cyan)
+                    }
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Scan settings").font(.subheadline.weight(.semibold))
-                        Text(String(format: "%.1f m range", settings.rangeValue) + (settings.captureMode == .terrain
+                        Text(String(format: "%.1f m range", settings.rangeValue) + (typeSize.isAccessibilitySize ? "" : settings.captureMode == .terrain
                             ? " · \(settings.terrainSamplingLabel) sampling"
                             : settings.captureMode.usesDetail ? String(format: " · %.0f mm detail", settings.detailMM) : " · Photo capture"))
                             .font(.caption).foregroundStyle(.white.opacity(0.7))
@@ -727,7 +732,7 @@ struct ScannerView: View {
                     }
                     .foregroundStyle(.white).padding(.horizontal, 18)
                     .frame(maxWidth: .infinity, minHeight: 56)
-                    .background(Color.red, in: RoundedRectangle(cornerRadius: 18))
+                    .background(FieldStyle.stopAction, in: RoundedRectangle(cornerRadius: 18))
                 }
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel("Finish scan")
@@ -1628,6 +1633,39 @@ extension ScannerView {
 }
 
 // MARK: - Simulator Scan View
+
+/// Size the scroll viewport from its content, capped to leave the camera and
+/// primary action visible. `fixedSize` on a ScrollView can exceed its parent
+/// frame at accessibility sizes and draw warnings over the capture state.
+private struct CapturePanelScroll<Content: View>: View {
+    let maximumHeight: CGFloat
+    let content: Content
+    @State private var contentHeight: CGFloat = 1
+
+    init(maximumHeight: CGFloat, @ViewBuilder content: () -> Content) {
+        self.maximumHeight = maximumHeight
+        self.content = content()
+    }
+
+    var body: some View {
+        ScrollView {
+            content.background {
+                GeometryReader { geometry in
+                    Color.clear.preference(key: CapturePanelHeightKey.self, value: geometry.size.height)
+                }
+            }
+        }
+        .scrollIndicators(.visible)
+        .frame(height: min(contentHeight, max(1, maximumHeight)))
+        .clipped()
+        .onPreferenceChange(CapturePanelHeightKey.self) { contentHeight = max(1, $0) }
+    }
+}
+
+private struct CapturePanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 1
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
 
 #if targetEnvironment(simulator)
 

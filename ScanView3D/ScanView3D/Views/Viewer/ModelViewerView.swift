@@ -446,6 +446,11 @@ struct ModelViewerView: View {
 
     private var measurePanel: some View {
         VStack(spacing: 12) {
+            // A long file-system error must never bury the recovery action.
+            if session.pendingSave != nil {
+                finishMeasurementButton.padding(.horizontal, 12)
+            }
+            if typeSize.isAccessibilitySize { measurementPlacementControls }
             // Tools
             if typeSize.isAccessibilitySize {
                 Menu {
@@ -484,6 +489,12 @@ struct ModelViewerView: View {
             }.fixedSize(horizontal: false, vertical: true)
             }
 
+            if !typeSize.isAccessibilitySize { measurementPlacementControls }
+
+            if typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil, session.pendingSave == nil {
+                finishMeasurementButton.padding(.horizontal, 12)
+            }
+
             Text(session.status)
                 .font(.caption)
                 .foregroundColor(session.message == nil ? .white : .yellow)
@@ -491,46 +502,6 @@ struct ModelViewerView: View {
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-
-            // Actions: Undo · Add point · Done · Snap
-            HStack(spacing: 10) {
-                Button { session.undo() } label: {
-                    Image(systemName: "arrow.uturn.backward").font(.title3).frame(minWidth: 44, minHeight: 44)
-                }
-                .disabled(session.draftPoints.isEmpty && session.measurements.isEmpty)
-                .accessibilityLabel("Undo")
-
-                Button { session.placeAtCrosshair() } label: {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16).fill(FieldStyle.cyan).frame(width: 54, height: 48)
-                        Image(systemName: "plus").font(.system(size: 23, weight: .semibold)).foregroundColor(FieldStyle.ink)
-                    }
-                }
-                .accessibilityLabel("Add point at crosshair")
-
-                if !typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil || session.pendingSave != nil {
-                    finishMeasurementButton
-                }
-
-                Button { session.snappingEnabled.toggle() } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: "scope").font(.system(size: 20))
-                        if !typeSize.isAccessibilitySize {
-                            Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
-                        }
-                    }
-                    .frame(minWidth: 44, minHeight: 44)
-                    .opacity(session.snappingEnabled ? 1 : 0.55)
-                }
-                .accessibilityLabel("Snap to geometry")
-                .accessibilityValue(session.snappingEnabled ? "On" : "Off")
-            }
-            .foregroundColor(.white)
-            .padding(.horizontal, 12)
-
-            if typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil || session.pendingSave != nil {
-                finishMeasurementButton.padding(.horizontal, 12)
-            }
 
             // Saved measurements (tap to select, then delete)
             if !session.measurements.isEmpty {
@@ -572,6 +543,43 @@ struct ModelViewerView: View {
         .padding(.vertical, 12)
         .fieldPanel()
         .padding(.horizontal, 8)
+    }
+
+    private var measurementPlacementControls: some View {
+        HStack(spacing: 10) {
+            Button { session.undo() } label: {
+                Image(systemName: "arrow.uturn.backward").font(.title3).frame(minWidth: 44, minHeight: 44)
+            }
+            .disabled(session.draftPoints.isEmpty && session.measurements.isEmpty)
+            .accessibilityLabel("Undo")
+
+            Button { session.placeAtCrosshair() } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16).fill(FieldStyle.cyan).frame(width: 54, height: 48)
+                    Image(systemName: "plus").font(.system(size: 23, weight: .semibold)).foregroundColor(FieldStyle.ink)
+                }
+            }
+            .accessibilityLabel("Add point at crosshair")
+
+            if !typeSize.isAccessibilitySize, session.tool.autoCompleteCount == nil, session.pendingSave == nil {
+                finishMeasurementButton
+            }
+
+            Button { session.snappingEnabled.toggle() } label: {
+                VStack(spacing: 3) {
+                    Image(systemName: "scope").font(.system(size: 20))
+                    if !typeSize.isAccessibilitySize {
+                        Text(session.snappingEnabled ? "Snap on" : "Snap off").font(.caption2)
+                    }
+                }
+                .frame(minWidth: 44, minHeight: 44)
+                .opacity(session.snappingEnabled ? 1 : 0.55)
+            }
+            .accessibilityLabel("Snap to geometry")
+            .accessibilityValue(session.snappingEnabled ? "On" : "Off")
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 12)
     }
 
     private var finishMeasurementButton: some View {
