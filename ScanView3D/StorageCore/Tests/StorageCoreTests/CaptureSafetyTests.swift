@@ -73,6 +73,20 @@ final class CaptureSafetyTests: XCTestCase {
         XCTAssertTrue(epoch.withCurrent(epoch.current) { changed = true })
         XCTAssertTrue(changed)
     }
+    func testPhotoCaptureMemoryPolicyAppliesToAllPhotoModes() {
+        XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: 399, textureMB: 0, photosEnabled: true), .pausePhotos)
+        XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: 400, textureMB: 800, photosEnabled: true), .continueCapture)
+        XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: 900, textureMB: 801, photosEnabled: true), .pausePhotos)
+    }
+    func testPointAndTerrainCapturesDoNotClaimPhotosWerePaused() {
+        XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: 399, textureMB: 0, photosEnabled: false), .continueCapture)
+        XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: 199, textureMB: 0, photosEnabled: false), .pauseCapture)
+    }
+    func testCriticalOrInvalidMemoryAlwaysPausesCapture() {
+        for available in [199.0, 0, -1, .nan, .infinity] {
+            XCTAssertEqual(CaptureMemoryPolicy.action(availableMB: available, textureMB: 0, photosEnabled: true), .pauseCapture)
+        }
+    }
     func testResetRejectsOldWorkerAndAcceptsNewWorker() {
         let epoch = CaptureEpoch()
         let old = epoch.current
@@ -177,5 +191,132 @@ final class CaptureSafetyTests: XCTestCase {
         let data = Data(#"{"manifest":"scan","payloadFile":"../outside.plist"}"#.utf8)
         try data.write(to: directory.appendingPathComponent("checkpoint.json"))
         XCTAssertThrowsError(try Store(directory: directory).load())
+    }
+
+    private func record() throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("checkpoint.json"))) as? [String: Any])
+    }
+
+    private func writeRecord(_ value: [String: Any]) throws {
+        try JSONSerialization.data(withJSONObject: value).write(to: directory.appendingPathComponent("checkpoint.json"), options: .atomic)
+    }
+
+    func testNewCheckpointBindsExactPayloadBytes() throws {
+        try Store(directory: directory).save("scan", payload: [1, 2, 3])
+        let value = try record()
+        XCTAssertEqual(value["version"] as? Int, 2)
+        XCTAssertEqual((value["payloadSHA256"] as? String)?.count, 64)
+        let file = try XCTUnwrap(value["payloadFile"] as? String)
+        XCTAssertEqual(value["payloadBytes"] as? Int, try Data(contentsOf: directory.appendingPathComponent(file)).count)
+    }
+
+    func testLegacyCheckpointLoadsAndMetadataUpdateAddsIntegrity() throws {
+        let name = "mesh-\(UUID().uuidString).plist"
+        try PropertyListEncoder().encode([1.0, 2.0]).write(to: directory.appendingPathComponent(name))
+        try writeRecord(["manifest": "legacy", "payloadFile": name])
+        let store = Store(directory: directory)
+        XCTAssertEqual(try store.load().1, [1, 2])
+        try store.save("updated", payload: nil)
+        XCTAssertEqual(try store.load().1, [1, 2])
+        XCTAssertEqual(try record()["version"] as? Int, 2)
+    }
+
+    func testValidButReplacedPayloadIsRejectedAndNotRelabelled() throws {
+        let store = Store(directory: directory)
+        try store.save("original", payload: [1, 2])
+        let file = try XCTUnwrap(record()["payloadFile"] as? String)
+        let encoder = PropertyListEncoder(); encoder.outputFormat = .binary
+        try encoder.encode([3.0, 4.0]).write(to: directory.appendingPathComponent(file))
+        let before = try Data(contentsOf: directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save("changed metadata", payload: nil))
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("checkpoint.json")), before)
+    }
+
+    func testFutureCheckpointVersionRemainsUntouched() throws {
+        let store = Store(directory: directory)
+        try store.save("scan", payload: [1])
+        var value = try record(); value["version"] = 99
+        try writeRecord(value)
+        let before = try Data(contentsOf: directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertThrowsError(try store.readManifest())
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save("replacement", payload: [2]))
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("checkpoint.json")), before)
+    }
+
+    func testIncompleteIntegrityMetadataIsRejected() throws {
+        let store = Store(directory: directory)
+        try store.save("scan", payload: [1])
+        var value = try record(); value.removeValue(forKey: "payloadSHA256")
+        try writeRecord(value)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save("replacement", payload: [2]))
+    }
+
+    func testMetadataUpdateCannotHideMissingPayload() throws {
+        let store = Store(directory: directory)
+        try store.save("scan", payload: [1])
+        let file = try XCTUnwrap(record()["payloadFile"] as? String)
+        try fm.removeItem(at: directory.appendingPathComponent(file))
+        XCTAssertThrowsError(try store.save("pretend completed", payload: nil))
+        XCTAssertEqual(try store.readManifest(), "scan")
+    }
+
+    func testSilentlyTruncatedPayloadWriteCannotPublishCheckpoint() throws {
+        let store = Store(directory: directory)
+        try store.save("previous", payload: [1])
+        let before = try fm.contentsOfDirectory(atPath: directory.path).sorted()
+        let broken = Store(directory: directory, write: { data, url in
+            try (url.pathExtension == "plist" ? Data(data.prefix(8)) : data).write(to: url, options: .atomic)
+        })
+        XCTAssertThrowsError(try broken.save("new", payload: [2]))
+        XCTAssertEqual(try store.load().0, "previous")
+        XCTAssertEqual(try store.load().1, [1])
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: directory.path).sorted(), before)
+    }
+
+    func testOversizedCheckpointIsRejectedBeforeLoadingOrReplacing() throws {
+        try Store(directory: directory).save("scan", payload: [1, 2])
+        let bounded = Store(directory: directory, maximumPayloadBytes: 8)
+        XCTAssertThrowsError(try bounded.load())
+        XCTAssertThrowsError(try bounded.save("next", payload: [3]))
+        XCTAssertEqual(try Store(directory: directory).load().1, [1, 2])
+        let smallManifest = Store(directory: directory, maximumManifestBytes: 8)
+        XCTAssertThrowsError(try smallManifest.readManifest())
+        XCTAssertThrowsError(try smallManifest.save("next", payload: nil))
+    }
+
+    func testSymlinkPayloadCannotReadOutsideCheckpoint() throws {
+        let store = Store(directory: directory)
+        try store.save("scan", payload: [1])
+        let file = try XCTUnwrap(record()["payloadFile"] as? String)
+        let outside = directory.appendingPathComponent("outside.plist")
+        let payload = directory.appendingPathComponent(file)
+        try fm.moveItem(at: payload, to: outside)
+        try fm.createSymbolicLink(at: payload, withDestinationURL: outside)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save("next", payload: nil))
+        XCTAssertTrue(fm.fileExists(atPath: outside.path))
+    }
+
+    func testSymlinkManifestCannotRedirectReadOrWrite() throws {
+        try Store(directory: directory).save("scan", payload: nil)
+        let manifest = directory.appendingPathComponent("checkpoint.json")
+        let outside = directory.appendingPathComponent("outside.json")
+        try fm.moveItem(at: manifest, to: outside)
+        try fm.createSymbolicLink(at: manifest, withDestinationURL: outside)
+        let store = Store(directory: directory)
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save("next", payload: nil))
+    }
+
+    func testSymlinkCheckpointDirectoryIsRejected() throws {
+        let target = directory.appendingPathComponent("target")
+        try fm.createDirectory(at: target, withIntermediateDirectories: true)
+        let linked = directory.appendingPathComponent("linked")
+        try fm.createSymbolicLink(at: linked, withDestinationURL: target)
+        XCTAssertThrowsError(try Store(directory: linked).save("scan", payload: [1]))
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: target.path).isEmpty)
     }
 }

@@ -42,6 +42,91 @@ final class LibraryPersistenceTests: XCTestCase {
         XCTAssertEqual(try LibraryPersistence<[Record]>(indexURL: index).load(default: []), original)
     }
 
+    func testSemanticValidationFailsClosedAndPreservesIndex() throws {
+        let before = try JSONEncoder().encode(original)
+        try before.write(to: index)
+        let store = LibraryPersistence<[Record]>(indexURL: index, validate: { _ in throw TestFailure.copyInterrupted })
+        XCTAssertThrowsError(try store.load(default: []))
+        XCTAssertTrue(store.isReadOnly)
+        XCTAssertThrowsError(try store.commit([]))
+        XCTAssertEqual(try Data(contentsOf: index), before)
+    }
+
+    func testInvalidCandidateCannotChangeGoodIndex() throws {
+        try JSONEncoder().encode(original).write(to: index)
+        let store = LibraryPersistence<[Record]>(indexURL: index, validate: { records in
+            if records.contains(where: { $0.name.isEmpty }) { throw TestFailure.copyInterrupted }
+        })
+        _ = try store.load(default: [])
+        XCTAssertThrowsError(try store.commit([Record(name: "")]))
+        XCTAssertEqual(try store.load(default: []), original)
+    }
+
+    func testOversizedIndexAndCandidateAreRejectedWithoutTruncating() throws {
+        let before = try JSONEncoder().encode(original)
+        try before.write(to: index)
+        let bounded = LibraryPersistence<[Record]>(indexURL: index, maximumIndexBytes: 4)
+        XCTAssertThrowsError(try bounded.load(default: []))
+        XCTAssertEqual(try Data(contentsOf: index), before)
+        let writable = LibraryPersistence<[Record]>(indexURL: index, maximumIndexBytes: before.count + 2)
+        _ = try writable.load(default: [])
+        XCTAssertThrowsError(try writable.commit([Record(name: String(repeating: "x", count: 200))]))
+        XCTAssertEqual(try Data(contentsOf: index), before)
+    }
+
+    func testUnsafeLibraryNamesAreRejected() throws {
+        for name in ["", ".", "..", "../projects.json", "/tmp/model", "folder/model.ply", "folder\\model", "https:model", "bad\nname", String(repeating: "a", count: 256)] {
+            XCTAssertThrowsError(try LibraryFileSafety.validateName(name), name)
+        }
+        for name in ["model.ply", "Cabinet (1).obj", "måling.json", "my..model.ply"] {
+            XCTAssertNoThrow(try LibraryFileSafety.validateName(name))
+        }
+        XCTAssertEqual(LibraryFileSafety.key("MODEL.PLY"), LibraryFileSafety.key("model.ply"))
+    }
+
+    func testDanglingDestinationSymlinkIsNotDeleted() throws {
+        let store = try seededStore()
+        let source = try file("source", contents: "data")
+        let target = directory.appendingPathComponent("destination")
+        try fm.createSymbolicLink(at: target, withDestinationURL: directory.appendingPathComponent("missing"))
+        XCTAssertThrowsError(try store.copyAndCommit([(source, target)]) { XCTFail("Must not commit") })
+        XCTAssertEqual(try fm.attributesOfItem(atPath: target.path)[.type] as? FileAttributeType, .typeSymbolicLink)
+    }
+
+    func testCopyFileExistsRacePreservesNewlyAppearedDestination() throws {
+        let source = try file("source", contents: "data")
+        let target = directory.appendingPathComponent("destination")
+        let store = LibraryPersistence<[Record]>(indexURL: index, copy: { _, destination in
+            try Data("other writer".utf8).write(to: destination)
+            throw CocoaError(.fileWriteFileExists)
+        })
+        _ = try store.load(default: [])
+        XCTAssertThrowsError(try store.copyAndCommit([(source, target)]) { XCTFail("Must not commit") })
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "other writer")
+    }
+
+    func testSymlinkedCompanionAndDirectoryTreesAreRejected() throws {
+        let target = try file("outside", contents: "private")
+        let link = directory.appendingPathComponent("alias")
+        try fm.createSymbolicLink(at: link, withDestinationURL: target)
+        XCTAssertThrowsError(try LibraryFileSafety.child("alias", of: directory))
+        XCTAssertThrowsError(try LibraryFileSafety.validateTree(link))
+        XCTAssertThrowsError(try LibraryFileSafety.validateTree(directory))
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "private")
+    }
+
+    func testSymlinkedIndexAndBackupCannotOverwriteTargets() throws {
+        let target = try file("outside", contents: "private")
+        try fm.createSymbolicLink(at: index, withDestinationURL: target)
+        let store = LibraryPersistence<[Record]>(indexURL: index)
+        XCTAssertThrowsError(try store.load(default: []))
+        try fm.removeItem(at: index)
+        let writable = try seededStore()
+        try fm.createSymbolicLink(at: writable.backupURL, withDestinationURL: target)
+        XCTAssertThrowsError(try writable.commit([]))
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "private")
+    }
+
     func testLegacyJSONMissingOptionalFieldsLoads() throws {
         try Data(#"[{"name":"Existing scan"}]"#.utf8).write(to: index)
         let store = LibraryPersistence<[Record]>(indexURL: index)

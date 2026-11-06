@@ -8,6 +8,7 @@ class StorageManager: ObservableObject {
     @Published var storageError: String?
     @Published private(set) var isLibraryReadOnly = false
     @Published private(set) var isExporting = false
+    @Published private(set) var isImporting = false
     @Published private(set) var exportMessage = ""
     private let exportQueue = DispatchQueue(label: "scanview.export", qos: .userInitiated)
     private let exportCancellation = ExportCancellation()
@@ -17,7 +18,7 @@ class StorageManager: ObservableObject {
     /// One bounded worker; UI only receives a complete package. Exporting is a
     /// model-delivery action, not a project backup or a mutation of saved scans.
     func prepareExport(_ work: @escaping () throws -> URL, completion: @escaping (URL) -> Void) {
-        guard !isExporting else { return }
+        guard !isExporting, !isImporting else { return }
         isExporting = true
         exportMessage = "Preparing model package…"
         exportCancellation.reset()
@@ -38,7 +39,7 @@ class StorageManager: ObservableObject {
     private let fileManager = FileManager.default
     private let projectsFileName = "projects.json"
     private let rootDirectory: URL
-    private lazy var persistence = LibraryPersistence<[Project]>(indexURL: projectsFile)
+    private lazy var persistence = LibraryPersistence<[Project]>(indexURL: projectsFile, validate: Self.validateLibrary)
     private typealias StorageFailure = LibraryPersistence<[Project]>.Failure
 
     // MARK: - Directories
@@ -64,8 +65,19 @@ class StorageManager: ObservableObject {
     init(directory: URL? = nil) {
         rootDirectory = directory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         do {
+            _ = try LibraryFileSafety.child(AppConstants.projectsDirectory, of: rootDirectory)
+            _ = try LibraryFileSafety.child(AppConstants.scansDirectory, of: rootDirectory)
             try fileManager.createDirectory(at: projectsDirectory, withIntermediateDirectories: true)
             try fileManager.createDirectory(at: scansDirectory, withIntermediateDirectories: true)
+            if !LibraryFileSafety.exists(projectsFile) {
+                for folder in try fileManager.contentsOfDirectory(at: scansDirectory, includingPropertiesForKeys: nil) {
+                    let kind = try fileManager.attributesOfItem(atPath: folder.path)[.type] as? FileAttributeType
+                    // Empty UUID folders can be left by an interrupted first
+                    // project creation. Actual assets must never be orphaned.
+                    guard kind == .typeDirectory, UUID(uuidString: folder.lastPathComponent) != nil,
+                          try fileManager.contentsOfDirectory(atPath: folder.path).isEmpty else { throw StorageFailure.readOnly }
+                }
+            }
             projects = try persistence.load(default: [])
         } catch {
             isLibraryReadOnly = true
@@ -74,6 +86,76 @@ class StorageManager: ObservableObject {
     }
 
     // MARK: - Threading
+
+    /// Reject bad metadata before exposing it to viewers or destructive actions.
+    /// Missing assets remain visible/recoverable; unsafe paths and aliasing do not.
+    static func validateLibrary(_ projects: [Project]) throws {
+        var projectIDs = Set<UUID>(), scanIDs = Set<UUID>()
+        var totalVertices = 0, totalFaces = 0
+        var totalBytes: Int64 = 0
+        for project in projects {
+            guard projectIDs.insert(project.id).inserted else { throw StorageFailure.invalidLibrary }
+            var owners: [String: UUID] = [:]
+            for scan in project.scans {
+                guard scanIDs.insert(scan.id).inserted, scan.vertexCount >= 0, scan.faceCount >= 0,
+                      scan.fileSize >= 0 else { throw StorageFailure.invalidLibrary }
+                let vertices = totalVertices.addingReportingOverflow(scan.vertexCount)
+                let faces = totalFaces.addingReportingOverflow(scan.faceCount)
+                let bytes = totalBytes.addingReportingOverflow(scan.fileSize)
+                guard !vertices.overflow, !faces.overflow, !bytes.overflow else { throw StorageFailure.invalidLibrary }
+                totalVertices = vertices.partialValue; totalFaces = faces.partialValue; totalBytes = bytes.partialValue
+                _ = try scan.validatedModelTransform()
+                if let frame = scan.sceneFrame { _ = try CoordinateMath.validated(frame.map(Double.init)) }
+                for bounds in [scan.boundingBoxMin, scan.boundingBoxMax].compactMap({ $0 }) {
+                    guard bounds.x.isFinite, bounds.y.isFinite, bounds.z.isFinite else { throw StorageFailure.invalidLibrary }
+                }
+                if let lo = scan.boundingBoxMin, let hi = scan.boundingBoxMax {
+                    guard lo.x <= hi.x, lo.y <= hi.y, lo.z <= hi.z else { throw StorageFailure.invalidLibrary }
+                }
+                for name in Self.fileNames(of: scan) {
+                    try LibraryFileSafety.validateName(name)
+                    let key = LibraryFileSafety.key(name)
+                    guard owners[key] == nil || owners[key] == scan.id else { throw StorageFailure.invalidLibrary }
+                    owners[key] = scan.id
+                }
+            }
+        }
+    }
+
+    private func validatedDirectory(for project: Project) throws -> URL {
+        let root = try LibraryFileSafety.child(AppConstants.scansDirectory, of: documentsDirectory)
+        return try LibraryFileSafety.child(project.id.uuidString, of: root)
+    }
+
+    private func writableDirectory(for project: Project) throws -> URL {
+        try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            guard projects.contains(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
+            return try validatedDirectory(for: project)
+        }
+    }
+
+    private func newCandidateFiles(base: String, extension ext: String, directory: URL) throws -> [URL] {
+        let names = ["\(base).\(ext)", "\(base).scn", "\(base).mtl", "\(base)_texture.jpg", "\(base)_texture.png",
+                     base + SurfaceLabelDocument.suffix, "\(base)_original.mesh", "\(base)_photos",
+                     "\(base)_photos" + PoseFile.suffix]
+        let urls = try names.map { try LibraryFileSafety.child($0, of: directory) }
+        guard urls.allSatisfy({ !fileManager.fileExists(atPath: $0.path) }) else { throw StorageFailure.destinationExists }
+        return urls
+    }
+
+    private func validateFiles(of scan: Scan, in directory: URL, requireRegistered: Bool = false) throws {
+        for name in companionFiles(of: scan) { _ = try LibraryFileSafety.child(name, of: directory) }
+        if requireRegistered {
+            let required = [scan.fileName] + [scan.textureFileName, scan.splatBundleName, scan.captureFolderName].compactMap { $0 }
+                + (scan.originalMeshSHA256 == nil ? [] : [(scan.fileName as NSString).deletingPathExtension + "_original.mesh"])
+            for name in required {
+                let url = try LibraryFileSafety.child(name, of: directory)
+                guard fileManager.fileExists(atPath: url.path) else { throw StorageFailure.missingItem }
+                try LibraryFileSafety.validateTree(url)
+            }
+        }
+    }
 
     /// `projects` drives SwiftUI, so it may only change on the main thread.
     /// Saving runs on background queues and hops here for the bookkeeping.
@@ -125,9 +207,16 @@ class StorageManager: ObservableObject {
     func createProject(name: String) -> Project? {
         let project = Project(name: name)
         return perform("Create project") {
-            try fileManager.createDirectory(at: projectsDirectory.appendingPathComponent(project.id.uuidString), withIntermediateDirectories: true)
-            try fileManager.createDirectory(at: scansDirectory.appendingPathComponent(project.id.uuidString), withIntermediateDirectories: true)
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            let projectRoot = try LibraryFileSafety.child(AppConstants.projectsDirectory, of: documentsDirectory)
+            let projectFolder = try LibraryFileSafety.child(project.id.uuidString, of: projectRoot)
+            let scanFolder = try validatedDirectory(for: project)
+            try fileManager.createDirectory(at: projectFolder, withIntermediateDirectories: true)
+            try fileManager.createDirectory(at: scanFolder, withIntermediateDirectories: true)
+            var committed = false
+            defer { if !committed { try? removeExistingItems([projectFolder, scanFolder]) } }
             try commitProjects(projects + [project])
+            committed = true
         } ? project : nil
     }
 
@@ -135,19 +224,26 @@ class StorageManager: ObservableObject {
         perform("Update project") {
             var candidate = projects
             guard let index = candidate.firstIndex(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
-            candidate[index] = project
+            // A view holds a snapshot; replacing it wholesale can drop scans saved
+            // since that snapshot was made. Project edits never replace scan records.
+            candidate[index].name = project.name
+            candidate[index].modifiedAt = Date()
             try commitProjects(candidate)
         }
     }
 
     func deleteProject(_ project: Project) {
         perform("Delete project") {
+            guard projects.contains(where: { $0.id == project.id }) else { throw StorageFailure.missingItem }
+            let scanDirectory = try validatedDirectory(for: project)
+            let projectRoot = try LibraryFileSafety.child(AppConstants.projectsDirectory, of: documentsDirectory)
+            let projectDirectory = try LibraryFileSafety.child(project.id.uuidString, of: projectRoot)
             try commitProjects(projects.filter { $0.id != project.id })
             // Remove files only AFTER the index commits. Interrupted cleanup leaves
             // recoverable unused files, not a library pointing at missing models.
             try removeExistingItems([
-                projectsDirectory.appendingPathComponent(project.id.uuidString),
-                scansDirectory.appendingPathComponent(project.id.uuidString)
+                projectDirectory,
+                scanDirectory
             ])
         }
     }
@@ -185,8 +281,11 @@ class StorageManager: ObservableObject {
         let scanId = UUID()
         let fileExtension = format == .ply ? "ply" : "obj"
         let fileName = "\(scanId.uuidString).\(fileExtension)"
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let scanDir = try writableDirectory(for: project)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+        let candidates = try newCandidateFiles(base: scanId.uuidString, extension: fileExtension, directory: scanDir)
+        var committed = false
+        defer { if !committed { try? removeExistingItems(candidates) } }
 
         let isTextured = (format == .obj && baked != nil)
 
@@ -275,13 +374,19 @@ class StorageManager: ObservableObject {
 
         metadata?(&scan)
         try addScan(scan, to: project)
+        committed = true
         return scan
     }
 
     func getScanFileURL(scan: Scan, project: Project) -> URL {
-        return scansDirectory
-            .appendingPathComponent(project.id.uuidString)
-            .appendingPathComponent(scan.fileName)
+        // Legacy nonthrowing viewer API: fail to an unreadable model, never follow
+        // a library reference that was replaced with a symlink through file sharing.
+        guard let directory = try? validatedDirectory(for: project),
+              (try? validateFiles(of: scan, in: directory)) != nil,
+              let url = try? LibraryFileSafety.child(scan.fileName, of: directory) else {
+            return URL(fileURLWithPath: "/dev/null")
+        }
+        return url
     }
 
     /// Register a scan from an already-produced model file (e.g. a photogrammetry USDZ).
@@ -294,11 +399,14 @@ class StorageManager: ObservableObject {
         let scanId = UUID()
         let ext = modelURL.pathExtension.isEmpty ? "usdz" : modelURL.pathExtension
         let fileName = "\(scanId.uuidString).\(ext)"
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let scanDir = try writableDirectory(for: project)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+        let candidates = try newCandidateFiles(base: scanId.uuidString, extension: ext, directory: scanDir)
+        var committed = false
+        defer { if !committed { try? removeExistingItems(candidates) } }
 
         let destURL = scanDir.appendingPathComponent(fileName)
-        try? fileManager.removeItem(at: destURL)
+        try LibraryFileSafety.validateTree(modelURL)
         try fileManager.copyItem(at: modelURL, to: destURL)
 
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
@@ -316,6 +424,7 @@ class StorageManager: ObservableObject {
 
         // Keep the source photos (and their ARKit poses) for re-reconstruction later.
         if let photosFolder = photosFolder {
+            try LibraryFileSafety.validateTree(photosFolder)
             let kept = scanDir.appendingPathComponent("\(scanId.uuidString)_photos")
             try fileManager.copyItem(at: photosFolder, to: kept)
             scan.captureFolderName = kept.lastPathComponent
@@ -327,6 +436,7 @@ class StorageManager: ObservableObject {
 
         metadata?(&scan)
         try addScan(scan, to: project)
+        committed = true
         return scan
     }
 
@@ -590,11 +700,14 @@ class StorageManager: ObservableObject {
                         metadata: ((inout Scan) -> Void)? = nil) throws -> Scan {
         let scanId = UUID()
         let fileName = "\(scanId.uuidString).ply"
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let scanDir = try writableDirectory(for: project)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
 
         let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
         let bundleURL = scanDir.appendingPathComponent("\(scanId.uuidString)_bundle.zip")
+        guard [scanDir.appendingPathComponent(fileName), scnURL, bundleURL].allSatisfy({ !fileManager.fileExists(atPath: $0.path) }) else {
+            throw StorageFailure.destinationExists
+        }
         var committed = false
         defer {
             if !committed {
@@ -680,7 +793,7 @@ class StorageManager: ObservableObject {
     /// Every file that belongs to a scan, relative to its project folder:
     /// the model, its .mtl / texture, the internal .scn viewer file, a splat
     /// bundle zip, and the folder of kept High-Quality photos.
-    private func companionFiles(of scan: Scan) -> [String] {
+    private static func fileNames(of scan: Scan) -> [String] {
         let base = (scan.fileName as NSString).deletingPathExtension
         var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json",
                      base + SurfaceLabelDocument.suffix, base + AutomaticMeasurementDocument.suffix]
@@ -692,15 +805,18 @@ class StorageManager: ObservableObject {
         return Array(Set(names)).sorted()
     }
 
+    private func companionFiles(of scan: Scan) -> [String] { Self.fileNames(of: scan) }
+
     func deleteScan(_ scan: Scan, from project: Project) {
         perform("Delete scan") {
             var candidate = projects
             guard let index = candidate.firstIndex(where: { $0.id == project.id }),
                   let current = candidate[index].scans.first(where: { $0.id == scan.id }) else { throw StorageFailure.missingItem }
+            let dir = try validatedDirectory(for: project)
+            try validateFiles(of: current, in: dir)
             candidate[index].scans.removeAll { $0.id == scan.id }
             candidate[index].modifiedAt = Date()
             try commitProjects(candidate)
-            let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
             try removeExistingItems(companionFiles(of: current).map { dir.appendingPathComponent($0) })
         }
     }
@@ -721,8 +837,9 @@ class StorageManager: ObservableObject {
                   let dstIndex = candidate.firstIndex(where: { $0.id == destProject.id }),
                   let current = candidate[srcIndex].scans.first(where: { $0.id == scan.id }),
                   !candidate[dstIndex].scans.contains(where: { $0.id == scan.id }) else { throw StorageFailure.missingItem }
-            let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
-            let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
+            let sourceDir = try validatedDirectory(for: sourceProject)
+            let destDir = try validatedDirectory(for: destProject)
+            try validateFiles(of: current, in: sourceDir, requireRegistered: true)
             // The primary model and all explicitly registered companions are required.
             let required = [current.fileName] + [current.textureFileName, current.splatBundleName, current.captureFolderName].compactMap { $0 }
                 + (current.retainedReconstructionFiles ?? [])
@@ -733,9 +850,8 @@ class StorageManager: ObservableObject {
             try fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
             let files = companionFiles(of: current).filter { fileManager.fileExists(atPath: sourceDir.appendingPathComponent($0).path) }
             let copies = files.map { (source: sourceDir.appendingPathComponent($0), destination: destDir.appendingPathComponent($0)) }
-            // Scan file names are unique per scan and the scan is not in the destination
-            // index, so anything already there is an orphan from an interrupted move.
-            try removeExistingItems(copies.map { $0.destination })
+            // Existing destinations may be recovery data, not disposable orphans.
+            // copyAndCommit rejects collisions without deleting either copy.
             candidate[srcIndex].scans.removeAll { $0.id == scan.id }
             candidate[srcIndex].modifiedAt = Date()
             candidate[dstIndex].addScan(current)
@@ -748,31 +864,42 @@ class StorageManager: ObservableObject {
 
     /// Duplicate a scan (and all its files) within the same or a different project
     func duplicateScan(_ scan: Scan, from sourceProject: Project, to destProject: Project) -> Scan? {
-        let sourceDir = scansDirectory.appendingPathComponent(sourceProject.id.uuidString)
-        let destDir = scansDirectory.appendingPathComponent(destProject.id.uuidString)
-        guard fileManager.fileExists(atPath: sourceDir.appendingPathComponent(scan.fileName).path) else { return nil }
-        try? fileManager.createDirectory(at: destDir, withIntermediateDirectories: true)
+        do { return try onMain { try duplicateStoredScan(scan, from: sourceProject, to: destProject) } }
+        catch { report(error, action: "Duplicate scan"); return nil }
+    }
+
+    private func duplicateStoredScan(_ requested: Scan, from sourceProject: Project, to destProject: Project) throws -> Scan {
+        guard !isLibraryReadOnly,
+              let scan = projects.first(where: { $0.id == sourceProject.id })?.scans.first(where: { $0.id == requested.id }),
+              projects.contains(where: { $0.id == destProject.id }) else { throw StorageFailure.missingItem }
+        let sourceDir = try validatedDirectory(for: sourceProject)
+        let finalDir = try validatedDirectory(for: destProject)
+        try validateFiles(of: scan, in: sourceDir, requireRegistered: true)
+        try fileManager.createDirectory(at: finalDir, withIntermediateDirectories: true)
 
         let oldBase = (scan.fileName as NSString).deletingPathExtension
         let newBase = UUID().uuidString
+        let destDir = finalDir.appendingPathComponent(".duplicate-" + newBase)
+        guard !fileManager.fileExists(atPath: destDir.path) else { throw StorageFailure.destinationExists }
+        try fileManager.createDirectory(at: destDir, withIntermediateDirectories: false)
+        defer { try? fileManager.removeItem(at: destDir) }
         let copied: ModelCopy
-        do {
-            copied = try copyModel(of: scan, from: sourceDir, to: destDir, newBase: newBase)
-        } catch {
-            DebugLogger.shared.error("Error duplicating scan: \(error)", category: "Storage")
-            return nil
-        }
+        copied = try copyModel(of: scan, from: sourceDir, to: destDir, newBase: newBase)
         // Extra files: internal viewer scene, splat bundle, kept photos.
-        func copyExtra(_ name: String?, as newName: String) -> String? {
+        func copyExtra(_ name: String?, as newName: String, required: Bool = false) throws -> String? {
             guard let name = name else { return nil }
-            let src = sourceDir.appendingPathComponent(name)
-            guard fileManager.fileExists(atPath: src.path) else { return nil }
+            let src = try LibraryFileSafety.child(name, of: sourceDir)
+            guard fileManager.fileExists(atPath: src.path) else {
+                if required { throw StorageFailure.missingItem }
+                return nil
+            }
+            try LibraryFileSafety.validateTree(src)
             let dst = destDir.appendingPathComponent(newName)
-            try? fileManager.removeItem(at: dst)
-            return (try? fileManager.copyItem(at: src, to: dst)) != nil ? newName : nil
+            try fileManager.copyItem(at: src, to: dst)
+            return newName
         }
-        _ = copyExtra("\(oldBase).scn", as: "\(newBase).scn")
-        _ = copyExtra("\(oldBase)_measurements.json", as: "\(newBase)_measurements.json")
+        _ = try copyExtra("\(oldBase).scn", as: "\(newBase).scn")
+        _ = try copyExtra("\(oldBase)_measurements.json", as: "\(newBase)_measurements.json")
         // A duplicate must not silently lose automatic results / semantic labels.
         // OBJ material references are renamed during copying, changing the byte
         // hash but not geometry. Rebind ONLY validated, current version-1 data.
@@ -812,8 +939,7 @@ class StorageManager: ObservableObject {
                 }
             }
         } catch {
-            report(error, action: "Duplicate measurement metadata")
-            return nil
+            throw error
         }
 
         var newScan = Scan(
@@ -833,7 +959,7 @@ class StorageManager: ObservableObject {
                 guard try measurementSHA256(source) == hash else { throw CocoaError(.fileReadCorruptFile) }
                 try fileManager.copyItem(at: source, to: destDir.appendingPathComponent(newBase + "_original.mesh"))
                 newScan.originalMeshSHA256 = hash
-            } catch { report(error, action: "Duplicate original mesh"); return nil }
+            } catch { throw error }
         }
         newScan.hasColor = scan.hasColor
         newScan.boundingBoxMin = scan.boundingBoxMin
@@ -842,9 +968,9 @@ class StorageManager: ObservableObject {
         newScan.notes = scan.notes
         newScan.modelScale = scan.modelScale
         newScan.textureFileName = copied.textureName
-        newScan.splatBundleName = copyExtra(scan.splatBundleName, as: "\(newBase)_bundle.zip")
-        newScan.captureFolderName = copyExtra(scan.captureFolderName, as: "\(newBase)_photos")
-        _ = copyExtra(scan.captureFolderName.map { $0 + PoseFile.suffix }, as: "\(newBase)_photos" + PoseFile.suffix)
+        newScan.splatBundleName = try copyExtra(scan.splatBundleName, as: "\(newBase)_bundle.zip", required: true)
+        newScan.captureFolderName = try copyExtra(scan.captureFolderName, as: "\(newBase)_photos", required: true)
+        _ = try copyExtra(scan.captureFolderName.map { $0 + PoseFile.suffix }, as: "\(newBase)_photos" + PoseFile.suffix)
         newScan.modelTransform = scan.modelTransform
         newScan.sceneFrame = scan.sceneFrame
         newScan.coordinateProvenance = scan.coordinateProvenance
@@ -858,8 +984,11 @@ class StorageManager: ObservableObject {
         newScan.locationReducedAccuracy = scan.locationReducedAccuracy
         newScan.locationReference = scan.locationReference
 
-        do { try addScan(newScan, to: destProject); return newScan }
-        catch { report(error, action: "Duplicate scan"); return nil }
+        let files = try fileManager.contentsOfDirectory(at: destDir, includingPropertiesForKeys: nil)
+        try persistence.copyAndCommit(files.map { (source: $0, destination: finalDir.appendingPathComponent($0.lastPathComponent)) }) {
+            try addScan(newScan, to: destProject)
+        }
+        return newScan
     }
 
     // MARK: - Model Copying
@@ -874,11 +1003,13 @@ class StorageManager: ObservableObject {
     /// come along and the file references inside are rewritten, so the copy
     /// still finds its material and texture.
     private func copyModel(of scan: Scan, from srcDir: URL, to dstDir: URL, newBase: String) throws -> ModelCopy {
+        try validateFiles(of: scan, in: srcDir)
+        try validateExportCompanions(scan, directory: srcDir)
         let oldBase = (scan.fileName as NSString).deletingPathExtension
         let ext = (scan.fileName as NSString).pathExtension
         let src = srcDir.appendingPathComponent(scan.fileName)
         let dst = dstDir.appendingPathComponent("\(newBase).\(ext)")
-        try? fileManager.removeItem(at: dst)
+        guard !fileManager.fileExists(atPath: dst.path) else { throw StorageFailure.destinationExists }
 
         guard ext.lowercased() == "obj" else {
             try fileManager.copyItem(at: src, to: dst)
@@ -894,15 +1025,16 @@ class StorageManager: ObservableObject {
             if fileManager.fileExists(atPath: texSrc.path) {
                 let name = "\(newBase)_texture.\((tex as NSString).pathExtension)"
                 let texDst = dstDir.appendingPathComponent(name)
-                try? fileManager.removeItem(at: texDst)
+                guard !fileManager.fileExists(atPath: texDst.path) else { throw StorageFailure.destinationExists }
                 try fileManager.copyItem(at: texSrc, to: texDst)
                 newTexture = name
                 files.append(texDst)
-            }
+            } else { throw StorageFailure.missingItem }
         }
 
         let mtlSrc = srcDir.appendingPathComponent("\(oldBase).mtl")
-        if var mtl = try? String(contentsOf: mtlSrc, encoding: .utf8) {
+        if fileManager.fileExists(atPath: mtlSrc.path) {
+            var mtl = try String(contentsOf: mtlSrc, encoding: .utf8)
             if let tex = scan.textureFileName, let newTex = newTexture {
                 mtl = mtl.replacingOccurrences(of: tex, with: newTex)
             }
@@ -925,6 +1057,7 @@ class StorageManager: ObservableObject {
         try ExportText.lines(src) { line in
             try output.write(contentsOf: Data((line.replacingOccurrences(of: old, with: new) + "\n").utf8))
         }
+        try output.synchronize()
     }
 
     private func exportBaseName(_ name: String) -> String {
@@ -936,12 +1069,34 @@ class StorageManager: ObservableObject {
 
     // MARK: - Import
 
+    /// File copying and native model parsing must not block the app's main/UI
+    /// thread. Index publication still occurs on main after each complete import.
+    func importFiles(_ urls: [URL], to project: Project) {
+        guard !isImporting, !isExporting else { return }
+        isImporting = true
+        exportQueue.async {
+            var failures: [String] = []
+            for url in urls {
+                do { _ = try self.importOBJFile(from: url, name: url.deletingPathExtension().lastPathComponent, toProject: project) }
+                catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+            }
+            DispatchQueue.main.async {
+                self.isImporting = false
+                if !failures.isEmpty { self.storageError = "Some imports failed. Existing scans are unchanged.\n" + failures.joined(separator: "\n") }
+            }
+        }
+    }
+
     func importOBJFile(from sourceURL: URL, name: String, toProject project: Project) throws -> Scan {
         let scanId = UUID()
         let fileExtension = sourceURL.pathExtension.lowercased()
+        guard ["obj", "ply"].contains(fileExtension) else { throw CocoaError(.fileReadUnsupportedScheme) }
         let fileName = "\(scanId.uuidString).\(fileExtension)"
-        let scanDir = scansDirectory.appendingPathComponent(project.id.uuidString)
+        let scanDir = try writableDirectory(for: project)
         try fileManager.createDirectory(at: scanDir, withIntermediateDirectories: true)
+        let candidates = try newCandidateFiles(base: scanId.uuidString, extension: fileExtension, directory: scanDir)
+        var committed = false
+        defer { if !committed { try? removeExistingItems(candidates) } }
 
         let destURL = scanDir.appendingPathComponent(fileName)
 
@@ -950,51 +1105,91 @@ class StorageManager: ObservableObject {
         defer {
             if accessing { sourceURL.stopAccessingSecurityScopedResource() }
         }
+        try LibraryFileSafety.validateTree(sourceURL)
+        let sourceSize = try sourceURL.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard sourceSize.isRegularFile == true, let size = sourceSize.fileSize, size > 0, size <= 512 * 1024 * 1024 else {
+            throw CocoaError(.fileReadTooLarge)
+        }
 
         let baseName = sourceURL.deletingPathExtension().lastPathComponent
         let newBase = scanId.uuidString
+        let sourceDir = sourceURL.deletingLastPathComponent()
+        var textureName: String?
         if fileExtension == "obj" {
+            let materials = try ExportText.objMaterialReferences(sourceURL)
+            guard materials.isEmpty || materials == [baseName + ".mtl"] else { throw CoordinateError.incompleteExport }
+            if let material = materials.first {
+                let mtlSourceURL = try LibraryFileSafety.child(material, of: sourceDir)
+                try LibraryFileSafety.validateTree(mtlSourceURL)
+                let mtlSize = try mtlSourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+                guard mtlSize <= 1_048_576 else { throw CocoaError(.fileReadTooLarge) }
+                let textures = try ExportText.materialTextureReferences(mtlSourceURL)
+                guard textures.count <= 1 else { throw CoordinateError.incompleteExport }
+                if let texture = textures.first {
+                    guard [baseName + "_texture.jpg", baseName + "_texture.png"].contains(texture) else {
+                        throw CoordinateError.incompleteExport
+                    }
+                    let textureSource = try LibraryFileSafety.child(texture, of: sourceDir)
+                    try LibraryFileSafety.validateTree(textureSource)
+                    let textureSize = try textureSource.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+                    guard textureSize > 0, textureSize <= 64 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                    let renamed = newBase + "_texture." + textureSource.pathExtension
+                    try fileManager.copyItem(at: textureSource, to: scanDir.appendingPathComponent(renamed))
+                    textureName = renamed
+                }
+                let mtl = try String(contentsOf: mtlSourceURL, encoding: .utf8)
+                    .replacingOccurrences(of: baseName + "_texture", with: newBase + "_texture")
+                try mtl.write(to: scanDir.appendingPathComponent(newBase + ".mtl"), atomically: true, encoding: .utf8)
+            }
             // Point the copy at its renamed .mtl
             try copyPatchingHeader(from: sourceURL, to: destURL,
                                    replacing: "\(baseName).mtl", with: "\(newBase).mtl")
         } else {
+            try ExportText.validatePLYHeader(sourceURL)
             try fileManager.copyItem(at: sourceURL, to: destURL)
         }
 
-        // Texture next to the model (our own "_texture" naming)
-        let sourceDir = sourceURL.deletingLastPathComponent()
-        var textureName: String?
-        for suffix in ["_texture.jpg", "_texture.png"] {
-            let texSourceURL = sourceDir.appendingPathComponent("\(baseName)\(suffix)")
-            if fileManager.fileExists(atPath: texSourceURL.path) {
-                let name = "\(newBase)\(suffix)"
-                if (try? fileManager.copyItem(at: texSourceURL, to: scanDir.appendingPathComponent(name))) != nil {
-                    textureName = name
-                }
-                break
-            }
-        }
-
-        // Material file, with its texture reference renamed to match
-        let mtlSourceURL = sourceURL.deletingPathExtension().appendingPathExtension("mtl")
-        if var mtl = try? String(contentsOf: mtlSourceURL, encoding: .utf8) {
-            mtl = mtl.replacingOccurrences(of: "\(baseName)_texture", with: "\(newBase)_texture")
-            try? mtl.write(to: scanDir.appendingPathComponent("\(newBase).mtl"), atomically: true, encoding: .utf8)
-        }
-
         let fileSize = (try? fileManager.attributesOfItem(atPath: destURL.path)[.size] as? Int64) ?? 0
-
+        let scene = try SCNScene(url: destURL, options: [.checkConsistency: true])
+        var vertexCount = 0, faceCount = 0, hasColor = false
+        var invalid = false
+        scene.rootNode.enumerateChildNodes { node, stop in
+            guard let geometry = node.geometry else { return }
+            let count = geometry.sources(for: .vertex).first?.vectorCount ?? 0
+            guard count >= 0, count <= 5_000_000 - vertexCount else { invalid = true; stop.pointee = true; return }
+            vertexCount += count
+            for element in geometry.elements where element.primitiveType == .triangles {
+                guard element.primitiveCount >= 0, element.primitiveCount <= 5_000_000 - faceCount else {
+                    invalid = true; stop.pointee = true; return
+                }
+                faceCount += element.primitiveCount
+            }
+            hasColor = hasColor || !geometry.sources(for: .color).isEmpty
+        }
+        guard !invalid, vertexCount > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        let measuredBounds = try SceneCoordinateValidation.bounds(scene: scene)
+        guard measuredBounds.vertexCount == vertexCount,
+              let safeBounds = ViewerGeometryLimits.bounds(low: SIMD3<Float>(measuredBounds.minimum),
+                                                           high: SIMD3<Float>(measuredBounds.maximum)) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         var scan = Scan(
             name: name,
             fileName: fileName,
+            vertexCount: vertexCount,
+            faceCount: faceCount,
             fileSize: fileSize
         )
         scan.textureFileName = textureName
         scan.hasTexture = textureName != nil
+        scan.hasColor = hasColor
+        scan.boundingBoxMin = safeBounds.low
+        scan.boundingBoxMax = safeBounds.high
         scan.coordinateProvenance = CoordinateProvenance(sourceKind: "imported", scaleStatus: .unknown,
             alignmentMethod: "none", localDatum: "Unknown source origin and units; calibration required")
 
         try addScan(scan, to: project)
+        committed = true
         return scan
     }
 
@@ -1054,12 +1249,10 @@ class StorageManager: ObservableObject {
                     try SceneCoordinateValidation.verify(source: source, exported: model, transform: transform)
                 } else {
                     guard transform == CoordinateMath.identity else { throw CoordinateError.unsupportedArchive }
-                    try validateExportCompanions(scan, directory: sourceDirectory)
                     model = try copyModel(of: scan, from: sourceDirectory, to: folder, newBase: base).model
                 }
             case .zUpOBJ:
                 if ext == "obj", transform == CoordinateMath.identity {
-                    try validateExportCompanions(scan, directory: sourceDirectory)
                     model = try copyModel(of: scan, from: sourceDirectory, to: folder, newBase: base).model
                     try StorageManager.convertOBJToZUp(at: model, cancelled: { self.exportCancellation.isCancelled })
                 } else {
@@ -1123,27 +1316,16 @@ class StorageManager: ObservableObject {
     }
 
     private func validateExportCompanions(_ scan: Scan, directory: URL) throws {
+        try validateFiles(of: scan, in: directory)
         if (scan.fileName as NSString).pathExtension.lowercased() == "obj" {
             let expected = (scan.fileName as NSString).deletingPathExtension + ".mtl"
-            try ExportText.lines(directory.appendingPathComponent(scan.fileName)) { line in
-                try exportCancellation.check()
-                let parts = line.split(whereSeparator: { $0.isWhitespace })
-                if parts.first == "mtllib" {
-                    guard parts.count == 2, String(parts[1]) == expected,
-                          fileManager.fileExists(atPath: directory.appendingPathComponent(expected).path) else {
-                        throw CoordinateError.incompleteExport
-                    }
-                    // Arbitrary imported material packaging is not implemented:
-                    // reject unsupported maps instead of sharing a broken package.
-                    try ExportText.lines(directory.appendingPathComponent(expected)) { material in
-                        let fields = material.split(whereSeparator: { $0.isWhitespace })
-                        if let keyword = fields.first, keyword.hasPrefix("map_") || ["bump", "disp", "decal", "refl"].contains(String(keyword)) {
-                            guard fields.count == 2, String(fields[1]) == scan.textureFileName,
-                                  fileManager.fileExists(atPath: directory.appendingPathComponent(String(fields[1])).path) else {
-                                throw CoordinateError.incompleteExport
-                            }
-                        }
-                    }
+            let materials = try ExportText.objMaterialReferences(directory.appendingPathComponent(scan.fileName))
+            guard materials.isEmpty || materials == [expected] else { throw CoordinateError.incompleteExport }
+            if !materials.isEmpty {
+                let references = try ExportText.materialTextureReferences(directory.appendingPathComponent(expected))
+                guard references.allSatisfy({ $0 == scan.textureFileName &&
+                    fileManager.fileExists(atPath: directory.appendingPathComponent($0).path) }) else {
+                    throw CoordinateError.incompleteExport
                 }
             }
         }

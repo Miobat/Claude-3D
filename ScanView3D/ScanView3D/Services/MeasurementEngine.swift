@@ -446,32 +446,24 @@ final class ModelGeometryIndex {
         for src in sources {
             guard let vsrc = src.geometry.sources(for: .vertex).first,
                   vsrc.usesFloatComponents, vsrc.bytesPerComponent == 4, vsrc.componentsPerVector >= 3 else { continue }
-            let m = src.transform
             let count = vsrc.vectorCount
-            var local = [SIMD3<Float>](repeating: .zero, count: count)
-            vsrc.data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                for i in 0..<count {
-                    let f = base.advanced(by: vsrc.dataOffset + vsrc.dataStride * i).assumingMemoryBound(to: Float.self)
-                    let w = m * SIMD4<Float>(f[0], f[1], f[2], 1)
-                    local[i] = SIMD3<Float>(w.x, w.y, w.z)
-                }
-            }
+            guard let local = GeometryBufferReader.positions(data: vsrc.data, count: count,
+                offset: vsrc.dataOffset, stride: vsrc.dataStride, transform: src.transform) else { continue }
             points.append(contentsOf: local)
 
             // Triangle normals for finding wall directions.
             for element in src.geometry.elements where element.primitiveType == .triangles {
                 let bpi = element.bytesPerIndex
                 let triCount = element.primitiveCount
+                guard GeometryBufferReader.containsIndices(dataCount: element.data.count,
+                    primitiveCount: triCount, indicesPerPrimitive: 3, bytesPerIndex: bpi) else { continue }
                 let step = max(1, triCount / 300_000)
                 element.data.withUnsafeBytes { raw in
-                    guard let base = raw.baseAddress else { return }
                     func index(_ i: Int) -> Int {
-                        let p = base.advanced(by: i * bpi)
                         switch bpi {
-                        case 1: return Int(p.assumingMemoryBound(to: UInt8.self).pointee)
-                        case 2: return Int(p.assumingMemoryBound(to: UInt16.self).pointee)
-                        default: return Int(p.assumingMemoryBound(to: UInt32.self).pointee)
+                        case 1: return Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt8.self))
+                        case 2: return Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt16.self))
+                        default: return Int(raw.loadUnaligned(fromByteOffset: i * bpi, as: UInt32.self))
                         }
                     }
                     var t = 0
@@ -480,7 +472,7 @@ final class ModelGeometryIndex {
                         if i0 < count, i1 < count, i2 < count {
                             let c = simd_cross(local[i1] - local[i0], local[i2] - local[i0])
                             let len = simd_length(c)
-                            if len > 1e-10 { faceNormals.append((c / len, len * 0.5 * Float(step))) }
+                            if len.isFinite, len > 1e-10 { faceNormals.append((c / len, len * 0.5 * Float(step))) }
                         }
                         t += step
                     }

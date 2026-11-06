@@ -637,6 +637,10 @@ struct ScannerView: View {
             } else {
                 Button {
                     guard activeDraft == nil else { showingSaveDialog = true; return }
+                    guard !storageManager.isLibraryReadOnly else {
+                        failSave("Your library needs recovery before a new scan can be saved. Existing files are preserved.")
+                        return
+                    }
                     do { settings.rangeValue = try CaptureRangeSetting.normalized(settings.rangeValue) }
                     catch { failSave("Cannot start scan: \(error.localizedDescription)"); return }
                     captureLocation = nil

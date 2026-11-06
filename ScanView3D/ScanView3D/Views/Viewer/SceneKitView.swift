@@ -171,16 +171,16 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     /// Grid lying under the model (at its lowest point, i.e. the floor), sized to fit.
     private func addGrid(to scene: SCNScene, under model: SCNNode) {
         let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: model)
-        let extent = max(maxB.x - minB.x, maxB.z - minB.z)
-        let spacing: Float = extent > 40 ? 5 : (extent > 12 ? 1 : 0.5)
-        let half = (max(extent * 0.75, 2) / spacing).rounded(.up) * spacing
+        guard let bounds = ViewerGeometryLimits.bounds(low: minB, high: maxB),
+              let grid = ViewerGeometryLimits.grid(low: minB, high: maxB) else { return }
+        let spacing = grid.spacing, half = grid.half
         let lineRadius = CGFloat(max(0.002, spacing * 0.004))
         let color = UIColor(white: 0.5, alpha: 0.35)
 
         let gridNode = SCNNode()
         gridNode.name = "grid"
-        gridNode.position = SCNVector3((minB.x + maxB.x) / 2, minB.y, (minB.z + maxB.z) / 2)
-        let lineCount = Int(half / spacing)
+        gridNode.position = SCNVector3(bounds.center.x, minB.y, bounds.center.z)
+        let lineCount = grid.halfLines
         for i in -lineCount...lineCount {
             let pos = Float(i) * spacing
             let xGeometry = SCNCylinder(radius: lineRadius, height: CGFloat(half * 2))
@@ -203,19 +203,27 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     /// World-space bounds of the model node (its own box, moved by its transform).
     static func worldBounds(of node: SCNNode) -> (SIMD3<Float>, SIMD3<Float>) {
         let (mn, mx) = node.boundingBox
+        let low = SIMD3<Float>(mn.x, mn.y, mn.z), high = SIMD3<Float>(mx.x, mx.y, mx.z)
+        let invalid = SIMD3<Float>(repeating: .nan)
+        guard (0..<3).allSatisfy({ low[$0].isFinite && high[$0].isFinite && low[$0] <= high[$0] }) else {
+            return (invalid, invalid)
+        }
         let m = node.simdTransform
         var corners: [SIMD3<Float>] = []
         for x in [mn.x, mx.x] { for y in [mn.y, mx.y] { for z in [mn.z, mx.z] {
             let w = m * SIMD4<Float>(Float(x), Float(y), Float(z), 1)
-            corners.append(SIMD3<Float>(w.x, w.y, w.z))
+            let point = SIMD3<Float>(w.x, w.y, w.z)
+            guard w.w.isFinite, ViewerGeometryLimits.accepts(point) else { return (invalid, invalid) }
+            corners.append(point)
         } } }
         return MeshData.bounds(of: corners)
     }
 
     private func addBoundingBox(to scene: SCNScene, for model: SCNNode) {
         let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: model)
-        let size = maxB - minB
-        let center = (minB + maxB) / 2
+        guard let bounds = ViewerGeometryLimits.bounds(low: minB, high: maxB) else { return }
+        let size = bounds.extent
+        let center = bounds.center
 
         let box = SCNBox(width: CGFloat(size.x), height: CGFloat(size.y), length: CGFloat(size.z), chamferRadius: 0)
         box.firstMaterial?.diffuse.contents = UIColor.clear
@@ -230,6 +238,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
     }
 
     private func loadModel(sceneView: SCNView, context: Context) {
+        let coordinator = context.coordinator
         let fileURL = storageManager.getScanFileURL(scan: scan, project: project)
 
         // Try native SceneKit format first (faster, preserves materials), fall back to OBJ
@@ -261,7 +270,8 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                 node = MeshProcessor.createSceneKitNode(fromOBJ: fileURL)
             }
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak sceneView, weak coordinator] in
+                guard let sceneView, let coordinator, coordinator.acceptsLoadResult(for: sceneView) else { return }
                 if let node = node {
                     // Metric scale correction for photogrammetry models (which have
                     // no inherent real-world scale). Measurements use world-space
@@ -269,33 +279,41 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
                     if let m = scan.modelMatrix {
                         node.simdTransform = m
                     }
+                    let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
+                    guard let bounds = ViewerGeometryLimits.bounds(low: minB, high: maxB) else {
+                        self.loadError = "The model has invalid bounds or coordinates outside the supported local range (±1,000 km). The original file has not been changed."
+                        self.isLoading = false
+                        return
+                    }
                     sceneView.scene?.rootNode.addChildNode(node)
                     self.modelNode = node
-
-                    let (minB, maxB) = SceneKitViewRepresentable.worldBounds(of: node)
-                    let centerV = (minB + maxB) / 2
+                    let centerV = bounds.center
                     let center = SCNVector3(centerV.x, centerV.y, centerV.z)
-                    let extent = maxB - minB
+                    let extent = bounds.extent
                     let distance = max(max(extent.x, max(extent.y, extent.z)) * 2.0, 0.1)
 
-                    context.coordinator.cameraController?.frame(center: centerV, extent: distance / 2)
+                    coordinator.cameraController?.frame(center: centerV, extent: distance / 2)
 
-                    context.coordinator.modelCenter = center
-                    context.coordinator.modelExtent = extent
-                    context.coordinator.viewDistance = distance
-                    context.coordinator.collectPickablePoints(from: node)
+                    coordinator.modelCenter = center
+                    coordinator.modelExtent = extent
+                    coordinator.viewDistance = distance
+                    coordinator.collectPickablePoints(from: node)
 
                     // Surface index for snapping (corners, edges, wall directions).
                     let sources = ModelGeometryIndex.sources(in: node)
                     self.objects.prepare(sources: sources, store: self.storageManager, scan: self.scan, project: self.project, labelsVerified: loadedNativeScene)
-                    DispatchQueue.global(qos: .utility).async {
+                    DispatchQueue.global(qos: .utility).async { [weak coordinator, weak sceneView] in
                         let index = ModelGeometryIndex.build(from: sources)
-                        DispatchQueue.main.async { context.coordinator.geometryIndex = index }
+                        DispatchQueue.main.async {
+                            guard let coordinator, let sceneView, coordinator.acceptsLoadResult(for: sceneView) else { return }
+                            coordinator.geometryIndex = index
+                        }
                     }
                     self.isLoading = false
                     #if DEBUG && targetEnvironment(simulator)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        DesignPreview.navigationChecks(view: sceneView, coordinator: context.coordinator)
+                        guard coordinator.acceptsLoadResult(for: sceneView) else { return }
+                        DesignPreview.navigationChecks(view: sceneView, coordinator: coordinator)
                     }
                     #endif
                 } else {
@@ -332,6 +350,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         private var pickablePoints: [SIMD3<Float>] = []
         private var pointPicker: PointCloudPicker?
         private var disposed = false
+        private let viewerOwner = UUID()
         private var walkEnabled = false
         /// Original material look, so "Textured" can restore it after Flat/Wireframe.
         private var originalMaterials: [ObjectIdentifier: (diffuse: Any?, emission: Any?, lighting: SCNMaterial.LightingModel, fill: SCNFillMode, shaders: [SCNShaderModifierEntryPoint: String]?)] = [:]
@@ -359,9 +378,15 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
             NotificationCenter.default.removeObserver(self)
             previewTimer?.invalidate(); previewTimer = nil
             activeCancellable?.cancel()
-            session?.geometry = nil
-            session?.renderSink = nil
-            parent.objects.detach()
+            if session?.geometry === self {
+                session?.geometry = nil
+                session?.renderSink = nil
+            }
+            parent.objects.detach(viewer: viewerOwner)
+        }
+
+        func acceptsLoadResult(for view: SCNView) -> Bool {
+            !disposed && sceneView === view
         }
 
         func attach(session: MeasurementSession, overlay: MeasurementOverlayScene) {
@@ -426,23 +451,16 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         // MARK: - Point Picking Support
 
         func collectPickablePoints(from root: SCNNode) {
+            pointPicker = nil
             var points: [SIMD3<Float>] = []
             func visit(_ node: SCNNode) {
                 if let geometry = node.geometry,
                    geometry.elements.contains(where: { $0.primitiveType == .point }),
-                   let source = geometry.sources(for: .vertex).first {
-                    let m = node.simdWorldTransform
-                    let stride = source.dataStride, offset = source.dataOffset
-                    let count = source.vectorCount
-                    points.reserveCapacity(points.count + count)
-                    source.data.withUnsafeBytes { raw in
-                        guard let base = raw.baseAddress, source.bytesPerComponent == 4 else { return }
-                        for i in 0..<count {
-                            let p = base.advanced(by: offset + stride * i).assumingMemoryBound(to: Float.self)
-                            let w = m * SIMD4<Float>(p[0], p[1], p[2], 1)
-                            points.append(SIMD3<Float>(w.x, w.y, w.z))
-                        }
-                    }
+                   let source = geometry.sources(for: .vertex).first,
+                   source.usesFloatComponents, source.bytesPerComponent == 4, source.componentsPerVector >= 3,
+                   let decoded = GeometryBufferReader.positions(data: source.data, count: source.vectorCount,
+                       offset: source.dataOffset, stride: source.dataStride, transform: node.simdWorldTransform) {
+                    points.append(contentsOf: decoded)
                 }
                 node.childNodes.forEach(visit)
             }
@@ -467,6 +485,7 @@ struct SceneKitViewRepresentable: UIViewRepresentable {
         }
 
         func attachObjects(_ objects: ObjectMeasurementSession) {
+            objects.attachViewer(viewerOwner)
             objects.render = { [weak self] region, node in
                 guard let self, !self.disposed, let root = self.sceneView?.scene?.rootNode else { return }
                 root.childNode(withName: "objectSelection", recursively: false)?.removeFromParentNode()

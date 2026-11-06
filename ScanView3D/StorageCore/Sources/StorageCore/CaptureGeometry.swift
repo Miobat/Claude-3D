@@ -155,6 +155,9 @@ struct CapturedSurfaceIndex {
         /// Sampled camera colour survives lightweight recovery checkpoints.
         let color: SIMD3<Float>
         var photoID: Int?
+        /// Keep the observed photo location separate from later depth updates.
+        /// A new representative in this voxel must not move a photo claim.
+        var photoPoint: SIMD3<Float>? = nil
     }
     private(set) var cells: [SIMD3<Int32>: Sample] = [:]
     let cellSize: Float
@@ -162,7 +165,7 @@ struct CapturedSurfaceIndex {
     private var retainedPhotos: Set<Int> = []
 
     init(cellSize: Float = 0.025, capacity: Int = 600_000) {
-        self.cellSize = max(0.005, cellSize)
+        self.cellSize = cellSize.isFinite ? max(0.005, cellSize) : 0.025
         self.capacity = max(1, capacity)
     }
 
@@ -176,12 +179,14 @@ struct CapturedSurfaceIndex {
     @discardableResult
     mutating func insert(_ p: SIMD3<Float>, camera: SIMD3<Float>, range: Float,
                          color: SIMD3<Float> = SIMD3(repeating: 0.7)) -> Bool {
-        guard range.isFinite, range > 0, simd_distance_squared(p, camera) <= range * range,
+        guard range.isFinite, range > 0, color.x.isFinite, color.y.isFinite, color.z.isFinite,
+              simd_distance_squared(p, camera) <= range * range,
               let k = key(p) else { return false }
         // Preserve prior observations at capacity, never invent new coverage.
         let previous = cells[k]
         guard previous != nil || cells.count < capacity else { return false }
-        cells[k] = Sample(point: p, camera: camera, range: range, color: color, photoID: previous?.photoID)
+        cells[k] = Sample(point: p, camera: camera, range: range, color: color,
+                          photoID: previous?.photoID, photoPoint: previous?.photoPoint)
         return true
     }
 
@@ -193,26 +198,31 @@ struct CapturedSurfaceIndex {
         guard retainedPhotos.contains(photoID), let k = key(p), var sample = cells[k],
               simd_distance_squared(sample.point, p) <= 0.035 * 0.035 else { return }
         sample.photoID = photoID
+        sample.photoPoint = p
         cells[k] = sample
     }
 
     /// Constant-time photo query for the live mask. Do not borrow a neighbour's
     /// photo claim: absence should invite another photograph, not paint mint.
     func isPhotographed(_ p: SIMD3<Float>) -> Bool {
-        guard let k = key(p), let s = cells[k], let id = s.photoID else { return false }
+        guard let k = key(p), let s = cells[k], let id = s.photoID, let photoPoint = s.photoPoint else { return false }
         return retainedPhotos.contains(id) && simd_distance_squared(s.point, p) <= 0.035 * 0.035 &&
+            simd_distance_squared(photoPoint, p) <= 0.035 * 0.035 &&
             simd_distance_squared(s.camera, p) <= s.range * s.range
     }
 
     func sample(at p: SIMD3<Float>, tolerance: Float = 0.04, requirePhoto: Bool = false) -> Sample? {
         guard let k = key(p), tolerance.isFinite, tolerance >= 0 else { return nil }
         func matches(_ s: Sample) -> Bool {
-            (!requirePhoto || s.photoID.map { retainedPhotos.contains($0) } == true) &&
+            (!requirePhoto || (s.photoID.map { retainedPhotos.contains($0) } == true &&
+                s.photoPoint.map { simd_distance_squared($0, p) <= 0.035 * 0.035 } == true)) &&
             simd_distance_squared(s.point, p) <= tolerance * tolerance &&
             simd_distance_squared(s.camera, p) <= s.range * s.range
         }
         if let s = cells[k], matches(s) { return s }
-        let reach = min(8, Int32(ceil(tolerance / cellSize)))
+        // Clamp before conversion: finite tolerance / a tiny cell may overflow
+        // Float or Int32 and trap, even though only eight neighbours are needed.
+        let reach = Int32(min(8, ceil(tolerance / cellSize)))
         for dx in -reach...reach {
             for dy in -reach...reach {
                 for dz in -reach...reach {

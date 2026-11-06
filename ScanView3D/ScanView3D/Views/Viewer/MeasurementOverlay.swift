@@ -55,6 +55,7 @@ final class MeasurementSession: ObservableObject {
     @Published var preview: SnapResult? { didSet { publish() } }
     @Published var isActive = false { didSet { publish() } }
     @Published var message: String?
+    @Published private(set) var pendingSave: ScanMeasurement?
 
     var unit: ScanSettings.MeasurementUnit = .meters { didSet { publish() } }
     weak var geometry: MeasurementGeometryProvider?
@@ -82,7 +83,7 @@ final class MeasurementSession: ObservableObject {
     }
 
     var canFinish: Bool {
-        tool.autoCompleteCount == nil && draftPoints.count >= tool.minimumPoints
+        pendingSave != nil || (tool.autoCompleteCount == nil && draftPoints.count >= tool.minimumPoints)
     }
 
     var status: String {
@@ -108,6 +109,17 @@ final class MeasurementSession: ObservableObject {
     }
 
     func place(_ snap: SnapResult) {
+        // A failed automatic save still owns its original endpoints. Another tap
+        // must not turn a two-point distance into a three-point measurement (or
+        // strand Wall-to-Wall, which completes at exactly two points).
+        guard pendingSave == nil else {
+            message = "Measurement not saved. Tap Retry Save, or Undo to edit it."
+            return
+        }
+        guard snap.point.x.isFinite, snap.point.y.isFinite, snap.point.z.isFinite else {
+            flash("That surface point is invalid. Please choose another point.")
+            return
+        }
         message = nil
         switch tool {
         case .height:
@@ -137,11 +149,13 @@ final class MeasurementSession: ObservableObject {
 
     /// Finish an open-ended measurement (path, area, elevation).
     func finish() {
+        if let pendingSave { commit(pendingSave); return }
         guard canFinish else { return }
         commit(ScanMeasurement(kind: tool, points: draftPoints))
     }
 
     func undo() {
+        pendingSave = nil
         message = nil
         if !draftPoints.isEmpty {
             draftPoints.removeLast()
@@ -166,7 +180,14 @@ final class MeasurementSession: ObservableObject {
     }
 
     private func commit(_ m: ScanMeasurement) {
-        guard persist(measurements + [m]) else { return }
+        guard persist(measurements + [m]) else {
+            pendingSave = m
+            draftPoints = m.points
+            draftNormals = m.normals
+            publish()
+            return
+        }
+        pendingSave = nil
         draftPoints.removeAll()
         draftNormals.removeAll()
         selectedID = m.id
@@ -187,6 +208,7 @@ final class MeasurementSession: ObservableObject {
     }
 
     private func discardDraft() {
+        pendingSave = nil
         draftPoints.removeAll()
         draftNormals.removeAll()
         message = nil

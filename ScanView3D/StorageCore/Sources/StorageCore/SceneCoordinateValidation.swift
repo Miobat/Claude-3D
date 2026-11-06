@@ -12,10 +12,15 @@ enum SceneCoordinateValidation {
         var vertexCount: Int
     }
     static func bounds(url: URL, transform: [Double] = CoordinateMath.identity) throws -> Bounds {
+        _ = try CoordinateMath.validated(transform)
+        return try bounds(scene: SCNScene(url: url, options: [.checkConsistency: true]), transform: transform)
+    }
+    /// Imports already have a decoded scene. Validate those exact buffers rather
+    /// than loading a second model-sized scene merely to inspect its positions.
+    static func bounds(scene: SCNScene, transform: [Double] = CoordinateMath.identity) throws -> Bounds {
         let m = try CoordinateMath.validated(transform)
         let correction = simd_double4x4(SIMD4(m[0], m[1], m[2], m[3]), SIMD4(m[4], m[5], m[6], m[7]),
                                        SIMD4(m[8], m[9], m[10], m[11]), SIMD4(m[12], m[13], m[14], m[15]))
-        let scene = try SCNScene(url: url, options: [.checkConsistency: true])
         var result = Bounds(minimum: SIMD3(repeating: .infinity), maximum: SIMD3(repeating: -.infinity), vertexCount: 0)
         func visit(_ node: SCNNode, parent: simd_double4x4) throws {
             let f = node.simdTransform

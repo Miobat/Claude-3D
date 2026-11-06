@@ -41,6 +41,14 @@ struct ContentView: View {
                 .tag(3)
         }
         .environmentObject(storageManager)
+        .disabled(storageManager.isImporting)
+        .overlay {
+            if storageManager.isImporting {
+                ProgressView("Checking and importing models…")
+                    .padding(24).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                    .accessibilityLabel("Checking and importing models. Please wait.")
+            }
+        }
         .tint(FieldStyle.accent)
         .safeAreaInset(edge: .top) {
             if storageManager.isLibraryReadOnly {

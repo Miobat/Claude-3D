@@ -209,14 +209,7 @@ struct ProjectListView: View {
                 project = created
             }
 
-            for url in urls {
-                let name = url.deletingPathExtension().lastPathComponent
-                do {
-                    let _ = try storageManager.importOBJFile(from: url, name: name, toProject: project)
-                } catch {
-                    storageManager.report(error, action: "Import \(name)")
-                }
-            }
+            storageManager.importFiles(urls, to: project)
             importTargetProject = nil
 
         case .failure(let error):

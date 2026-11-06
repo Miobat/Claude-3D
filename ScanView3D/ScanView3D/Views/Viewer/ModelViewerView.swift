@@ -476,8 +476,8 @@ struct ModelViewerView: View {
                 }
                 .accessibilityLabel("Add point at crosshair")
 
-                if session.tool.autoCompleteCount == nil {
-                    Button("Done") { session.finish() }
+                if session.tool.autoCompleteCount == nil || session.pendingSave != nil {
+                    Button(session.pendingSave == nil ? "Done" : "Retry Save") { session.finish() }
                         .font(.headline)
                         .disabled(!session.canFinish)
                 }

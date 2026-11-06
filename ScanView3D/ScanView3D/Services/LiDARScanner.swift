@@ -107,8 +107,6 @@ class LiDARScanner: NSObject, ObservableObject {
     var acceptedDepthFrame: AcceptedDepthFrame? { depthCloud.acceptedFrame }
 
     // Memory limits (MB). "Available" is the app's real remaining budget.
-    private let maxTextureMemoryMB: Double = 800
-    private let pauseTexturesBelowMB: Double = 400
     private let pauseScanBelowMB: Double = 200
 
     // MARK: - Initialization
@@ -490,7 +488,7 @@ class LiDARScanner: NSObject, ObservableObject {
         }
 
         // High Quality / Splat: posed photos.
-        if captureMode == .highQuality || captureMode == .splatExport {
+        if (captureMode == .highQuality || captureMode == .splatExport) && !textureCapturePaused {
             considerPhoto(frame, blurPixels: blurPixels)
         }
     }
@@ -627,6 +625,9 @@ class LiDARScanner: NSObject, ObservableObject {
     private func savePhoto(_ sample: PhotoSample) {
         guard let folder = captureFolderURL, highResFrameCount + pendingHighResSaves < maxHighResFrames else { return }
         guard let mask = sample.rangeMask, mask.isValid, mask.pixels.contains(255) else {
+            // A rejected view is not a retained photo. Allow a stationary retry
+            // when reliable depth returns instead of requiring the user to move.
+            lastPhotoTransform = nil
             captureHint = "Aim at a surface within range — no reliable in-range depth for this photo"
             return
         }
@@ -672,6 +673,7 @@ class LiDARScanner: NSObject, ObservableObject {
                         self.highResFrameCount = self.capturedPoses.count
                         self.updateParallaxHint()
                     } else {
+                        self.lastPhotoTransform = nil
                         self.scanError = "A photo could not be saved. Existing photos are kept. \(failure?.localizedDescription ?? "JPEG encoding failed")"
                     }
                 }
@@ -761,7 +763,9 @@ class LiDARScanner: NSObject, ObservableObject {
         let memoryPercent = min(100, max(0, 100 * (1 - (available - pauseScanBelowMB) / 2000)))
         scanCapacityPercent = max(memoryPercent, captureBudgetPercent)
 
-        if captureMode != .terrain && (available < pauseTexturesBelowMB || textureMemoryMB > maxTextureMemoryMB) && !textureCapturePaused {
+        let photosEnabled = (captureMode == .fast && captureTexture) || captureMode == .highQuality || captureMode == .splatExport
+        let memoryAction = CaptureMemoryPolicy.action(availableMB: available, textureMB: textureMemoryMB, photosEnabled: photosEnabled)
+        if memoryAction == .pausePhotos && !textureCapturePaused {
             textureCapturePaused = true
             textureCaptureIssue = "Photos paused to protect memory — shape capture continues"
             scanProgress = "Photo capture paused (memory) — scan continues"
@@ -769,7 +773,7 @@ class LiDARScanner: NSObject, ObservableObject {
         }
 
         // Pause (not stop) so the user can still tap Stop and save everything.
-        if available < pauseScanBelowMB && !isPaused {
+        if memoryAction == .pauseCapture && !isPaused {
             pauseScanning()
             scanProgress = "Memory nearly full — tap Stop to save"
             scanError = "Your phone is running out of memory, so scanning was paused. Tap Stop to save what you have."
@@ -804,6 +808,8 @@ class LiDARScanner: NSObject, ObservableObject {
     /// - lightweight: skips expensive photo reprojection, retaining sampled
     ///   depth-camera vertex colour for a usable recovery checkpoint.
     func buildCombinedMesh(lightweight: Bool = false, completion: @escaping (MeshData?) -> Void) {
+        let captureEpoch = epoch
+        let token = captureEpoch.current
         let cloud = captureMode.usesPointCloud ? depthCloud : nil
         let terrain = captureMode == .terrain
         // Point modes return the depth cloud, so don't copy all mesh buffers for nothing.
@@ -813,21 +819,25 @@ class LiDARScanner: NSObject, ObservableObject {
         let mode = meshMode
         let wantCameraColors = captureTexture && captureMode == .fast && !lightweight
         let mapper = textureMapper
+        let finish: (MeshData?) -> Void = { mesh in
+            DispatchQueue.main.async { completion(captureEpoch.isCurrent(token) ? mesh : nil) }
+        }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            guard captureEpoch.isCurrent(token) else { finish(nil); return }
             // Point modes: the depth-sensor cloud is far denser than mesh vertices.
             if let cloudMesh = cloud?.pointCloud() {
-                DispatchQueue.main.async { completion(cloudMesh) }
+                finish(cloudMesh)
                 return
             }
-            if terrain { DispatchQueue.main.async { completion(nil) }; return }
+            if terrain { finish(nil); return }
             let evidence = depthSource.surfaceEvidence
             var mesh = LiDARScanner.combine(anchors: anchors, evidence: evidence, meshMode: mode)
             if let m = mesh, wantCameraColors, mapper.frameCount > 0 {
                 let colors = mapper.sampleVertexColors(vertices: m.vertices, normals: m.normals, fallbackColors: m.colors)
                 mesh = m.replacingColors(colors)
             }
-            DispatchQueue.main.async { completion(mesh) }
+            finish(mesh)
         }
     }
 

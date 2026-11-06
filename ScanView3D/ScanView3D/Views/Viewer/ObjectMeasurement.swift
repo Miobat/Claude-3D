@@ -39,6 +39,7 @@ final class ObjectMeasurementSession: ObservableObject {
     var unit: ScanSettings.MeasurementUnit = .preferred { didSet { publish() } }
     var render: ((AutomaticMeasuredRegion?, SCNNode?) -> Void)?
     var alignView: ((String, UprightMeasurementBounds) -> Void)?
+    private(set) var viewerOwner: UUID?
     private let queue = DispatchQueue(label: "scan.object-measurement", qos: .userInitiated)
     private var index: ObjectSelectionIndex? // accessed only on queue
     private var revision: MeasurementModelRevision?
@@ -299,7 +300,14 @@ final class ObjectMeasurementSession: ObservableObject {
         pendingPaint = nil
         pick(point: hit.0, normal: hit.1, cameraFront: hit.2)
     }
-    func detach() { work.cancel(); generation = UUID(); pendingPaint = nil; render = nil; alignView = nil }
+    func attachViewer(_ owner: UUID) { viewerOwner = owner }
+    func detach(viewer owner: UUID? = nil) {
+        // SwiftUI may create the replacement view before dismantling its old
+        // coordinator. The old owner must not cancel the replacement's work.
+        guard owner == nil || owner == viewerOwner else { return }
+        viewerOwner = nil
+        work.cancel(); generation = UUID(); pendingPaint = nil; render = nil; alignView = nil
+    }
     private func publish() { render?(active ? draft : nil, active ? highlight : nil) }
 }
 

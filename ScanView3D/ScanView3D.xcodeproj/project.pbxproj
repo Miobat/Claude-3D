@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A10053 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B10053; };
 		A10050 /* MeshRetention.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10050; };
 		A10051 /* TerrainCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10051; };
 		A10052 /* AdaptiveTerrain.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10052; };
@@ -60,6 +61,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B10053 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B10050 /* MeshRetention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/MeshRetention.swift; sourceTree = "<group>"; };
 		B10051 /* TerrainCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/TerrainCapture.swift; sourceTree = "<group>"; };
 		B10052 /* AdaptiveTerrain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/AdaptiveTerrain.swift; sourceTree = "<group>"; };
@@ -154,6 +156,7 @@
 				B10001 /* ScanView3DApp.swift */,
 				B10002 /* ContentView.swift */,
 				B10018 /* Info.plist */,
+				B10053 /* PrivacyInfo.xcprivacy */,
 				B10017 /* Assets.xcassets */,
 				G10003 /* Models */,
 				G10004 /* Views */,
@@ -322,6 +325,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10017 /* Assets.xcassets in Resources */,
+				A10053 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -26,6 +26,9 @@ struct DebugLogView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            Text("Logs stay on this device unless you share them. They may contain scan names and file paths; review them before sending to support.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .padding(.horizontal).padding(.vertical, 8)
             filterBar
             Divider()
             logContent

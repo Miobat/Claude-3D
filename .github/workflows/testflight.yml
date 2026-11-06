@@ -1,5 +1,10 @@
 name: Build & Deploy to TestFlight
 
+# Builds need source access, never repository mutation rights. App Store signing
+# credentials remain scoped to the explicitly authorized release job.
+permissions:
+  contents: read
+
 on:
   push:
     branches:

@@ -88,6 +88,68 @@ enum DesignPreview {
             boundingBoxMin: bounds.0, boundingBoxMax: bounds.1))
     }
 
+    /// Exercises the actual iOS exporters, not just the shared validation helpers.
+    private static func exportSafetyChecks(check: (Bool, String) -> Void) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("export-safety-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        do {
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            let vertices: [SIMD3<Float>] = [.zero, SIMD3(1, 0, 0), SIMD3(0, 1, 0)]
+            let mesh = MeshData(vertices: vertices, normals: Array(repeating: SIMD3(0, 0, 1), count: 3),
+                faces: [[0, 1, 2]], colors: Array(repeating: SIMD4(0.2, 0.4, 0.6, 1), count: 3),
+                boundingBoxMin: .zero, boundingBoxMax: SIMD3(1, 1, 0))
+            let obj = try OBJExporter.export(meshData: mesh, fileName: "triangle", directory: root)
+            check(try ExportText.objMaterialReferences(obj) == ["triangle.mtl"] &&
+                  !Data(contentsOf: root.appendingPathComponent("triangle.mtl")).isEmpty,
+                  "Native OBJ commits its required material with the model")
+            let original = try Data(contentsOf: obj)
+            do { _ = try OBJExporter.export(meshData: mesh, fileName: "triangle", directory: root)
+                check(false, "Native OBJ refuses filename collision")
+            } catch { check(try Data(contentsOf: obj) == original, "Native OBJ collision preserves the first model") }
+            let ply = try OBJExporter.exportPLY(meshData: mesh, fileName: "triangle", directory: root)
+            let bytes = try Data(contentsOf: ply)
+            let bodyOffset = bytes.range(of: Data("end_header\n".utf8))?.upperBound ?? -1
+            check(bodyOffset >= 0 && bytes.count - bodyOffset == 3 * 28 + 13,
+                  "Native mesh PLY header and streamed body have matching vertex / face counts")
+            let bounds = try SceneCoordinateValidation.bounds(url: ply)
+            check(bounds.vertexCount == 3 && bounds.minimum == .zero && bounds.maximum == SIMD3(1, 1, 0),
+                  "Native mesh PLY reopens at the exact original metre coordinates")
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).image { context in
+                context.cgContext.setFillColor(UIColor.white.cgColor)
+                context.cgContext.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            }
+            let baked = BakedTexture(atlasImage: image, cornerUVs: [.zero, SIMD2(1, 0), SIMD2(0, 1)], atlasSize: 2)
+            _ = try OBJExporter.exportTextured(meshData: mesh, fileName: "textured", baked: baked, directory: root)
+            check(try ExportText.materialTextureReferences(root.appendingPathComponent("textured.mtl")) == ["textured_texture.jpg"] &&
+                  !Data(contentsOf: root.appendingPathComponent("textured_texture.jpg")).isEmpty,
+                  "Native textured OBJ commits its JPEG and material references")
+            let baseline = Set(try fm.contentsOfDirectory(atPath: root.path))
+            let badFace = MeshData(vertices: vertices, normals: mesh.normals, faces: [[0, 1, 3]], colors: [],
+                boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try OBJExporter.exportPLY(meshData: badFace, fileName: "bad-face", directory: root)
+                check(false, "Native export rejects invalid face indices")
+            } catch { check(Set(try fm.contentsOfDirectory(atPath: root.path)) == baseline,
+                            "Invalid faces fail before exposing model files") }
+            let badNormals = MeshData(vertices: vertices, normals: [.zero], faces: mesh.faces, colors: [],
+                boundingBoxMin: mesh.boundingBoxMin, boundingBoxMax: mesh.boundingBoxMax)
+            do { _ = try OBJExporter.export(meshData: badNormals, fileName: "bad-normal", directory: root)
+                check(false, "Native export rejects truncated normals")
+            } catch { check(Set(try fm.contentsOfDirectory(atPath: root.path)) == baseline,
+                            "Truncated normals fail before exposing model files") }
+            let badUVs = BakedTexture(atlasImage: image, cornerUVs: [.zero], atlasSize: 2)
+            do { _ = try OBJExporter.exportTextured(meshData: mesh, fileName: "bad-uv", baked: badUVs, directory: root)
+                check(false, "Native export rejects truncated UVs")
+            } catch { check(Set(try fm.contentsOfDirectory(atPath: root.path)) == baseline,
+                            "Truncated UVs fail before exposing texture/model files") }
+            let noImage = BakedTexture(atlasImage: UIImage(), cornerUVs: baked.cornerUVs, atlasSize: 2)
+            do { _ = try OBJExporter.exportTextured(meshData: mesh, fileName: "missing-image", baked: noImage, directory: root)
+                check(false, "Native export rejects an unencodable texture")
+            } catch { check(Set(try fm.contentsOfDirectory(atPath: root.path)) == baseline,
+                            "Missing JPEG fails rather than committing a broken textured OBJ") }
+        } catch { check(false, "Native export safety fixtures: \(error)") }
+    }
+
     /// Exercises the production mesh pipeline and files in an isolated library.
     static func automaticMeasurementChecks(check: (Bool, String) -> Void) {
         do {
@@ -249,6 +311,9 @@ enum DesignPreview {
               ObjectPanelLayout.height(expanded: true, landscape: true, accessibility: true) == 230,
               "Expanded object tools retain full review viewport")
         automaticMeasurementChecks(check: check)
+        commercialStorageChecks(check: check)
+        exportSafetyChecks(check: check)
+        manualMeasurementRetryChecks(check: check)
         let old = camera.simdTransform
         let extent: Float = 6
         rig.frame(center: .zero, extent: extent)
@@ -352,6 +417,61 @@ enum DesignPreview {
             do { try JSONSerialization.data(withJSONObject: report, options: .prettyPrinted).write(to: output, options: .atomic) }
             catch { assertionFailure("Could not write navigation test report: \(error)") }
         }
+    }
+
+    private static func manualMeasurementRetryChecks(check: (Bool, String) -> Void) {
+        final class SurfaceFixture: MeasurementGeometryProvider {
+            func verticalSpan(at point: SIMD3<Float>) -> (SIMD3<Float>, SIMD3<Float>)? {
+                (SIMD3(point.x, 0, point.z), SIMD3(point.x, 2.4, point.z))
+            }
+            func surfacePlane(at point: SIMD3<Float>, fallbackNormal: SIMD3<Float>?) -> (point: SIMD3<Float>, normal: SIMD3<Float>) {
+                (point, fallbackNormal ?? SIMD3(0, 0, 1))
+            }
+        }
+        let geometry = SurfaceFixture()
+        for kind in [ScanMeasurement.Kind.distance, .wallToWall, .height] {
+            let session = MeasurementSession()
+            session.tool = kind; session.geometry = geometry
+            var failSave = true, attempts = 0
+            var written: [ScanMeasurement] = []
+            session.onSave = { list in
+                attempts += 1
+                if failSave { throw NSError(domain: "ManualSaveFixture", code: 1) }
+                written = list
+            }
+            session.place(SnapResult(point: SIMD3(0, 0.5, 0), kind: .surface, normal: SIMD3(0, 0, 1)))
+            if kind != .height {
+                session.place(SnapResult(point: SIMD3(1, 0.5, 2), kind: .surface, normal: SIMD3(0, 0, -1)))
+            }
+            let pending = session.pendingSave
+            check(session.measurements.isEmpty && pending?.points.count == 2 && session.canFinish,
+                  "Failed \(kind.rawValue) retains a retryable complete measurement")
+            session.place(SnapResult(point: SIMD3(9, 9, 9), kind: .surface, normal: nil))
+            check(session.pendingSave == pending && session.draftPoints == pending?.points && attempts == 1,
+                  "Another tap cannot alter the unsaved \(kind.rawValue) endpoints")
+            failSave = false; session.finish()
+            check(written.count == 1 && written.first == pending && session.measurements == written &&
+                  session.pendingSave == nil && session.draftPoints.isEmpty,
+                  "Retry saves the original \(kind.rawValue) points and normals")
+            session.finish()
+            check(written.count == 1 && attempts == 2, "Repeated Done cannot duplicate a retried \(kind.rawValue)")
+        }
+        let session = MeasurementSession()
+        session.onSave = { _ in throw NSError(domain: "ManualSaveFixture", code: 1) }
+        session.place(SnapResult(point: .zero, kind: .point, normal: nil))
+        session.place(SnapResult(point: SIMD3(1, 0, 0), kind: .point, normal: nil))
+        session.undo()
+        check(session.pendingSave == nil && session.draftPoints == [.zero], "Undo releases a failed pair for endpoint editing")
+        session.place(SnapResult(point: SIMD3(Float.nan, 0, 0), kind: .point, normal: nil))
+        check(session.draftPoints == [.zero], "Nonfinite measurement taps cannot contaminate the draft")
+        let objectSession = ObjectMeasurementSession()
+        let oldOwner = UUID(), newOwner = UUID()
+        objectSession.attachViewer(oldOwner)
+        objectSession.attachViewer(newOwner)
+        objectSession.detach(viewer: oldOwner)
+        check(objectSession.viewerOwner == newOwner, "Dismantling an old viewer cannot detach its replacement")
+        objectSession.detach(viewer: newOwner)
+        check(objectSession.viewerOwner == nil, "Current viewer releases its object measurement ownership")
     }
 
     private static func checkObjects(view: SCNView, coordinator: SceneKitViewRepresentable.Coordinator,
@@ -1067,6 +1187,102 @@ enum DesignPreview {
             let moved = store.projects.first { $0.id == target.id }?.scans.first { $0.id == scan.id }
             check(moved?.terrainCapture == metadata, "Adaptive metadata survives project move")
         } catch { check(false, "Adaptive native fixtures: \(error)") }
+    }
+
+    private static func commercialStorageChecks(check: (Bool, String) -> Void) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("commercial-storage-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        do {
+            let store = StorageManager(directory: root)
+            guard let source = store.createProject(name: "Source"), let target = store.createProject(name: "Target") else {
+                check(false, "Commercial storage projects"); return
+            }
+            let scan = try store.saveScan(meshData: objectMesh(), name: "Cabinet", toProject: source)
+            let model = store.getScanFileURL(scan: scan, project: source)
+            let folder = model.deletingLastPathComponent()
+            let targetFolder = root.appendingPathComponent(AppConstants.scansDirectory).appendingPathComponent(target.id.uuidString)
+            let collision = targetFolder.appendingPathComponent(scan.fileName)
+            let preserved = Data("unindexed recovery asset".utf8)
+            try preserved.write(to: collision)
+            check(!store.moveScan(scan, from: source, to: target), "Move refuses an existing destination")
+            check(try Data(contentsOf: collision) == preserved && fm.fileExists(atPath: model.path),
+                  "Move conflict preserves both source and existing destination")
+            check(store.projects.first(where: { $0.id == source.id })?.scans.count == 1 &&
+                  store.projects.first(where: { $0.id == target.id })?.scans.isEmpty == true,
+                  "Failed move leaves the index unchanged")
+            store.cancelExport()
+            let copy = store.duplicateScan(scan, from: source, to: source)
+            check(copy != nil, "Duplicate works after cancelling an export")
+            store.updateProject(source)
+            check(store.projects.first(where: { $0.id == source.id })?.scans.count == 2,
+                  "A stale project edit cannot discard newly saved scans")
+
+            try store.updateScan(scan.id, in: source) { $0.splatBundleName = "missing_bundle.zip" }
+            let beforeFiles = Set(try fm.contentsOfDirectory(atPath: folder.path))
+            check(store.duplicateScan(scan, from: source, to: source) == nil, "Missing registered companion rejects duplicate")
+            check(Set(try fm.contentsOfDirectory(atPath: folder.path)) == beforeFiles &&
+                  store.projects.first(where: { $0.id == source.id })?.scans.count == 2,
+                  "Failed duplicate leaves no partial copy or library record")
+            try store.updateScan(scan.id, in: source) { $0.splatBundleName = nil }
+
+            var invalid = source
+            var unsafe = Scan(name: "Unsafe", fileName: "../projects.json")
+            invalid.scans = [unsafe]
+            do { try StorageManager.validateLibrary([invalid]); check(false, "Reject traversal metadata") }
+            catch { check(true, "Reject traversal metadata") }
+            invalid.scans = [scan, scan]
+            do { try StorageManager.validateLibrary([invalid]); check(false, "Reject duplicate scan IDs") }
+            catch { check(true, "Reject duplicate scan IDs") }
+            unsafe = Scan(name: "Aliased", fileName: scan.fileName.uppercased())
+            invalid.scans = [scan, unsafe]
+            do { try StorageManager.validateLibrary([invalid]); check(false, "Reject aliased model filenames") }
+            catch { check(true, "Reject aliased model filenames") }
+            var huge = Scan(name: "Huge", fileName: "huge.obj", vertexCount: Int.max)
+            invalid.scans = [scan, huge]
+            do { try StorageManager.validateLibrary([invalid]); check(false, "Reject library count overflow") }
+            catch { check(true, "Reject library count overflow") }
+            huge.vertexCount = 1; huge.modelTransform = [1, 2]
+            invalid.scans = [huge]
+            do { try StorageManager.validateLibrary([invalid]); check(false, "Reject malformed saved transform") }
+            catch { check(true, "Reject malformed saved transform") }
+
+            let imports = root.appendingPathComponent("import-fixtures")
+            try fm.createDirectory(at: imports, withIntermediateDirectories: true)
+            let obj = imports.appendingPathComponent("plain.obj")
+            try "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n".write(to: obj, atomically: true, encoding: .utf8)
+            let imported = try store.importOBJFile(from: obj, name: "Imported", toProject: source)
+            check(imported.vertexCount > 0 && imported.faceCount == 1 && !imported.hasKnownScale,
+                  "Validated OBJ import records geometry without claiming metric scale")
+            let filesAfterImport = Set(try fm.contentsOfDirectory(atPath: folder.path))
+            let importCount = store.projects.first(where: { $0.id == source.id })?.scans.count
+            try "mtllib ../private.mtl\nv 0 0 0\n".write(to: obj, atomically: true, encoding: .utf8)
+            do { _ = try store.importOBJFile(from: obj, name: "Unsafe", toProject: source); check(false, "Reject unsafe OBJ dependency") }
+            catch { check(true, "Reject unsafe OBJ dependency") }
+            check(Set(try fm.contentsOfDirectory(atPath: folder.path)) == filesAfterImport &&
+                  store.projects.first(where: { $0.id == source.id })?.scans.count == importCount,
+                  "Rejected import leaves no partial assets or record")
+
+            let index = root.appendingPathComponent("projects.json")
+            var tampered = store.projects
+            tampered[0].scans[0].fileName = "../projects.json"
+            let tamperedBytes = try JSONEncoder().encode(tampered)
+            try tamperedBytes.write(to: index)
+            let reopened = StorageManager(directory: root)
+            check(reopened.isLibraryReadOnly && reopened.projects.isEmpty, "Unsafe library reopens read-only")
+            let blocked = reopened.createProject(name: "Blocked")
+            let preservedIndex = try Data(contentsOf: index)
+            check(blocked == nil && preservedIndex == tamperedBytes,
+                  "Read-only library cannot be replaced by an empty new one")
+            check(fm.fileExists(atPath: model.path), "Unsafe index preserves existing model bytes")
+
+            guard let privacy = Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy"),
+                  let manifest = try PropertyListSerialization.propertyList(from: Data(contentsOf: privacy), format: nil) as? [String: Any] else {
+                check(false, "Privacy manifest bundled"); return
+            }
+            check((manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]])?.count == 4 &&
+                  manifest["NSPrivacyTracking"] as? Bool == false, "Privacy manifest declares actual API categories without tracking")
+        } catch { check(false, "Commercial storage fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {

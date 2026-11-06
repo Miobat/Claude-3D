@@ -228,14 +228,7 @@ struct ProjectDetailView: View {
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            for url in urls {
-                let name = url.deletingPathExtension().lastPathComponent
-                do {
-                    let _ = try storageManager.importOBJFile(from: url, name: name, toProject: liveProject)
-                } catch {
-                    storageManager.report(error, action: "Import \(name)")
-                }
-            }
+            storageManager.importFiles(urls, to: liveProject)
         case .failure(let error):
             DebugLogger.shared.error("File picker error: \(error)", category: "Import")
         }
