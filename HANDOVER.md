@@ -7,6 +7,26 @@ web prototype and are not part of the app.)
 
 ---
 
+## Commercial reliability audit (2026-11-06, `codex/commercial-readiness`)
+
+Based on published adaptive terrain `d2e9793`, retaining all prior Codex/Claude
+work. See `ScanView3D/COMMERCIAL_READINESS.md` for the fixed failure paths,
+compatibility limits and remaining paid-launch gates. No release is authorized.
+
+This pass hardens library paths/collisions, complete duplication, failed-save
+rollback, import safety, checkpoint integrity, low-memory photo behavior,
+geometry readers, viewer lifecycle and manual measurement retries. A bundled
+privacy manifest occupies resource IDs A/B10053. Shared tests use the same
+implementation as the app. Validation results will be recorded here when complete.
+
+New checkpoint records bind payload bytes with SHA-256 and size; legacy
+checkpoints remain readable. Invalid library references fail read-only rather
+than allowing file operations. Model exports remain deliveries, NOT full backups.
+Physical-device stress/accuracy acceptance and complete backup/restore are still
+required before a paid release; do not describe this audit as proof of perfection.
+
+---
+
 ## Adaptive Terrain (2026-10-18, `codex/adaptive-terrain`)
 
 Based on published `e3a1172`; retains the confirmed 5 m save/recovery fix and all

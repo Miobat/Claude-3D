@@ -1,6 +1,7 @@
 import Foundation
 import SceneKit
 import CryptoKit
+import ImageIO
 
 /// Manages persistent storage for projects and scan files
 class StorageManager: ObservableObject {
@@ -446,8 +447,7 @@ class StorageManager: ObservableObject {
         guard let hash = scan.originalMeshSHA256, MeasurementModelRevision.validHash(hash) else {
             throw StorageFailure.missingItem
         }
-        let url = getScanFileURL(scan: scan, project: project).deletingLastPathComponent()
-            .appendingPathComponent((scan.fileName as NSString).deletingPathExtension + "_original.mesh")
+        let url = try measurementSidecar("_original.mesh", scan: scan, project: project)
         guard try measurementSHA256(url) == hash else { throw CocoaError(.fileReadCorruptFile) }
         let bytes = try boundedMeasurementData(url, maximumBytes: 512_000_000)
         let mesh = try PropertyListDecoder().decode(MeshData.self, from: bytes)
@@ -476,16 +476,16 @@ class StorageManager: ObservableObject {
 
     // MARK: - Measurements
 
-    private func measurementsURL(for scan: Scan, in project: Project) -> URL {
-        let base = (scan.fileName as NSString).deletingPathExtension
-        return scansDirectory.appendingPathComponent(project.id.uuidString)
-            .appendingPathComponent("\(base)_measurements.json")
+    private func measurementsURL(for scan: Scan, in project: Project) throws -> URL {
+        try measurementSidecar("_measurements.json", scan: scan, project: project)
     }
 
     func loadMeasurements(for scan: Scan, in project: Project) -> [ScanMeasurement] {
-        let url = measurementsURL(for: scan, in: project)
-        guard fileManager.fileExists(atPath: url.path) else { return [] }
-        do { return try JSONDecoder().decode([ScanMeasurement].self, from: Data(contentsOf: url)) }
+        do {
+            let url = try measurementsURL(for: scan, in: project)
+            guard LibraryFileSafety.exists(url) else { return [] }
+            return try JSONDecoder().decode([ScanMeasurement].self, from: boundedMeasurementData(url, maximumBytes: 16_000_000))
+        }
         catch { report(error, action: "Read measurements. The original file has been preserved"); return [] }
     }
 
@@ -494,25 +494,30 @@ class StorageManager: ObservableObject {
             guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
             guard let current = projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scan.id }),
                   current.fileName == scan.fileName else { throw StorageFailure.missingItem }
-            let url = measurementsURL(for: scan, in: project)
-            if fileManager.fileExists(atPath: url.path) {
+            let url = try measurementsURL(for: scan, in: project)
+            if LibraryFileSafety.exists(url) {
                 // A failed load must not turn into silently overwriting a corrupt file.
-                _ = try JSONDecoder().decode([ScanMeasurement].self, from: Data(contentsOf: url))
+                _ = try JSONDecoder().decode([ScanMeasurement].self, from: boundedMeasurementData(url, maximumBytes: 16_000_000))
             }
-            try JSONEncoder().encode(measurements).write(to: url, options: .atomic)
+            let bytes = try JSONEncoder().encode(measurements)
+            guard bytes.count <= 16_000_000 else { throw CocoaError(.fileWriteOutOfSpace) }
+            try bytes.write(to: url, options: .atomic)
         }
     }
 
     // MARK: - Automatic measurement foundation
 
-    private func measurementSidecar(_ suffix: String, scan: Scan, project: Project) -> URL {
+    private func measurementSidecar(_ suffix: String, scan: Scan, project: Project) throws -> URL {
         let base = (scan.fileName as NSString).deletingPathExtension
-        return scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(base + suffix)
+        return try LibraryFileSafety.child(base + suffix, of: validatedDirectory(for: project))
     }
 
     /// Stream hashes without the export cancellation state. Call expensive reads
     /// on a worker queue when the selection UI is added; no whole-model Data copy.
     private func measurementSHA256(_ url: URL) throws -> String {
+        guard try fileManager.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType == .typeRegular else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         let input = try FileHandle(forReadingFrom: url)
         defer { try? input.close() }
         var hash = SHA256()
@@ -521,20 +526,22 @@ class StorageManager: ObservableObject {
     }
 
     private func boundedMeasurementData(_ url: URL, maximumBytes: Int) throws -> Data {
-        let count = (try fileManager.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? maximumBytes + 1
-        guard count <= maximumBytes else { throw AutomaticMeasurementError.invalidDocument }
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        let count = (attributes[.size] as? NSNumber)?.intValue ?? maximumBytes + 1
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              count >= 0, count <= maximumBytes else { throw AutomaticMeasurementError.invalidDocument }
         let bytes = try Data(contentsOf: url)
         guard bytes.count <= maximumBytes else { throw AutomaticMeasurementError.invalidDocument }
         return bytes
     }
 
     func loadSurfaceLabels(for scan: Scan, in project: Project) throws -> SurfaceLabelDocument? {
-        let url = measurementSidecar(SurfaceLabelDocument.suffix, scan: scan, project: project)
+        let url = try measurementSidecar(SurfaceLabelDocument.suffix, scan: scan, project: project)
         guard fileManager.fileExists(atPath: url.path) else { return nil } // legacy / point-cloud / HQ
         let document = try JSONDecoder().decode(SurfaceLabelDocument.self,
             from: boundedMeasurementData(url, maximumBytes: 24_000_000))
         try document.validate()
-        let viewer = measurementSidecar(".scn", scan: scan, project: project)
+        let viewer = try measurementSidecar(".scn", scan: scan, project: project)
         guard document.faceCount == scan.faceCount,
               document.modelSHA256 == (try measurementSHA256(getScanFileURL(scan: scan, project: project))),
               fileManager.fileExists(atPath: viewer.path), document.viewerSHA256 == (try measurementSHA256(viewer)) else {
@@ -549,7 +556,7 @@ class StorageManager: ObservableObject {
         guard scan.hasKnownScale, scan.scaleStatus == .lidarMetric || scan.scaleStatus == .cameraPoseAligned else {
             throw AutomaticMeasurementError.unverifiedScale
         }
-        let viewer = measurementSidecar(".scn", scan: scan, project: project)
+        let viewer = try measurementSidecar(".scn", scan: scan, project: project)
         let revision = MeasurementModelRevision(
             modelSHA256: try measurementSHA256(getScanFileURL(scan: scan, project: project)),
             worldTransform: try scan.validatedModelTransform(),
@@ -561,7 +568,7 @@ class StorageManager: ObservableObject {
     /// Throws on stale, corrupt, or newer data; nil means genuinely absent. The
     /// UI must not turn a failed load into an empty selection that overwrites it.
     func loadAutomaticMeasurements(for scan: Scan, in project: Project) throws -> AutomaticMeasurementDocument? {
-        let url = measurementSidecar(AutomaticMeasurementDocument.suffix, scan: scan, project: project)
+        let url = try measurementSidecar(AutomaticMeasurementDocument.suffix, scan: scan, project: project)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         let document = try AutomaticMeasurementDocument.decode(boundedMeasurementData(url, maximumBytes: 4_000_000))
         try document.validate(for: automaticMeasurementRevision(for: scan, in: project))
@@ -579,7 +586,7 @@ class StorageManager: ObservableObject {
         // Model hashing runs on the caller's worker queue, not inside the main
         // thread library commit. A changed model/alignment is rechecked below.
         try document.validate(for: automaticMeasurementRevision(for: snapshot, in: project))
-        let url = measurementSidecar(AutomaticMeasurementDocument.suffix, scan: snapshot, project: project)
+        let url = try measurementSidecar(AutomaticMeasurementDocument.suffix, scan: snapshot, project: project)
         let previous: Data? = fileManager.fileExists(atPath: url.path)
             ? try boundedMeasurementData(url, maximumBytes: 4_000_000) : nil
         if let previous {
@@ -596,6 +603,7 @@ class StorageManager: ObservableObject {
                   try current.validatedModelTransform() == snapshot.validatedModelTransform() else {
                 throw AutomaticMeasurementError.staleModel
             }
+            _ = try measurementSidecar(AutomaticMeasurementDocument.suffix, scan: current, project: project)
             let latest: Data? = fileManager.fileExists(atPath: url.path)
                 ? try boundedMeasurementData(url, maximumBytes: 4_000_000) : nil
             guard latest == previous else { throw StorageFailure.missingItem } // concurrent selection edit
@@ -621,16 +629,22 @@ class StorageManager: ObservableObject {
 
     /// URL of a saved Splat bundle zip, if this scan has one.
     func splatBundleURL(for scan: Scan, in project: Project) -> URL? {
-        guard let name = scan.splatBundleName else { return nil }
-        let url = scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(name)
-        return fileManager.fileExists(atPath: url.path) ? url : nil
+        guard let name = scan.splatBundleName, let directory = try? validatedDirectory(for: project),
+              let url = try? LibraryFileSafety.child(name, of: directory),
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular else { return nil }
+        return url
     }
 
     /// URL of the kept source-photos folder for a High-Quality scan, if present.
     func captureFolderURL(for scan: Scan, in project: Project) -> URL? {
-        guard let name = scan.captureFolderName else { return nil }
-        let url = scansDirectory.appendingPathComponent(project.id.uuidString).appendingPathComponent(name)
-        return fileManager.fileExists(atPath: url.path) ? url : nil
+        guard let name = scan.captureFolderName, let directory = try? validatedDirectory(for: project),
+              let url = try? LibraryFileSafety.child(name, of: directory),
+              let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeDirectory,
+              (try? LibraryFileSafety.validateTree(url)) != nil,
+              (try? LibraryFileSafety.child(name + PoseFile.suffix, of: directory)) != nil else { return nil }
+        return url
     }
 
     /// Publish a new model only after it is copied. The old model, measurements,
@@ -638,13 +652,16 @@ class StorageManager: ObservableObject {
     func replacePhotogrammetryModel(scanID: UUID, in project: Project,
                                     newModelURL: URL, modelTransform: simd_float4x4?, provenance: CoordinateProvenance? = nil) throws {
         try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
             guard let pi = projects.firstIndex(where: { $0.id == project.id }),
                   let si = projects[pi].scans.firstIndex(where: { $0.id == scanID }) else { throw StorageFailure.missingItem }
             let original = projects[pi].scans[si]
-            let dir = scansDirectory.appendingPathComponent(project.id.uuidString)
+            let dir = try validatedDirectory(for: project)
+            try validateFiles(of: original, in: dir)
             let base = UUID().uuidString
-            let dest = dir.appendingPathComponent("\(base).usdz")
-            let metadata = dir.appendingPathComponent("\(base)_previous.json")
+            let dest = try LibraryFileSafety.child("\(base).usdz", of: dir)
+            let metadata = try LibraryFileSafety.child("\(base)_previous.json", of: dir)
+            guard !LibraryFileSafety.exists(dest), !LibraryFileSafety.exists(metadata) else { throw StorageFailure.destinationExists }
             try persistence.copyAndCommit([(newModelURL, dest)]) {
                 var updated = original
                 updated.fileName = dest.lastPathComponent
@@ -1078,7 +1095,12 @@ class StorageManager: ObservableObject {
             var failures: [String] = []
             for url in urls {
                 do { _ = try self.importOBJFile(from: url, name: url.deletingPathExtension().lastPathComponent, toProject: project) }
-                catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+                catch {
+                    let message = error is CoordinateError
+                        ? "The model or its companion files are incomplete or unsupported. OBJ imports need a same-name MTL and, if textured, one same-base _texture.jpg or _texture.png. PLY imports must have valid bounded geometry."
+                        : error.localizedDescription
+                    failures.append("\(url.lastPathComponent): \(message)")
+                }
             }
             DispatchQueue.main.async {
                 self.isImporting = false
@@ -1133,6 +1155,16 @@ class StorageManager: ObservableObject {
                     try LibraryFileSafety.validateTree(textureSource)
                     let textureSize = try textureSource.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
                     guard textureSize > 0, textureSize <= 64 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+                    // Compressed bytes alone do not bound decoded image memory.
+                    // Match the largest native atlas; inspect metadata without
+                    // allocating the decompressed bitmap before SceneKit loads it.
+                    guard let image = CGImageSourceCreateWithURL(textureSource as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                          CGImageSourceGetCount(image) == 1,
+                          let properties = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any],
+                          let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+                          let height = properties[kCGImagePropertyPixelHeight] as? NSNumber,
+                          width.intValue > 0, height.intValue > 0,
+                          width.intValue <= 8192, height.intValue <= 8192 else { throw CocoaError(.fileReadCorruptFile) }
                     let renamed = newBase + "_texture." + textureSource.pathExtension
                     try fileManager.copyItem(at: textureSource, to: scanDir.appendingPathComponent(renamed))
                     textureName = renamed

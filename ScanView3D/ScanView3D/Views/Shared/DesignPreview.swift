@@ -312,6 +312,7 @@ enum DesignPreview {
               "Expanded object tools retain full review viewport")
         automaticMeasurementChecks(check: check)
         commercialStorageChecks(check: check)
+        commercialPathChecks(check: check)
         exportSafetyChecks(check: check)
         manualMeasurementRetryChecks(check: check)
         let old = camera.simdTransform
@@ -451,7 +452,7 @@ enum DesignPreview {
                   "Another tap cannot alter the unsaved \(kind.rawValue) endpoints")
             failSave = false; session.finish()
             check(written.count == 1 && written.first == pending && session.measurements == written &&
-                  session.pendingSave == nil && session.draftPoints.isEmpty,
+                  session.pendingSave == nil && session.draftPoints.isEmpty && session.message == nil,
                   "Retry saves the original \(kind.rawValue) points and normals")
             session.finish()
             check(written.count == 1 && attempts == 2, "Repeated Done cannot duplicate a retried \(kind.rawValue)")
@@ -1283,6 +1284,67 @@ enum DesignPreview {
             check((manifest["NSPrivacyAccessedAPITypes"] as? [[String: Any]])?.count == 4 &&
                   manifest["NSPrivacyTracking"] as? Bool == false, "Privacy manifest declares actual API categories without tracking")
         } catch { check(false, "Commercial storage fixtures: \(error)") }
+    }
+
+    private static func commercialPathChecks(check: (Bool, String) -> Void) {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("commercial-paths-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: root) }
+        do {
+            let store = StorageManager(directory: root)
+            guard let project = store.createProject(name: "Path checks") else { check(false, "Path fixture project"); return }
+            let scan = try store.saveScan(meshData: objectMesh(), name: "Object", toProject: project)
+            let model = store.getScanFileURL(scan: scan, project: project)
+            let directory = model.deletingLastPathComponent(), base = model.deletingPathExtension().lastPathComponent
+            try store.saveMeasurements([], for: scan, in: project)
+            check(store.loadMeasurements(for: scan, in: project).isEmpty, "Safe manual measurement path still works")
+            let document = AutomaticMeasurementDocument(revision: try store.automaticMeasurementRevision(for: scan, in: project), regions: [])
+            try store.saveAutomaticMeasurements(document, for: scan, in: project)
+            check(try store.loadAutomaticMeasurements(for: scan, in: project) == document, "Safe automatic measurement path still works")
+
+            let foreign = root.appendingPathComponent("foreign")
+            try fm.createDirectory(at: foreign, withIntermediateDirectories: true)
+            let outsideManual = foreign.appendingPathComponent("manual.json"), manual = directory.appendingPathComponent(base + "_measurements.json")
+            let manualBytes = Data("[]".utf8)
+            try manualBytes.write(to: outsideManual)
+            try fm.removeItem(at: manual)
+            try fm.createSymbolicLink(at: manual, withDestinationURL: outsideManual)
+            do { try store.saveMeasurements([], for: scan, in: project); check(false, "Manual measurement write rejects symlink") }
+            catch { check(true, "Manual measurement write rejects symlink") }
+            check(try Data(contentsOf: outsideManual) == manualBytes, "Rejected measurement write preserves linked target")
+            try fm.removeItem(at: manual)
+
+            let outsideAuto = foreign.appendingPathComponent("automatic.json"), automatic = directory.appendingPathComponent(base + AutomaticMeasurementDocument.suffix)
+            try document.encoded().write(to: outsideAuto)
+            try fm.removeItem(at: automatic)
+            try fm.createSymbolicLink(at: automatic, withDestinationURL: outsideAuto)
+            do { _ = try store.loadAutomaticMeasurements(for: scan, in: project); check(false, "Automatic measurement load rejects symlink") }
+            catch { check(true, "Automatic measurement load rejects symlink") }
+            try fm.removeItem(at: automatic)
+
+            var linked = scan
+            linked.splatBundleName = base + "_bundle.zip"
+            linked.captureFolderName = base + "_photos"
+            try fm.createSymbolicLink(at: directory.appendingPathComponent(linked.splatBundleName!), withDestinationURL: outsideManual)
+            try fm.createSymbolicLink(at: directory.appendingPathComponent(linked.captureFolderName!), withDestinationURL: foreign)
+            check(store.splatBundleURL(for: linked, in: project) == nil, "Splat share rejects symlink")
+            check(store.captureFolderURL(for: linked, in: project) == nil, "Reconstruction photos reject symlink")
+
+            let preserved = root.appendingPathComponent("preserved-scan-folder")
+            try fm.moveItem(at: directory, to: preserved)
+            try fm.createSymbolicLink(at: directory, withDestinationURL: foreign)
+            let previousIndex = try Data(contentsOf: root.appendingPathComponent("projects.json"))
+            let previousFiles = Set(try fm.contentsOfDirectory(atPath: foreign.path))
+            do {
+                try store.replacePhotogrammetryModel(scanID: scan.id, in: project,
+                    newModelURL: preserved.appendingPathComponent(scan.fileName), modelTransform: nil)
+                check(false, "Reconstruction replacement rejects symlinked project")
+            } catch { check(true, "Reconstruction replacement rejects symlinked project") }
+            let finalIndex = try Data(contentsOf: root.appendingPathComponent("projects.json"))
+            let finalFiles = Set(try fm.contentsOfDirectory(atPath: foreign.path))
+            check(finalIndex == previousIndex && finalFiles == previousFiles,
+                  "Rejected reconstruction preserves index and external directory")
+        } catch { check(false, "Commercial path fixtures: \(error)") }
     }
 
     private static func checkRecoveryAndSave(_ check: (Bool, String) -> Void) {

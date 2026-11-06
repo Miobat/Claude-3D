@@ -188,6 +188,7 @@ final class MeasurementSession: ObservableObject {
             return
         }
         pendingSave = nil
+        message = nil
         draftPoints.removeAll()
         draftNormals.removeAll()
         selectedID = m.id
