@@ -19,6 +19,14 @@ algorithms and formats are unchanged. Code `2ace457` passed
 simulator builds, and 93 preview screenshots. TestFlight upload was skipped.
 Physical-device touch, VoiceOver and outdoor visibility checks remain.
 
+Published with the user's authorization on 2026-11-07 from `8303098` via
+[release run 42415913519](https://github.com/Miobat/Claude-3D/actions/runs/42415913519).
+Version **1.1.0**, build **202611072147** uploaded successfully after 275 Swift
+tests, 290 native checks and the simulator tour passed. App Store Connect
+confirmed **Testing** for the existing Internal Testers group (one tester).
+What to Test notes were saved for library/recovery/export and layout checks.
+This is a TestFlight release, not a public App Store release.
+
 ---
 
 ## Commercial reliability audit (2026-11-06, `codex/commercial-readiness`)

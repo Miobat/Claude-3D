@@ -64,8 +64,13 @@ shorter large-text project/Settings headers. Longer warning and measurement
 details deliberately remain in bounded scroll areas; not every detail fits in
 one viewport at accessibility text sizes.
 
-TestFlight upload was skipped. This branch is validated development work, not
-a published phone build.
+TestFlight upload was skipped in that validation run. The user subsequently
+authorized publication: [release run 42415913519](https://github.com/Miobat/Claude-3D/actions/runs/42415913519)
+published source `8303098` as version **1.1.0 (202611072147)** on 2026-11-07.
+That run passed 275 Swift tests, 290 native checks, independent OpenUSD checks,
+the simulator build/tour and signed archive/upload. App Store Connect confirmed
+**Testing** in the existing Internal Testers group, and testing notes were saved.
+No public App Store release was submitted.
 
 Physical-device acceptance still includes live camera visibility outdoors,
 rotation, largest text, VoiceOver, scrolling to every action, and the feel of
