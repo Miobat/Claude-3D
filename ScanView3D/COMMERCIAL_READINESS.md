@@ -116,11 +116,11 @@ metadata warnings remain; they are not test failures.
    terms, paid licensing/purchase model, customer data-retention expectations and
    App Store disclosures. The binary manifest is not a privacy policy or legal
    review. Recheck declarations if cloud/AI/analytics or payments are later added.
-9. **Accessibility and view space.** The reviewed large-text scanner preview keeps
-   its controls readable but the capture overlay occupies most of the viewport.
-   Improve its compact/collapsible presentation and check VoiceOver, scrolling
-   and touch targets on devices. Static screenshots alone do not verify those
-   interactions or live camera visibility in field conditions.
+9. **Accessibility and view space.** The subsequent design refinement introduces
+   a compact capture HUD/details sheet, bounded warning panels, and clearer
+   large-text measurement/library layouts (see `DESIGN_REFINEMENT.md`). Check
+   VoiceOver, scrolling and touch targets on devices. Static screenshots alone
+   do not verify those interactions or live camera visibility in field conditions.
 
 ## Privacy declaration basis
 

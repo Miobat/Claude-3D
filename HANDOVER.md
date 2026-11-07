@@ -13,8 +13,11 @@ Based on verified reliability branch `4879d21`. See
 `ScanView3D/DESIGN_REFINEMENT.md` for the UI changes and acceptance notes.
 This pass reduces scanner/viewer panel density, improves project/library and
 Settings hierarchy, and adds explicit busy/error-state previews. Capture/storage
-algorithms and formats are unchanged. Final validation is pending; this work
-does not publish a TestFlight build.
+algorithms and formats are unchanged. Code `2ace457` passed
+[run 42315326643](https://github.com/Miobat/Claude-3D/actions/runs/42315326643):
+275 Swift tests, 290 native checks, independent OpenUSD verification, device and
+simulator builds, and 93 preview screenshots. TestFlight upload was skipped.
+Physical-device touch, VoiceOver and outdoor visibility checks remain.
 
 ---
 
