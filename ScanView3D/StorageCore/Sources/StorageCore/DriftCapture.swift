@@ -468,3 +468,66 @@ enum DriftPipeline {
                                  from: document.savedPoses, to: document.capturedPoses)
     }
 }
+
+/// Reads back a point cloud written by `PointCloudPLYWriter` (and nothing else:
+/// binary little-endian, float x y z, optional uchar red green blue). Used to
+/// make corrected or as-captured COPIES of a saved scan.
+enum PointCloudPLYReader {
+    static let maximumPoints = 8_000_000
+
+    static func read(_ url: URL) throws -> (positions: [SIMD3<Float>], colors: [SIMD4<Float>]) {
+        let input = try FileHandle(forReadingFrom: url)
+        defer { try? input.close() }
+        let prefix = try input.read(upToCount: 4096) ?? Data()
+        let marker = Data("end_header\n".utf8)
+        guard let end = prefix.range(of: marker), let header = String(data: prefix[prefix.startIndex..<end.lowerBound], encoding: .utf8) else {
+            throw ScanAlignmentError.invalidDocument
+        }
+        var count = -1
+        var properties: [String] = []
+        var binary = false
+        for (index, line) in header.split(separator: "\n").enumerated() {
+            let fields = line.split(separator: " ").map(String.init)
+            if index == 0 { guard line == "ply" else { throw ScanAlignmentError.invalidDocument }; continue }
+            guard let keyword = fields.first else { continue }
+            switch keyword {
+            case "comment": continue
+            case "format": binary = fields.count == 3 && fields[1] == "binary_little_endian" && fields[2] == "1.0"
+            case "element":
+                guard fields.count == 3, fields[1] == "vertex", count < 0, let n = Int(fields[2]) else { throw ScanAlignmentError.invalidDocument }
+                count = n
+            case "property":
+                guard fields.count == 3 else { throw ScanAlignmentError.invalidDocument }
+                properties.append(fields[1] + " " + fields[2])
+            default: throw ScanAlignmentError.invalidDocument
+            }
+        }
+        let plain = ["float x", "float y", "float z"]
+        let coloured = plain + ["uchar red", "uchar green", "uchar blue"]
+        guard binary, count > 0, count <= maximumPoints, properties == plain || properties == coloured else {
+            throw ScanAlignmentError.invalidDocument
+        }
+        let hasColor = properties == coloured
+        let stride = hasColor ? 15 : 12
+        try input.seek(toOffset: UInt64(prefix.distance(from: prefix.startIndex, to: end.upperBound)))
+        let body = try input.readToEnd() ?? Data()
+        guard body.count == count * stride else { throw ScanAlignmentError.invalidDocument }
+        var positions = [SIMD3<Float>](repeating: SIMD3<Float>(0, 0, 0), count: count)
+        var colors: [SIMD4<Float>] = hasColor ? [SIMD4<Float>](repeating: SIMD4<Float>(0, 0, 0, 1), count: count) : []
+        try body.withUnsafeBytes { raw in
+            for i in 0..<count {
+                let base = i * stride
+                func value(_ k: Int) -> Float {
+                    Float(bitPattern: UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: base + k * 4, as: UInt32.self)))
+                }
+                let p = SIMD3<Float>(value(0), value(1), value(2))
+                guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { throw ScanAlignmentError.invalidDocument }
+                positions[i] = p
+                if hasColor {
+                    colors[i] = SIMD4<Float>(Float(raw[base + 12]) / 255, Float(raw[base + 13]) / 255, Float(raw[base + 14]) / 255, 1)
+                }
+            }
+        }
+        return (positions, colors)
+    }
+}

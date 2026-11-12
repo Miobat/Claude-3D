@@ -691,6 +691,14 @@ struct ScannerView: View {
                         Text("Turn off for a simpler grey model and faster processing.")
                     }
                 }
+                if settings.captureMode == .pointCloud || (settings.captureMode == .terrain && !settings.terrainAdaptive) {
+                    Section {
+                        Toggle("Correct drift on long scans", isOn: $settings.driftCorrection)
+                            .accessibilityIdentifier("driftCorrection")
+                    } header: { Text("Long scans") } footer: {
+                        Text("When a place is scanned on more than one pass, saving lines the passes up and follows the phone's own position corrections. Short scans whose passes already agree are saved exactly as captured. The as-captured version can always be saved as a copy from the scan's Info. For best results turn slowly, in an arc rather than on the spot.")
+                    }
+                }
                 Section {
                     Toggle("Align to north + GPS", isOn: $settings.alignToNorth)
                 } header: { Text("Orientation") } footer: {
@@ -1446,12 +1454,42 @@ struct ScannerView: View {
         let name = scanName
         let north = settings.alignToNorth
         let fix = north ? captureLocation : nil
+        let correctDrift = settings.driftCorrection
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let terrain = try recordedTerrain?.normalized()
+                // Long scans: follow the phone's own position corrections and line
+                // up passes over the same place. Whole stretches of the walk move
+                // rigidly; no point is added, removed, averaged or recoloured here.
+                // A capture without the record (recovered older draft, adaptive
+                // terrain) is saved exactly as before.
+                var source = cloud
+                var drift: (prepared: DriftPipeline.Prepared, capture: AlignmentCapture)?
+                if let recorded = cloud.alignment, let ids = cloud.segmentIndices {
+                    if correctDrift { DispatchQueue.main.async { self.savingProgress = "Lining up passes…" } }
+                    if let prepared = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: recorded,
+                                                            enabled: correctDrift) {
+                        drift = (prepared, recorded)
+                        if prepared.summary.corrected { source = cloud.replacingVertices(prepared.points) }
+                        DebugLogger.shared.info("Drift: \(prepared.summary.segmentCount) segments, path "
+                            + String(format: "%.1f m, phone %.3f m, overlap %@, disagreement %.3f m, moved %.3f m",
+                                     prepared.summary.pathLengthMetres, prepared.summary.phoneCorrectionMetres,
+                                     prepared.summary.overlap, prepared.summary.disagreementMetres ?? 0,
+                                     prepared.summary.largestMoveMetres), category: "Alignment")
+                    }
+                    DispatchQueue.main.async { self.savingProgress = "Saving point cloud…" }
+                }
                 // Terrain was already thinned while capturing. A second grid could
                 // merge adjacent bins and drop small breaks; preserve those samples.
-                var points = terrain == nil ? MeshProcessor.voxelDownsamplePoints(cloud, leafSize: detailMeters) : cloud
+                var points: MeshData
+                if let terrain {
+                    // Only where correction has laid one pass onto another can a
+                    // sampling cell hold two samples; keep the first, unchanged.
+                    points = drift?.prepared.summary.corrected == true
+                        ? MeshProcessor.keepFirstPerCell(source, spacing: terrain.spacing.metres) : source
+                } else {
+                    points = MeshProcessor.voxelDownsamplePoints(source, leafSize: detailMeters)
+                }
                 if grey { points = MeshProcessor.makeUniformGrey(points) }
                 let frame: simd_float4x4
                 if terrain != nil {
@@ -1462,7 +1500,13 @@ struct ScannerView: View {
                     frame = SceneFrame.compute(from: points, keepHeading: north)
                 }
                 points = points.transformed(by: frame)
-                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project) {
+                var record: StorageManager.AlignmentRecord?
+                if let drift, let ids = points.segmentIndices {
+                    record = StorageManager.AlignmentRecord(prepared: drift.prepared, capture: drift.capture,
+                                                            pointSegments: ids, frame: RigidPose(frame).orthonormalised)
+                }
+                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project,
+                                                             alignment: record) {
                     $0.recordLocation(fix, compassRequested: north)
                     if let terrain { $0.recordTerrainCapture(terrain, frame: frame) }
                     else { $0.recordCaptureFrame(frame) }

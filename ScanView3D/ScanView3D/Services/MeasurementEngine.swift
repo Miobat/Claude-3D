@@ -582,6 +582,7 @@ extension MeshData {
         }
         let (minB, maxB) = MeshData.bounds(of: moved)
         return MeshData(vertices: moved, normals: turned, faces: faces, colors: colors,
-                        boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: faceClassifications)
+                        boundingBoxMin: minB, boundingBoxMax: maxB, faceClassifications: faceClassifications,
+                        pointSegments: pointSegments)
     }
 }

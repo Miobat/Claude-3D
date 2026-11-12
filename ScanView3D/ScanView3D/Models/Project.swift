@@ -110,6 +110,8 @@ struct Scan: Identifiable, Codable {
     var terrainCapture: TerrainCaptureMetadata?
     /// Pre-cleanup captured mesh, already in the same saved coordinate frame.
     var originalMeshSHA256: String?
+    /// Drift report for long point-cloud scans (optional: older scans have none).
+    var alignment: ScanAlignmentSummary?
 
     var scaleStatus: CoordinateProvenance.ScaleStatus {
         coordinateProvenance?.scaleStatus ?? ((vertexCount > 0 && modelTransform == nil && modelScale == nil) ? .lidarMetric : .legacyUnverified)
@@ -234,6 +236,7 @@ struct ScanSettings: Codable, Equatable {
     var reconstructQuality: ReconstructQuality = .best
     var highResPhotos: Bool = false    // 12 MP stills for High Quality / Splat
     var alignToNorth: Bool = false     // compass-aligned world + GPS tag (outdoor / land)
+    var driftCorrection: Bool = true   // Point Cloud / Terrain: line up passes of long scans when saving
 
     init() {}
 
@@ -273,6 +276,7 @@ struct ScanSettings: Codable, Equatable {
         reconstructQuality = (try? c.decodeIfPresent(ReconstructQuality.self, forKey: .reconstructQuality)) ?? d.reconstructQuality
         highResPhotos = (try? c.decodeIfPresent(Bool.self, forKey: .highResPhotos)) ?? d.highResPhotos
         alignToNorth = (try? c.decodeIfPresent(Bool.self, forKey: .alignToNorth)) ?? d.alignToNorth
+        driftCorrection = (try? c.decodeIfPresent(Bool.self, forKey: .driftCorrection)) ?? d.driftCorrection
     }
 
     // MARK: - Persistence

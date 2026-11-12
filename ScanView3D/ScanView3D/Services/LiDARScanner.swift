@@ -104,6 +104,19 @@ class LiDARScanner: NSObject, ObservableObject {
 
     /// Dense coloured points straight from the LiDAR depth sensor.
     private let depthCloud = DepthPointAccumulator()
+
+    // Drift recording (Point Cloud and fixed-spacing Terrain). The walk is cut
+    // into segments; each owns an ARKit anchor placed at the phone's pose when it
+    // started. ARKit keeps correcting its anchors, so comparing an anchor's final
+    // transform with the one its points were recorded against gives the phone's
+    // own correction for that stretch. Nothing here changes what is captured.
+    private static let segmentAnchorName = "tinyscanner.segment"
+    private var driftRecording = false
+    private var segmenter = CaptureSegmenter()
+    private var segmentRecords: [(id: UUID, reference: simd_float4x4, startTime: Double)] = []
+    private var segmentAnchorTransforms: [UUID: simd_float4x4] = [:]
+    private var activeSegment: UInt16 = 0
+    private var captureSpacing: Float = 0.01
     var acceptedDepthFrame: AcceptedDepthFrame? { depthCloud.acceptedFrame }
 
     // Memory limits (MB). "Available" is the app's real remaining budget.
@@ -207,9 +220,13 @@ class LiDARScanner: NSObject, ObservableObject {
 
         // All modes retain capture-time depth evidence. Raw ARKit anchor extents
         // and the camera's walked path must never expand the accepted range.
+        // Splat keeps its points in the same frame as its camera poses, and adaptive
+        // Terrain has its own sample store: neither records segments.
+        driftRecording = captureMode == .pointCloud || (terrain && !adaptiveTerrain)
+        captureSpacing = limits.voxelSize
         depthCloud.configure(voxelSize: limits.voxelSize, maxPoints: limits.points, coverageCells: limits.coverageCells,
                              coverageCellSize: terrain ? limits.voxelSize : 0.025, reliableCoverageOnly: terrain,
-                             adaptiveTerrain: terrain && adaptiveTerrain)
+                             adaptiveTerrain: terrain && adaptiveTerrain, recordSegments: driftRecording)
 
         let configuration = ARWorldTrackingConfiguration()
         // Terrain needs depth samples, not a second, independently growing mesh.
@@ -255,10 +272,12 @@ class LiDARScanner: NSObject, ObservableObject {
     }
 
     func pauseScanning() {
+        refreshSegmentAnchors()
         arSession.pause()
         isPaused = true
         scanProgress = "Scanning paused"
         stopFrameCapture()
+        segmenter.noteDiscontinuity()
     }
 
     func resumeScanning() {
@@ -281,7 +300,9 @@ class LiDARScanner: NSObject, ObservableObject {
         isFinalizing = true
         finalizationCallbacks.append(completion)
         unlockWhiteBalance()
+        refreshSegmentAnchors()
         arSession.pause()
+        segmenter.noteDiscontinuity()
         isScanning = false
         isPaused = false
         scanProgress = "Finishing accepted capture work…"
@@ -374,6 +395,11 @@ class LiDARScanner: NSObject, ObservableObject {
         captureBudgetPercent = 0
         tooFastSince = nil
         captureHint = nil
+        driftRecording = false
+        segmenter = CaptureSegmenter()
+        segmentRecords = []
+        segmentAnchorTransforms = [:]
+        activeSegment = 0
         captureMode = .fast
         cameraPath = []
         needsOrigin = true
@@ -467,12 +493,14 @@ class LiDARScanner: NSObject, ObservableObject {
             if captureHint == Self.slowDownHint { captureHint = nil }
         }
 
+        if driftRecording { advanceSegment(frame) }
+
         // Commit depth before showing coverage; one worker is in flight at most.
         do {
             // Memory-paused photo capture must not change the meaning of mint.
             let photoCoverage = captureMode == .fast && captureTexture
             depthCloud.integrate(frame, maxDistance: min(rangeMeters, 5),
-                                 photoCoverage: photoCoverage) { [weak self] count, full, used in
+                                 photoCoverage: photoCoverage, segment: activeSegment) { [weak self] count, full, used in
                 guard let self = self, self.epoch.isCurrent(token) else { return }
                 self.depthPointCount = count
                 self.captureBudgetPercent = used * 100
@@ -491,6 +519,69 @@ class LiDARScanner: NSObject, ObservableObject {
         if (captureMode == .highQuality || captureMode == .splatExport) && !textureCapturePaused {
             considerPhoto(frame, blurPixels: blurPixels)
         }
+    }
+
+    // MARK: - Drift recording
+
+    /// Starts a new segment (and its anchor) when the walk calls for one, and
+    /// shows the turning advice that matters for long scans.
+    private func advanceSegment(_ frame: ARFrame) {
+        let pose = frame.camera.transform
+        var anchorMoved = false
+        if let record = segmentRecords.last, let current = segmentAnchorTransforms[record.id] {
+            // 5 mm or 0.05°: the phone has corrected this stretch; later points need their own record.
+            anchorMoved = simd_distance(current.position, record.reference.position) > 0.005
+                || CaptureSegmenter.angle(current, record.reference) > 0.05 * .pi / 180
+        }
+        if segmenter.update(time: frame.timestamp, pose: pose, anchorMoved: anchorMoved),
+           segmentRecords.count < AlignmentCapture.maximumSegments {
+            let anchor = ARAnchor(name: Self.segmentAnchorName, transform: pose)
+            arSession.add(anchor: anchor)
+            segmentRecords.append((anchor.identifier, pose, segmenter.elapsed(frame.timestamp)))
+            segmentAnchorTransforms[anchor.identifier] = pose
+            activeSegment = UInt16(segmentRecords.count - 1)
+        }
+        let ours = [CaptureSegmenter.fastTurnHint, CaptureSegmenter.pivotHint]
+        if let hint = segmenter.hint {
+            if captureHint != hint, captureHint == nil || ours.contains(captureHint ?? "") { captureHint = hint }
+        } else if let shown = captureHint, ours.contains(shown) {
+            captureHint = nil
+        }
+    }
+
+    /// ARKit reports anchor changes through the delegate; read the last frame
+    /// too, so the transforms are current right before the session pauses.
+    private func refreshSegmentAnchors() {
+        guard driftRecording, let anchors = arSession.currentFrame?.anchors else { return }
+        noteSegmentAnchors(anchors)
+    }
+
+    fileprivate func noteSegmentAnchors(_ anchors: [ARAnchor]) {
+        guard driftRecording else { return }
+        for anchor in anchors where anchor.name == Self.segmentAnchorName {
+            if segmentAnchorTransforms[anchor.identifier] != nil {
+                segmentAnchorTransforms[anchor.identifier] = anchor.transform
+            }
+        }
+    }
+
+    fileprivate func noteCameraFrame(_ frame: ARFrame) {
+        guard driftRecording, isScanning, !isPaused else { return }
+        segmenter.noteFrame(time: frame.timestamp, position: frame.camera.transform.position)
+    }
+
+    /// What this capture recorded for drift correction, or nil when not applicable.
+    private func alignmentCapture() -> AlignmentCapture? {
+        guard driftRecording, !segmentRecords.isEmpty else { return nil }
+        let segments = segmentRecords.map { record in
+            AlignmentCapture.Segment(reference: AlignmentCapture.array(record.reference),
+                end: AlignmentCapture.array(segmentAnchorTransforms[record.id] ?? record.reference),
+                startTime: record.startTime)
+        }
+        let capture = AlignmentCapture(spacingMetres: captureSpacing, segments: segments, path: segmenter.path,
+            pathLengthMetres: segmenter.pathLength, trackingJumps: segmenter.jumps,
+            fastTurnSeconds: segmenter.fastTurnSeconds)
+        return capture.isUsable ? capture : nil
     }
 
     // MARK: - Camera control
@@ -819,6 +910,8 @@ class LiDARScanner: NSObject, ObservableObject {
         let mode = meshMode
         let wantCameraColors = captureTexture && captureMode == .fast && !lightweight
         let mapper = textureMapper
+        if !isScanning || isPaused { refreshSegmentAnchors() }
+        let drift = alignmentCapture()
         let finish: (MeshData?) -> Void = { mesh in
             DispatchQueue.main.async { completion(captureEpoch.isCurrent(token) ? mesh : nil) }
         }
@@ -827,7 +920,8 @@ class LiDARScanner: NSObject, ObservableObject {
             guard captureEpoch.isCurrent(token) else { finish(nil); return }
             // Point modes: the depth-sensor cloud is far denser than mesh vertices.
             if let cloudMesh = cloud?.pointCloud() {
-                finish(cloudMesh)
+                // Segments without their record (or the reverse) are of no use.
+                finish(cloudMesh.pointSegments != nil && drift != nil ? cloudMesh.withAlignment(drift) : cloudMesh)
                 return
             }
             if terrain { finish(nil); return }
@@ -1048,12 +1142,21 @@ class LiDARScanner: NSObject, ObservableObject {
 extension LiDARScanner: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         guard session === arSession else { return }
+        noteSegmentAnchors(anchors)
         handle(anchors: anchors)
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard session === arSession else { return }
+        noteSegmentAnchors(anchors)
         handle(anchors: anchors)
+    }
+
+    /// Every camera frame: only used to notice the phone snapping to a new
+    /// position estimate. The frame itself is never kept.
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard session === arSession else { return }
+        noteCameraFrame(frame)
     }
 
     private func handle(anchors: [ARAnchor]) {
@@ -1106,6 +1209,7 @@ extension LiDARScanner: ARSessionDelegate {
         guard session === arSession else { return }
         scanProgress = "Session interrupted"
         isPaused = true
+        segmenter.noteDiscontinuity()
         stopFrameCapture()
         if isScanning { needsRecoveryCheckpoint = true }
     }
@@ -1203,8 +1307,11 @@ final class DepthPointAccumulator {
         var position = SIMD3<Float>(0, 0, 0)
         var color = SIMD3<Float>(0, 0, 0)
         var count: Float = 0
+        /// Stretch of the walk this point was captured in (drift correction).
+        var segment: UInt16 = 0
     }
 
+    private var recordsSegments = false
     private let queue = DispatchQueue(label: "scanview.depthcloud", qos: .utility)
     private let epoch = CaptureEpoch()
     private let lock = NSLock()
@@ -1258,8 +1365,9 @@ final class DepthPointAccumulator {
 
     func configure(voxelSize: Float, maxPoints: Int, coverageCells: Int,
                    coverageCellSize: Float = 0.025, reliableCoverageOnly: Bool = false,
-                   adaptiveTerrain: Bool = false) {
+                   adaptiveTerrain: Bool = false, recordSegments: Bool = false) {
         lock.lock()
+        recordsSegments = recordSegments && !adaptiveTerrain
         self.voxelSize = voxelSize
         self.maxPoints = max(0, maxPoints)
         self.coverageCells = max(1, coverageCells)
@@ -1295,7 +1403,7 @@ final class DepthPointAccumulator {
     /// - photoCoverage: publish a separate mask of retained sharp-photo coverage.
     /// - Returns: false if skipped (previous frame still processing).
     @discardableResult
-    func integrate(_ frame: ARFrame, maxDistance: Float, photoCoverage: Bool = false,
+    func integrate(_ frame: ARFrame, maxDistance: Float, photoCoverage: Bool = false, segment: UInt16 = 0,
                    onUpdate: @escaping (Int, Bool, Double) -> Void) -> Bool {
         guard !inFlight, let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
               let confidence = depthData.confidenceMap,
@@ -1344,7 +1452,7 @@ final class DepthPointAccumulator {
                             if cell.count < 1000 { cell.color += c; cell.count += 1 }
                             self.cells[key] = cell
                         } else if self.cells.count < self.maxPoints {
-                            self.cells[key] = Cell(position: p, color: c, count: 1)
+                            self.cells[key] = Cell(position: p, color: c, count: 1, segment: segment)
                         } else {
                             continue
                         }
@@ -1509,20 +1617,25 @@ final class DepthPointAccumulator {
                             boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
         }
         let snapshot = cells
+        let withSegments = recordsSegments
         lock.unlock()
         guard !snapshot.isEmpty else { return nil }
         var vertices: [SIMD3<Float>] = []
         var colors: [SIMD4<Float>] = []
+        var segments: [UInt16] = []
         vertices.reserveCapacity(snapshot.count)
         colors.reserveCapacity(snapshot.count)
+        if withSegments { segments.reserveCapacity(snapshot.count) }
         for cell in snapshot.values {
             vertices.append(cell.position)
             let c = cell.color / cell.count
             colors.append(SIMD4<Float>(c.x, c.y, c.z, 1))
+            if withSegments { segments.append(cell.segment) }
         }
         let (minB, maxB) = MeshData.bounds(of: vertices)
         return MeshData(vertices: vertices, normals: [], faces: [], colors: colors,
-                        boundingBoxMin: minB, boundingBoxMax: maxB)
+                        boundingBoxMin: minB, boundingBoxMax: maxB,
+                        pointSegments: withSegments ? ScanAlignmentDocument.packSegments(segments) : nil)
     }
 }
 #endif
@@ -1626,12 +1739,42 @@ struct MeshData: Codable {
     let boundingBoxMax: SIMD3<Float>
     /// Optional for legacy scans / point clouds. One byte per face, never per vertex.
     let faceClassifications: Data?
+    /// Point clouds only: the stretch of the walk each point was captured in
+    /// (UInt16, little endian, one per vertex). Used to correct drift on long scans.
+    let pointSegments: Data?
+    /// What the capture recorded about those stretches (capture frame). Only on
+    /// the pending capture; geometry edits other than recolouring drop it.
+    let alignment: AlignmentCapture?
 
     init(vertices: [SIMD3<Float>], normals: [SIMD3<Float>], faces: [[UInt32]], colors: [SIMD4<Float>],
-         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>, faceClassifications: Data? = nil) {
+         boundingBoxMin: SIMD3<Float>, boundingBoxMax: SIMD3<Float>, faceClassifications: Data? = nil,
+         pointSegments: Data? = nil, alignment: AlignmentCapture? = nil) {
         self.vertices = vertices; self.normals = normals; self.faces = faces; self.colors = colors
         self.boundingBoxMin = boundingBoxMin; self.boundingBoxMax = boundingBoxMax
         self.faceClassifications = faceClassifications
+        self.pointSegments = pointSegments?.count == vertices.count * 2 ? pointSegments : nil
+        self.alignment = alignment
+    }
+
+    /// Segment index per vertex, when this cloud carries them.
+    var segmentIndices: [UInt16]? {
+        guard let pointSegments, pointSegments.count == vertices.count * 2 else { return nil }
+        return ScanAlignmentDocument.unpackSegments(pointSegments)
+    }
+
+    /// Same points moved (drift correction): order, colours and segments are kept.
+    func replacingVertices(_ moved: [SIMD3<Float>]) -> MeshData {
+        guard moved.count == vertices.count else { return self }
+        let bounds = MeshData.bounds(of: moved)
+        return MeshData(vertices: moved, normals: normals, faces: faces, colors: colors,
+                        boundingBoxMin: bounds.0, boundingBoxMax: bounds.1, faceClassifications: faceClassifications,
+                        pointSegments: pointSegments)
+    }
+
+    func withAlignment(_ capture: AlignmentCapture?) -> MeshData {
+        MeshData(vertices: vertices, normals: normals, faces: faces, colors: colors,
+                 boundingBoxMin: boundingBoxMin, boundingBoxMax: boundingBoxMax, faceClassifications: faceClassifications,
+                 pointSegments: pointSegments, alignment: capture)
     }
 
     /// Cleanup operations record the source face of each kept output triangle.
@@ -1647,7 +1790,8 @@ struct MeshData: Codable {
     /// Changing colour must never discard the per-face floor/wall evidence.
     func replacingColors(_ values: [SIMD4<Float>]) -> MeshData {
         MeshData(vertices: vertices, normals: normals, faces: faces, colors: values,
-                 boundingBoxMin: boundingBoxMin, boundingBoxMax: boundingBoxMax, faceClassifications: faceClassifications)
+                 boundingBoxMin: boundingBoxMin, boundingBoxMax: boundingBoxMax, faceClassifications: faceClassifications,
+                 pointSegments: pointSegments, alignment: alignment)
     }
 
     var retentionStage: MeshRetentionReport.Stage {
@@ -1680,6 +1824,7 @@ struct MeshData: Codable {
 
     private enum CodingKeys: String, CodingKey {
         case packedVertices, packedNormals, packedFaces, packedColors, boundsMin, boundsMax, faceClassifications
+        case pointSegments, alignment
         case vertices, normals, faces, colors, boundingBoxMin, boundingBoxMax   // older format
     }
 
@@ -1701,6 +1846,8 @@ struct MeshData: Codable {
         try c.encode([boundingBoxMin.x, boundingBoxMin.y, boundingBoxMin.z], forKey: .boundsMin)
         try c.encode([boundingBoxMax.x, boundingBoxMax.y, boundingBoxMax.z], forKey: .boundsMax)
         try c.encodeIfPresent(faceClassifications, forKey: .faceClassifications)
+        try c.encodeIfPresent(pointSegments, forKey: .pointSegments)
+        try c.encodeIfPresent(alignment, forKey: .alignment)
     }
 
     init(from decoder: Decoder) throws {
@@ -1754,6 +1901,15 @@ struct MeshData: Codable {
             boundingBoxMax = try c.decode(SIMD3<Float>.self, forKey: .boundingBoxMax)
         }
         faceClassifications = try c.decodeIfPresent(Data.self, forKey: .faceClassifications)
+        // Drift data is an optional extra: a checkpoint whose geometry is intact
+        // stays recoverable (saved as captured) even if this part is unusable.
+        let storedSegments = try? c.decodeIfPresent(Data.self, forKey: .pointSegments)
+        let storedAlignment = try? c.decodeIfPresent(AlignmentCapture.self, forKey: .alignment)
+        if let storedSegments, let storedAlignment, storedSegments.count == vertices.count * 2, storedAlignment.isUsable {
+            pointSegments = storedSegments; alignment = storedAlignment
+        } else {
+            pointSegments = nil; alignment = nil
+        }
         try validateCheckpoint()
     }
 
@@ -1763,6 +1919,7 @@ struct MeshData: Codable {
         func finite(_ p: SIMD3<Float>) -> Bool { p.x.isFinite && p.y.isFinite && p.z.isFinite }
         guard vertices.count <= 8_000_000, faces.count <= 16_000_000,
               (faceClassifications == nil || faceClassifications?.count == faces.count),
+              (pointSegments == nil || pointSegments?.count == vertices.count * 2),
               (normals.isEmpty || normals.count == vertices.count),
               (colors.isEmpty || colors.count == vertices.count),
               vertices.allSatisfy(finite), normals.allSatisfy(finite),

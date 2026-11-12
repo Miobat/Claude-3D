@@ -11,10 +11,15 @@
 		A10050 /* MeshRetention.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10050; };
 		A10051 /* TerrainCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10051; };
 		A10052 /* AdaptiveTerrain.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10052; };
+		A10054 /* DriftMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10054; };
+		A10055 /* DriftRefiner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10055; };
+		A10056 /* DriftCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10056; };
+		A10057 /* DriftReferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10057; };
 		A10049 /* ObjectSupportSurfaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10049; };
 		A10046 /* ObjectSelectionCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10046; };
 		A10047 /* ObjectMeasurement.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10047; };
 		A10048 /* ObjectMeasurementPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10048; };
+		A10058 /* AlignmentSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10058; };
 		A10045 /* AutomaticMeasurementCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10045; };
 		A10044 /* TextureQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10044; };
 		A10043 /* RangePhotoInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10043; };
@@ -65,10 +70,15 @@
 		B10050 /* MeshRetention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/MeshRetention.swift; sourceTree = "<group>"; };
 		B10051 /* TerrainCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/TerrainCapture.swift; sourceTree = "<group>"; };
 		B10052 /* AdaptiveTerrain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/AdaptiveTerrain.swift; sourceTree = "<group>"; };
+		B10054 /* DriftMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/DriftMath.swift; sourceTree = "<group>"; };
+		B10055 /* DriftRefiner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/DriftRefiner.swift; sourceTree = "<group>"; };
+		B10056 /* DriftCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/DriftCapture.swift; sourceTree = "<group>"; };
+		B10057 /* DriftReferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/DriftReferences.swift; sourceTree = "<group>"; };
 		B10049 /* ObjectSupportSurfaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ObjectSupportSurfaces.swift; sourceTree = "<group>"; };
 		B10046 /* ObjectSelectionCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/ObjectSelectionCore.swift; sourceTree = "<group>"; };
 		B10047 /* ObjectMeasurement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectMeasurement.swift; sourceTree = "<group>"; };
 		B10048 /* ObjectMeasurementPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectMeasurementPanel.swift; sourceTree = "<group>"; };
+		B10058 /* AlignmentSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlignmentSheet.swift; sourceTree = "<group>"; };
 		B10045 /* AutomaticMeasurementCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/AutomaticMeasurementCore.swift; sourceTree = "<group>"; };
 		B10044 /* TextureQuality.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageCore/Sources/StorageCore/TextureQuality.swift; sourceTree = "<group>"; };
 		B10043 /* RangePhotoInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RangePhotoInput.swift; sourceTree = "<group>"; };
@@ -141,6 +151,10 @@
 				B10050 /* MeshRetention.swift */,
 				B10051 /* TerrainCapture.swift */,
 				B10052 /* AdaptiveTerrain.swift */,
+				B10054 /* DriftMath.swift */,
+				B10055 /* DriftRefiner.swift */,
+				B10056 /* DriftCapture.swift */,
+				B10057 /* DriftReferences.swift */,
 				B10031 /* CaptureSafety.swift */,
 				B10033 /* CoordinateContract.swift */,
 				B10034 /* AlignedUSDZ.swift */,
@@ -201,6 +215,7 @@
 				B10012 /* ModelViewerView.swift */,
 				B10047 /* ObjectMeasurement.swift */,
 				B10048 /* ObjectMeasurementPanel.swift */,
+				B10058 /* AlignmentSheet.swift */,
 				B10013 /* SceneKitView.swift */,
 				B10028 /* OrbitCameraController.swift */,
 				B10027 /* MeasurementOverlay.swift */,
@@ -378,8 +393,13 @@
 				A10050 /* MeshRetention.swift in Sources */,
 				A10051 /* TerrainCapture.swift in Sources */,
 				A10052 /* AdaptiveTerrain.swift in Sources */,
+				A10054 /* DriftMath.swift in Sources */,
+				A10055 /* DriftRefiner.swift in Sources */,
+				A10056 /* DriftCapture.swift in Sources */,
+				A10057 /* DriftReferences.swift in Sources */,
 				A10047 /* ObjectMeasurement.swift in Sources */,
 				A10048 /* ObjectMeasurementPanel.swift in Sources */,
+				A10058 /* AlignmentSheet.swift in Sources */,
 			A10029 /* LocationProvider.swift in Sources */,
 			A10028 /* OrbitCameraController.swift in Sources */,
 			A10027 /* MeasurementOverlay.swift in Sources */,

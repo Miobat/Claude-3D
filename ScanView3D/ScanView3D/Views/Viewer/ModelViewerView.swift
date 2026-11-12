@@ -128,6 +128,7 @@ struct ModelViewerView: View {
     @State private var showingShareSheet = false
     @State private var showingTextureQuality = false
     @State private var showingMeshRetention = false
+    @State private var showingAlignment = false
     @State private var shareURL: URL?
 
     // More menu
@@ -276,6 +277,14 @@ struct ModelViewerView: View {
                         Button { showingTextureQuality = true } label: {
                             Label("Texture quality", systemImage: "photo.badge.checkmark")
                         }
+                        Button { showingAlignment = true } label: {
+                            Label("Accuracy & alignment", systemImage: "scope")
+                        }
+                        if let alignment = scan.alignment, alignment.segmentCount > 0 {
+                            Text(alignment.corrected
+                                 ? String(format: "Drift corrected: moved up to %.1f cm", alignment.largestMoveMetres * 100)
+                                 : "Drift checked: saved as captured")
+                        }
                         Text(scan.scaleDescription)
                         if let provenance = scan.coordinateProvenance {
                             Text(provenance.localDatum)
@@ -317,6 +326,9 @@ struct ModelViewerView: View {
         }
         .sheet(isPresented: $showingMeshRetention) {
             MeshRetentionSheet(scan: scan, project: project, store: storageManager)
+        }
+        .sheet(isPresented: $showingAlignment) {
+            AlignmentSheet(scan: scan, project: project, measurements: session.measurements, store: storageManager)
         }
         .onAppear {
             #if DEBUG && targetEnvironment(simulator)

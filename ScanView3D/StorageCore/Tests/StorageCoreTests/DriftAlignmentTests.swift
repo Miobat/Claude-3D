@@ -362,6 +362,31 @@ final class DriftAlignmentTests: XCTestCase {
         XCTAssertEqual(prepared.points, walked.points)
     }
 
+    func testSavedPointFileReadsBackInTheSameOrder() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DriftTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let positions = [SIMD3<Float>(1.25, -2.5, 3.125), SIMD3<Float>(0, 0.001, -40), SIMD3<Float>(7, 8, 9)]
+        let colors = [SIMD4<Float>(1, 0, 0, 1), SIMD4<Float>(0, 1, 0, 1), SIMD4<Float>(0.2, 0.4, 0.6, 1)]
+        let coloured = directory.appendingPathComponent("a.ply"), plain = directory.appendingPathComponent("b.ply")
+        try PointCloudPLYWriter.write(positions: positions, colors: colors, to: coloured)
+        try PointCloudPLYWriter.write(positions: positions, colors: [], to: plain)
+        let first = try PointCloudPLYReader.read(coloured)
+        XCTAssertEqual(first.positions, positions, "positions come back bit for bit, in file order")
+        XCTAssertEqual(first.colors.count, 3)
+        XCTAssertEqual(first.colors[2].y, 0.4, accuracy: 0.005)
+        let second = try PointCloudPLYReader.read(plain)
+        XCTAssertEqual(second.positions, positions)
+        XCTAssertTrue(second.colors.isEmpty)
+        // Anything that is not our own point format is refused, never guessed.
+        let foreign = directory.appendingPathComponent("c.ply")
+        try Data("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n".utf8).write(to: foreign)
+        XCTAssertThrowsError(try PointCloudPLYReader.read(foreign))
+        var truncated = try Data(contentsOf: coloured); truncated.removeLast(5)
+        try truncated.write(to: foreign)
+        XCTAssertThrowsError(try PointCloudPLYReader.read(foreign))
+    }
+
     // MARK: Segments during capture
 
     private func pose(x: Float, yaw: Float = 0) -> simd_float4x4 {

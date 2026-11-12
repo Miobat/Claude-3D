@@ -621,10 +621,13 @@ class MeshProcessor {
             var c = SIMD4<Float>(repeating: 0)
             var n = SIMD3<Float>(repeating: 0)
             var count: Float = 0
+            var segment: UInt16 = 0
         }
 
         var voxels: [SIMD3<Int32>: Accum] = [:]
         voxels.reserveCapacity(meshData.vertices.count / 4 + 1)
+        // The kept point stays in the stretch of the walk it was captured in.
+        let segments = meshData.segmentIndices
 
         let inv = 1.0 / leafSize
         let hasColor = !meshData.colors.isEmpty
@@ -638,7 +641,7 @@ class MeshProcessor {
                 Int32(floor(v.z * inv))
             )
             var acc = voxels[key] ?? Accum()
-            if acc.count == 0 { acc.p = v }
+            if acc.count == 0 { acc.p = v; if let segments { acc.segment = segments[i] } }
             if hasColor && i < meshData.colors.count { acc.c += meshData.colors[i] }
             if hasNormal && i < meshData.normals.count { acc.n += meshData.normals[i] }
             acc.count += 1
@@ -648,7 +651,9 @@ class MeshProcessor {
         var newVertices: [SIMD3<Float>] = []
         var newColors: [SIMD4<Float>] = []
         var newNormals: [SIMD3<Float>] = []
+        var newSegments: [UInt16] = []
         newVertices.reserveCapacity(voxels.count)
+        if segments != nil { newSegments.reserveCapacity(voxels.count) }
 
         var minB = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var maxB = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
@@ -656,6 +661,7 @@ class MeshProcessor {
         for (_, acc) in voxels {
             let p = acc.p // Retain an actual captured point at range boundaries.
             newVertices.append(p)
+            if segments != nil { newSegments.append(acc.segment) }
             if hasColor {
                 var c = acc.c / acc.count
                 c.w = 1.0
@@ -675,7 +681,8 @@ class MeshProcessor {
             faces: [],
             colors: newColors,
             boundingBoxMin: minB,
-            boundingBoxMax: maxB
+            boundingBoxMax: maxB,
+            pointSegments: segments == nil ? nil : ScanAlignmentDocument.packSegments(newSegments)
         )
     }
 
@@ -691,8 +698,32 @@ class MeshProcessor {
             colors: [SIMD4<Float>](repeating: g, count: meshData.vertices.count),
             boundingBoxMin: meshData.boundingBoxMin,
             boundingBoxMax: meshData.boundingBoxMax,
-            faceClassifications: meshData.faceClassifications
+            faceClassifications: meshData.faceClassifications,
+            pointSegments: meshData.pointSegments
         )
+    }
+
+    /// Terrain keeps one measured sample per sampling cell. After drift correction
+    /// has moved a later pass onto an earlier one, some cells hold two: keep the
+    /// first, unchanged. No position is averaged or moved here.
+    static func keepFirstPerCell(_ cloud: MeshData, spacing: Float) -> MeshData {
+        guard spacing > 0, cloud.faces.isEmpty, !cloud.vertices.isEmpty else { return cloud }
+        let segments = cloud.segmentIndices
+        var seen = Set<SIMD3<Int32>>()
+        seen.reserveCapacity(cloud.vertices.count)
+        var vertices: [SIMD3<Float>] = [], colors: [SIMD4<Float>] = [], kept: [UInt16] = []
+        vertices.reserveCapacity(cloud.vertices.count)
+        for (i, p) in cloud.vertices.enumerated() {
+            guard let key = TerrainCapture.key(p, spacing: spacing), seen.insert(key).inserted else { continue }
+            vertices.append(p)
+            if i < cloud.colors.count { colors.append(cloud.colors[i]) }
+            if let segments { kept.append(segments[i]) }
+        }
+        guard vertices.count < cloud.vertices.count, !vertices.isEmpty else { return cloud }
+        let bounds = MeshData.bounds(of: vertices)
+        return MeshData(vertices: vertices, normals: [], faces: [], colors: colors.count == vertices.count ? colors : [],
+                        boundingBoxMin: bounds.0, boundingBoxMax: bounds.1,
+                        pointSegments: segments == nil ? nil : ScanAlignmentDocument.packSegments(kept))
     }
 
     /// Build a colored point-cloud SceneKit node (Path C foundation / splat init).

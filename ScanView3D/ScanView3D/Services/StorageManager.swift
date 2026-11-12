@@ -713,7 +713,23 @@ class StorageManager: ObservableObject {
     }
 
     /// Save a colored point cloud (Path C foundation): binary PLY + point-cloud .scn for viewing.
+    /// What a long capture hands over so its drift record is saved with the scan.
+    struct AlignmentRecord {
+        let prepared: DriftPipeline.Prepared
+        let capture: AlignmentCapture
+        /// Segment of each point, in the order of the mesh being saved.
+        let pointSegments: [UInt16]
+        /// Capture frame → saved frame.
+        let frame: RigidPose
+    }
+
+    /// - alignment: drift record of a fresh capture. - alignmentDocument: a
+    ///   ready record for a copy (called with the new model's hash).
+    /// Both sidecars are written before the scan enters the library.
     func savePointCloud(meshData: MeshData, name: String, toProject project: Project, splatBundle: URL? = nil,
+                        alignment: AlignmentRecord? = nil,
+                        alignmentDocument: ((String) throws -> ScanAlignmentDocument)? = nil,
+                        references: ScanReferenceDocument? = nil,
                         metadata: ((inout Scan) -> Void)? = nil) throws -> Scan {
         let scanId = UUID()
         let fileName = "\(scanId.uuidString).ply"
@@ -722,14 +738,17 @@ class StorageManager: ObservableObject {
 
         let scnURL = scanDir.appendingPathComponent("\(scanId.uuidString).scn")
         let bundleURL = scanDir.appendingPathComponent("\(scanId.uuidString)_bundle.zip")
-        guard [scanDir.appendingPathComponent(fileName), scnURL, bundleURL].allSatisfy({ !fileManager.fileExists(atPath: $0.path) }) else {
+        let alignmentURL = scanDir.appendingPathComponent(scanId.uuidString + ScanAlignmentDocument.suffix)
+        let referencesURL = scanDir.appendingPathComponent(scanId.uuidString + ScanReferenceDocument.suffix)
+        let fresh = [scanDir.appendingPathComponent(fileName), scnURL, bundleURL, alignmentURL, referencesURL]
+        guard fresh.allSatisfy({ !fileManager.fileExists(atPath: $0.path) }) else {
             throw StorageFailure.destinationExists
         }
         var committed = false
         defer {
             if !committed {
                 // Only this save's fresh UUID files; never touch the recovery draft.
-                for url in [scanDir.appendingPathComponent(fileName), scnURL, bundleURL] {
+                for url in fresh {
                     try? fileManager.removeItem(at: url)
                 }
             }
@@ -747,6 +766,32 @@ class StorageManager: ObservableObject {
         scan.boundingBoxMin = meshData.boundingBoxMin
         scan.boundingBoxMax = meshData.boundingBoxMax
 
+        // Drift record: bound to the exact bytes just written, because it lists
+        // the segment of each point in file order.
+        var alignmentSummary: ScanAlignmentSummary?
+        if alignment != nil || alignmentDocument != nil {
+            let hash = try measurementSHA256(fileURL)
+            let document: ScanAlignmentDocument
+            if let alignmentDocument {
+                document = try alignmentDocument(hash)
+            } else if let alignment {
+                document = DriftPipeline.document(prepared: alignment.prepared, capture: alignment.capture,
+                    pointSegments: alignment.pointSegments, frame: alignment.frame, modelSHA256: hash)
+            } else { throw ScanAlignmentError.invalidDocument }
+            guard document.pointCount == meshData.vertexCount, document.modelSHA256 == hash else {
+                throw ScanAlignmentError.invalidDocument
+            }
+            try document.validate()
+            let bytes = try JSONEncoder().encode(document)
+            guard bytes.count <= ScanAlignmentDocument.maximumBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+            try bytes.write(to: alignmentURL, options: .atomic)
+            alignmentSummary = document.summary
+        }
+        if let references, !references.isEmpty {
+            try references.validate()
+            try JSONEncoder().encode(references).write(to: referencesURL, options: .atomic)
+        }
+
         // Native point-cloud scene for fast in-app viewing
         let node = MeshProcessor.createPointCloudNode(from: meshData)
         let scene = SCNScene()
@@ -760,10 +805,158 @@ class StorageManager: ObservableObject {
             scan.splatBundleName = bundleURL.lastPathComponent
         }
         metadata?(&scan)   // stored in the same index write as the scan itself
+        if let alignmentSummary { scan.alignment = alignmentSummary }
         scan.terrainCapture = try scan.terrainCapture?.normalized()
         try addScan(scan, to: project)
         committed = true
         return scan
+    }
+
+    // MARK: - Drift record, as-captured and fitted copies
+
+    /// The scan's drift record, or nil when it has none (older scans, meshes).
+    /// A record that no longer matches the model file is refused, never reused.
+    func loadAlignment(for scan: Scan, in project: Project) throws -> ScanAlignmentDocument? {
+        let url = try measurementSidecar(ScanAlignmentDocument.suffix, scan: scan, project: project)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let document = try JSONDecoder().decode(ScanAlignmentDocument.self,
+            from: boundedMeasurementData(url, maximumBytes: ScanAlignmentDocument.maximumBytes))
+        try document.validate()
+        let model = try LibraryFileSafety.child(scan.fileName, of: validatedDirectory(for: project))
+        guard document.pointCount == scan.vertexCount, try measurementSHA256(model) == document.modelSHA256 else {
+            throw ScanAlignmentError.staleModel
+        }
+        return document
+    }
+
+    func loadReferences(for scan: Scan, in project: Project) throws -> ScanReferenceDocument {
+        let url = try measurementSidecar(ScanReferenceDocument.suffix, scan: scan, project: project)
+        guard fileManager.fileExists(atPath: url.path) else { return ScanReferenceDocument() }
+        let document = try JSONDecoder().decode(ScanReferenceDocument.self,
+            from: boundedMeasurementData(url, maximumBytes: ScanReferenceDocument.maximumBytes))
+        try document.validate()
+        return document
+    }
+
+    func saveReferences(_ references: ScanReferenceDocument, for scan: Scan, in project: Project) throws {
+        try references.validate()
+        try onMain {
+            guard !isLibraryReadOnly else { throw StorageFailure.readOnly }
+            guard let current = projects.first(where: { $0.id == project.id })?.scans.first(where: { $0.id == scan.id }),
+                  current.fileName == scan.fileName else { throw StorageFailure.missingItem }
+            let url = try measurementSidecar(ScanReferenceDocument.suffix, scan: scan, project: project)
+            if references.isEmpty {
+                if fileManager.fileExists(atPath: url.path) { try fileManager.removeItem(at: url) }
+                return
+            }
+            let bytes = try JSONEncoder().encode(references)
+            guard bytes.count <= ScanReferenceDocument.maximumBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+            try bytes.write(to: url, options: .atomic)
+        }
+    }
+
+    private func copyPlacement(from scan: Scan, to copy: inout Scan) {
+        copy.sceneFrame = scan.sceneFrame; copy.coordinateProvenance = scan.coordinateProvenance
+        copy.northAligned = scan.northAligned; copy.latitude = scan.latitude; copy.longitude = scan.longitude
+        copy.altitude = scan.altitude; copy.locationAccuracy = scan.locationAccuracy
+        copy.locationTimestamp = scan.locationTimestamp; copy.verticalLocationAccuracy = scan.verticalLocationAccuracy
+        copy.locationReducedAccuracy = scan.locationReducedAccuracy; copy.locationReference = scan.locationReference
+        copy.terrainCapture = scan.terrainCapture
+    }
+
+    private func storedPointCloud(of scan: Scan, in project: Project) throws -> (positions: [SIMD3<Float>], colors: [SIMD4<Float>]) {
+        let model = try LibraryFileSafety.child(scan.fileName, of: validatedDirectory(for: project))
+        guard scan.faceCount == 0, model.pathExtension.lowercased() == "ply", fileManager.fileExists(atPath: model.path) else {
+            throw ScanAlignmentError.noSegments
+        }
+        let cloud = try PointCloudPLYReader.read(model)
+        guard cloud.positions.count == scan.vertexCount else { throw ScanAlignmentError.staleModel }
+        return cloud
+    }
+
+    /// New library item holding the points exactly as the phone recorded them
+    /// (before any drift correction). The corrected scan is left untouched.
+    func saveAsCapturedCopy(of scan: Scan, in project: Project) throws -> Scan {
+        guard let document = try loadAlignment(for: scan, in: project) else { throw ScanAlignmentError.noSegments }
+        let cloud = try storedPointCloud(of: scan, in: project)
+        let restored = try DriftPipeline.asCaptured(points: cloud.positions, document: document)
+        let bounds = MeshData.bounds(of: restored)
+        let mesh = MeshData(vertices: restored, normals: [], faces: [], colors: cloud.colors,
+                            boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+        var summary = document.summary
+        summary.corrected = false; summary.asCapturedCopy = true; summary.largestMoveMetres = 0
+        let copySummary = summary
+        return try savePointCloud(meshData: mesh, name: scan.name + " · As captured", toProject: project,
+            alignmentDocument: { hash in
+                // The copy keeps the walk recording, so it can still be lined up or fitted later.
+                var copy = document
+                copy.modelSHA256 = hash
+                copy.summary = copySummary
+                copy.segments = copy.segments.map { var s = $0; s.saved = s.captured; return s }
+                return copy
+            }) {
+            self.copyPlacement(from: scan, to: &$0)
+            $0.notes = "Points as the phone recorded them, before drift correction. Measurements are not copied."
+        }
+    }
+
+    /// New library item fitted to the scan's references (known distances,
+    /// straight lines, control points). The source scan is left untouched.
+    func saveFittedCopy(of scan: Scan, in project: Project, references: ScanReferenceDocument,
+                        cancelled: () -> Bool = { false }) throws -> Scan {
+        let cloud = try storedPointCloud(of: scan, in: project)
+        let document = try loadAlignment(for: scan, in: project)
+        let segments = document.map { ScanAlignmentDocument.unpackSegments($0.pointSegments) }
+            ?? [UInt16](repeating: 0, count: cloud.positions.count)
+        let up = document.flatMap { ScanReferenceDocument.vector($0.up) } ?? SIMD3<Double>(0, 1, 0)
+        let fit = try DriftReferences.fit(points: cloud.positions, segments: segments,
+            poses: document?.savedPoses ?? [.identity], captured: document?.phonePoses ?? [.identity],
+            links: document?.links.map(ScanAlignmentDocument.unpackLink) ?? [], up: up, references: references,
+            cancelled: cancelled)
+        let bounds = MeshData.bounds(of: fit.points)
+        let mesh = MeshData(vertices: fit.points, normals: [], faces: [], colors: cloud.colors,
+                            boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+        var summary = document?.summary ?? ScanAlignmentSummary(pathLengthMetres: 0, segmentCount: 0, trackingJumps: 0,
+            fastTurnSeconds: 0, phoneCorrectionMetres: 0, overlap: "notRun", largestMoveMetres: 0, corrected: true)
+        summary.corrected = true; summary.fittedToReferences = true; summary.asCapturedCopy = nil
+        summary.largestMoveMetres = max(summary.largestMoveMetres, fit.largestMoveMetres)
+        summary.siteOrigin = fit.siteOrigin
+        let fittedSummary = summary
+        var builder: ((String) throws -> ScanAlignmentDocument)?
+        if let document {
+            builder = { hash in
+                var copy = document
+                copy.modelSHA256 = hash
+                copy.summary = fittedSummary
+                let frame = fit.frame
+                let rotatedUp = frame.rotate(up)
+                copy.up = [rotatedUp.x, rotatedUp.y, rotatedUp.z]
+                if let old = RigidPose(array: document.captureToSaved) { copy.captureToSaved = frame.composed(with: old).array }
+                copy.segments = try document.segments.enumerated().map { index, segment -> ScanAlignmentDocument.Segment in
+                    guard index < fit.poses.count, let captured = RigidPose(array: segment.captured),
+                          let phone = RigidPose(array: segment.phone) else { throw ScanAlignmentError.invalidDocument }
+                    return ScanAlignmentDocument.Segment(captured: frame.composed(with: captured).array,
+                        phone: frame.composed(with: phone).array, saved: fit.poses[index].array, startTime: segment.startTime)
+                }
+                return copy
+            }
+        }
+        let controlCount = references.controls.count
+        return try savePointCloud(meshData: mesh, name: scan.name + " · Fitted", toProject: project,
+                                  alignmentDocument: builder, references: fit.references) {
+            self.copyPlacement(from: scan, to: &$0)
+            if let origin = fit.siteOrigin {
+                // Now in the surveyor's grid (minus a whole-metre origin): the old
+                // capture-to-local transform no longer describes these coordinates.
+                $0.sceneFrame = nil
+                $0.coordinateProvenance = CoordinateProvenance(sourceKind: "lidar", scaleStatus: .lidarMetric,
+                    alignmentMethod: "fitted to \(controlCount) control points (heading and position)", captureToLocal: nil,
+                    localDatum: String(format: "Control-point grid: X = east − %.0f, Y = height − %.0f, Z = −(north − %.0f)",
+                                       origin[0], origin[2], origin[1]))
+            }
+            $0.alignment = fittedSummary
+            $0.notes = "Fitted to references. The source scan is unchanged. Measurements are not copied."
+        }
     }
 
     /// Native-test seam for a failed SceneKit write; production uses the same writer.
@@ -813,7 +1006,8 @@ class StorageManager: ObservableObject {
     private static func fileNames(of scan: Scan) -> [String] {
         let base = (scan.fileName as NSString).deletingPathExtension
         var names = [scan.fileName, "\(base).mtl", "\(base).scn", "\(base)_measurements.json",
-                     base + SurfaceLabelDocument.suffix, base + AutomaticMeasurementDocument.suffix]
+                     base + SurfaceLabelDocument.suffix, base + AutomaticMeasurementDocument.suffix,
+                     base + ScanAlignmentDocument.suffix, base + ScanReferenceDocument.suffix]
         if scan.originalMeshSHA256 != nil { names.append(base + "_original.mesh") }
         if let t = scan.textureFileName { names.append(t) }
         if let z = scan.splatBundleName { names.append(z) }
@@ -917,6 +1111,9 @@ class StorageManager: ObservableObject {
         }
         _ = try copyExtra("\(oldBase).scn", as: "\(newBase).scn")
         _ = try copyExtra("\(oldBase)_measurements.json", as: "\(newBase)_measurements.json")
+        // Point files are copied byte for byte, so the drift record's model hash stays valid.
+        _ = try copyExtra(oldBase + ScanAlignmentDocument.suffix, as: newBase + ScanAlignmentDocument.suffix)
+        _ = try copyExtra(oldBase + ScanReferenceDocument.suffix, as: newBase + ScanReferenceDocument.suffix)
         // A duplicate must not silently lose automatic results / semantic labels.
         // OBJ material references are renamed during copying, changing the byte
         // hash but not geometry. Rebind ONLY validated, current version-1 data.
@@ -970,6 +1167,7 @@ class StorageManager: ObservableObject {
         newScan.textureQuality = scan.textureQuality
         newScan.meshRetention = scan.meshRetention
         newScan.terrainCapture = scan.terrainCapture
+        newScan.alignment = scan.alignment
         if let hash = scan.originalMeshSHA256 {
             do {
                 let source = sourceDir.appendingPathComponent(oldBase + "_original.mesh")
@@ -1271,6 +1469,9 @@ class StorageManager: ObservableObject {
             let ext = source.pathExtension.lowercased()
             var limitations = [scan.scaleDescription, "Local coordinates, not georeferenced. Phone GPS is not survey control.",
                                "Model delivery only: not a project backup. Photos and measurements are not included."]
+            if let origin = scan.alignment?.siteOrigin, origin.count == 3 {
+                limitations[1] = String(format: "Fitted to control points entered in the app: X = east − %.0f, Y = height − %.0f, Z = −(north − %.0f). Verify against your control before use.", origin[0], origin[2], origin[1])
+            }
             let model: URL
             switch kind {
             case .native:
@@ -1314,6 +1515,18 @@ class StorageManager: ObservableObject {
                 try encoder.encode(terrainManifest).write(to: folder.appendingPathComponent("terrain.json"), options: .atomic)
                 limitations.append(contentsOf: terrainManifest.limitations)
                 limitations.append("Import terrain.json and coordinates.json with the PLY. Saved positions are already transformed: do not apply captureToLocal again.")
+            }
+            if kind == .native, let summary = scan.alignment {
+                // The drift record travels with the points it describes (same bytes, same order).
+                limitations.append("Drift correction: " + summary.overlapDescription
+                    + String(format: "; largest move %.3f m over a %.0f m walk. Not a field-accuracy guarantee.",
+                             summary.largestMoveMetres, summary.pathLengthMetres))
+                for (suffix, name) in [(ScanAlignmentDocument.suffix, "alignment.json"), (ScanReferenceDocument.suffix, "references.json")] {
+                    let sidecar = sourceDirectory.appendingPathComponent((scan.fileName as NSString).deletingPathExtension + suffix)
+                    if fileManager.fileExists(atPath: sidecar.path) {
+                        try fileManager.copyItem(at: sidecar, to: folder.appendingPathComponent(name))
+                    }
+                }
             }
             let factor: Double = kind == .stl ? 1000 : 1
             let convention = kind == .native ? CoordinateMath.identity :
