@@ -28,13 +28,16 @@ jobs:
   validate:
     uses: ./.github/workflows/validate-ios.yml
     with:
-      # Only codex/** pushes (which don't publish) need the separate compile check.
-      compile: ${{ github.event_name != 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/codex/') }}
+      # Pushes that don't publish (codex/** and commits marked [validate-only])
+      # need the separate device compile check.
+      compile: ${{ github.event_name != 'workflow_dispatch' && (startsWith(github.ref, 'refs/heads/codex/') || contains(github.event.head_commit.message, '[validate-only]')) }}
 
   build-and-deploy:
     needs: validate
     # Development pushes validate only; publishing a codex branch is manual.
-    if: github.event_name == 'workflow_dispatch' || !startsWith(github.ref, 'refs/heads/codex/')
+    # A push whose head commit message contains [validate-only] never publishes,
+    # so multi-step work can be compiled and tested before one release push.
+    if: github.event_name == 'workflow_dispatch' || (!startsWith(github.ref, 'refs/heads/codex/') && !contains(github.event.head_commit.message, '[validate-only]'))
     name: Build & Upload to TestFlight
     runs-on: macos-15
     timeout-minutes: 45

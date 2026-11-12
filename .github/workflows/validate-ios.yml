@@ -33,9 +33,12 @@ jobs:
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
       - name: Storage failure-path tests
+        shell: bash
         env:
           EXPORT_FIXTURE_DIR: ${{ runner.temp }}/export-fixtures
-        run: swift test --package-path ScanView3D/StorageCore
+        run: |
+          set -o pipefail
+          swift test --package-path ScanView3D/StorageCore 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -77,6 +80,10 @@ jobs:
         run: |
           { grep -E 'error:|BUILD FAILED' "$RUNNER_TEMP/validation.log" 2>/dev/null || true; } | head -20 | while IFS= read -r line; do
             echo "::error::$line"
+          done
+          # Unit-test compile errors and failed assertions are readable the same way.
+          { grep -E 'error:' "$RUNNER_TEMP/swift-test.log" 2>/dev/null || true; } | awk '!seen[$0]++' | head -12 | while IFS= read -r line; do
+            echo "::error title=Unit tests::${line:0:900}"
           done
       - name: Keep compiler log
         if: always()
