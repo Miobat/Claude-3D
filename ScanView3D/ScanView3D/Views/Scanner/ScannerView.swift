@@ -1467,8 +1467,15 @@ struct ScannerView: View {
                 var drift: (prepared: DriftPipeline.Prepared, capture: AlignmentCapture)?
                 if let recorded = cloud.alignment, let ids = cloud.segmentIndices {
                     if correctDrift { DispatchQueue.main.async { self.savingProgress = "Lining up passes…" } }
+                    var shown = -1
                     if let prepared = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: recorded,
-                                                            enabled: correctDrift) {
+                                                            enabled: correctDrift, progress: { fraction in
+                        // Large multi-pass scans can take a while: show that it is moving.
+                        let percent = Int((max(0, min(1, fraction)) * 20).rounded(.down)) * 5
+                        guard percent != shown else { return }
+                        shown = percent
+                        DispatchQueue.main.async { if self.isSaving { self.savingProgress = "Lining up passes… \(percent)%" } }
+                    }) {
                         drift = (prepared, recorded)
                         if prepared.summary.corrected { source = cloud.replacingVertices(prepared.points) }
                         DebugLogger.shared.info("Drift: \(prepared.summary.segmentCount) segments, path "

@@ -218,6 +218,26 @@ struct ScanAlignmentSummary: Codable, Equatable {
     /// East, north, height subtracted from control coordinates in a fitted copy.
     var siteOrigin: [Double]?
 
+    /// The summary is written into the library index (JSON), which refuses
+    /// non-finite numbers: a report value must never be what fails a save.
+    var sanitised: ScanAlignmentSummary {
+        func number(_ value: Double) -> Double { value.isFinite ? value : 0 }
+        func optional(_ value: Double?) -> Double? {
+            guard let value, value.isFinite else { return nil }
+            return value
+        }
+        var copy = self
+        copy.pathLengthMetres = number(pathLengthMetres)
+        copy.fastTurnSeconds = number(fastTurnSeconds)
+        copy.phoneCorrectionMetres = number(phoneCorrectionMetres)
+        copy.disagreementMetres = optional(disagreementMetres)
+        copy.mismatchBeforeMetres = optional(mismatchBeforeMetres)
+        copy.mismatchAfterMetres = optional(mismatchAfterMetres)
+        copy.largestMoveMetres = number(largestMoveMetres)
+        if let origin = siteOrigin, !(origin.count == 3 && origin.allSatisfy({ $0.isFinite })) { copy.siteOrigin = nil }
+        return copy
+    }
+
     var overlapDescription: String {
         switch overlap {
         case DriftRefiner.Result.applied.rawValue: return "Passes lined up"
@@ -404,7 +424,7 @@ enum DriftPipeline {
             phoneCorrectionMetres: 0, overlap: "off", largestMoveMetres: 0, corrected: false)
         guard enabled else {
             return Prepared(points: points, captured: phone.captured, phone: phone.captured, refined: phone.captured,
-                            links: [], summary: summary)
+                            links: [], summary: summary.sanitised)
         }
         summary.phoneCorrectionMetres = phone.largest
         var current = DriftRefiner.move(points: points, segments: segments, from: phone.captured, to: phone.corrected)
@@ -440,8 +460,14 @@ enum DriftPipeline {
         }
         summary.corrected = changed
         summary.largestMoveMetres = changed ? largest : 0
+        // A correction that produced a non-finite position is discarded whole.
+        if changed, !current.allSatisfy({ $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }) {
+            summary.corrected = false; summary.largestMoveMetres = 0; summary.overlap = DriftRefiner.Result.noImprovement.rawValue
+            return Prepared(points: points, captured: phone.captured, phone: phone.captured, refined: phone.captured,
+                            links: [], summary: summary.sanitised)
+        }
         return Prepared(points: changed ? current : points, captured: phone.captured, phone: phone.corrected,
-                        refined: refined, links: links, summary: summary)
+                        refined: refined, links: links, summary: summary.sanitised)
     }
 
     /// Builds the sidecar once the saved frame and model hash are known.

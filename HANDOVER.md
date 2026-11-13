@@ -7,6 +7,41 @@ web prototype and are not part of the app.)
 
 ---
 
+## Drift correction for long point clouds (2026-11-13, `claude/iphone-scanning-app-WHgvb`)
+
+Based on the published design release `da8a866`; keeps all prior Codex/Claude
+work. See `ScanView3D/DRIFT_ALIGNMENT.md` for the design, evidence, limits and
+the phone acceptance list. Owner report: a long canal scan came out bent with
+doubled walls; short scans are accurate and must not change.
+
+- Point Cloud and fixed-spacing Terrain record the walk in **segments** (an
+  `ARAnchor` each); every stored point remembers its segment. Splat, Auto
+  terrain, Fast and HQ are untouched.
+- Saving follows ARKit's own anchor corrections and lines up overlapping passes
+  (`DriftPipeline.prepare`, `DriftRefiner.refine`). Whole segments move rigidly;
+  no point is added, removed or averaged. No overlap, disagreement under 2.5 cm,
+  or no clear improvement = saved bit-identical to the capture.
+- New sidecars `<base>_alignment.json` (hash-bound) and `<base>_references.json`
+  follow move / duplicate / delete / native export. `Scan.alignment` is optional.
+- Info → **Accuracy & alignment**: drift report, as-captured copy, references
+  (known distance, straight line, control points) and a fitted copy. Copies are
+  always NEW scans.
+- `MeshData.pointSegments` / `.alignment` are optional and survive recovery;
+  functions that rebuild geometry drop them unless they explicitly carry them
+  (`voxelDownsamplePoints`, `makeUniformGrey`, `transformed(by:)`,
+  `replacingColors`, `replacingVertices`, `keepFirstPerCell`).
+- Xcode IDs A/B10054–10058 (four `StorageCore/Drift*.swift`, `AlignmentSheet`).
+  **Next free ID: 10059.**
+- CI: a push whose head commit message contains `[validate-only]` compiles and
+  tests but never publishes (any branch). Unit-test and native-check failures
+  now appear as run annotations.
+
+Not a phone test yet: how much ARKit moves anchors, real drift patterns and
+save time on big clouds are unknown until the owner's long scan. Do not relax
+the do-no-harm gates or apply corrections to Splat without that evidence.
+
+---
+
 ## Design refinement (2026-11-07, `codex/design-refinement`)
 
 Based on verified reliability branch `4879d21`. See

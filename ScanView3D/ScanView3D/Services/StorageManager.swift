@@ -785,7 +785,7 @@ class StorageManager: ObservableObject {
             let bytes = try JSONEncoder().encode(document)
             guard bytes.count <= ScanAlignmentDocument.maximumBytes else { throw CocoaError(.fileWriteOutOfSpace) }
             try bytes.write(to: alignmentURL, options: .atomic)
-            alignmentSummary = document.summary
+            alignmentSummary = document.summary.sanitised
         }
         if let references, !references.isEmpty {
             try references.validate()
@@ -954,7 +954,7 @@ class StorageManager: ObservableObject {
                     localDatum: String(format: "Control-point grid: X = east − %.0f, Y = height − %.0f, Z = −(north − %.0f)",
                                        origin[0], origin[2], origin[1]))
             }
-            $0.alignment = fittedSummary
+            $0.alignment = fittedSummary.sanitised
             $0.notes = "Fitted to references. The source scan is unchanged. Measurements are not copied."
         }
     }

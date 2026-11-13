@@ -177,7 +177,10 @@ struct AlignmentSheet: View {
                         .foregroundStyle(abs(row.deviation) > 0.02 ? Color.orange : Color.primary)
                 }.accessibilityElement(children: .combine)
             }
-            .onDelete { offsets in references.distances.remove(atOffsets: offsets); persist() }
+            .onDelete { offsets in
+                let ids = Set(offsets.map { report.distances[$0].id })
+                references.distances.removeAll { ids.contains($0.id) }; persist()
+            }
             Menu {
                 ForEach(distanceCandidates, id: \.measurement.id) { entry in
                     Button("Distance \(entry.index) · \(entry.measurement.summary(unit: .meters))") {
@@ -204,7 +207,10 @@ struct AlignmentSheet: View {
                         .foregroundStyle(row.largestOffsetMetres > 0.02 ? Color.orange : Color.secondary)
                 }.accessibilityElement(children: .combine)
             }
-            .onDelete { offsets in references.lines.remove(atOffsets: offsets); persist() }
+            .onDelete { offsets in
+                let ids = Set(offsets.map { report.lines[$0].id })
+                references.lines.removeAll { ids.contains($0.id) }; persist()
+            }
             Menu {
                 ForEach(lineCandidates, id: \.measurement.id) { entry in
                     Button("Path \(entry.index) · \(entry.measurement.points.count) points") { addLine(entry.measurement, name: "Path \(entry.index)") }
@@ -220,11 +226,10 @@ struct AlignmentSheet: View {
 
     @ViewBuilder private var controlSection: some View {
         Section {
-            ForEach(Array(report.controls.enumerated()), id: \.element.id) { index, row in
+            ForEach(report.controls) { row in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(row.name).font(.subheadline.weight(.semibold))
-                    if index < references.controls.count {
-                        let c = references.controls[index]
+                    if let c = references.controls.first(where: { $0.id == row.id }) {
                         Text(String(format: "E %.3f · N %.3f · H %.3f", c.east, c.north, c.height))
                             .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                     }
@@ -237,7 +242,10 @@ struct AlignmentSheet: View {
                     }
                 }.accessibilityElement(children: .combine)
             }
-            .onDelete { offsets in references.controls.remove(atOffsets: offsets); persist() }
+            .onDelete { offsets in
+                let ids = Set(offsets.map { report.controls[$0].id })
+                references.controls.removeAll { ids.contains($0.id) }; persist()
+            }
             Menu {
                 ForEach(Array(pointCandidates.enumerated()), id: \.offset) { _, entry in
                     Button(entry.name) {
