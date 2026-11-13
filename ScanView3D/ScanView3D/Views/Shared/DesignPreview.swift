@@ -412,6 +412,7 @@ enum DesignPreview {
         checkAdaptiveTerrain(check)
         checkMeshRetention(check)
         checkTextureQuality(check)
+        checkDriftAlignment(check)
         checkObjects(view: view, coordinator: coordinator, check: check) {
             let report: [String: Any] = ["checks": count, "failures": failures]
             let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("navigation-checks.json")
@@ -1011,6 +1012,190 @@ enum DesignPreview {
             check(afterFailure == before && recoveryAfterFailure.1?.vertices == cloud.vertices,
                   "Failed point save preserves earlier scans and the recoverable terrain checkpoint")
         } catch { check(false, "Terrain native fixtures: \(error)") }
+    }
+
+    /// Drift correction through the real save, copy, duplicate, export and
+    /// recovery paths: two stretches of a walk, the second lifted 5 cm by the
+    /// phone's own anchor correction.
+    private static func checkDriftAlignment(_ check: (Bool, String) -> Void) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("drift-check-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+            var settings = try JSONDecoder().decode(ScanSettings.self, from: Data("{\"captureMode\":\"Point Cloud\"}".utf8))
+            check(settings.driftCorrection, "Drift correction defaults on for settings saved by older versions")
+            settings.driftCorrection = false
+            let restoredSettings = try JSONDecoder().decode(ScanSettings.self, from: JSONEncoder().encode(settings))
+            check(restoredSettings.driftCorrection == false, "Drift correction choice persists")
+
+            var vertices: [SIMD3<Float>] = [], colors: [SIMD4<Float>] = [], segments: [UInt16] = []
+            for stretch in 0..<2 {
+                for i in 0..<20 { for j in 0..<20 {
+                    vertices.append(SIMD3<Float>(Float(stretch) * 2 + Float(i) * 0.1, 0, Float(j) * 0.1))
+                    colors.append(SIMD4<Float>(0.4, 0.5, Float(stretch), 1)); segments.append(UInt16(stretch))
+                } }
+            }
+            var first = matrix_identity_float4x4; first.columns.3 = SIMD4<Float>(1, 1.4, 1, 1)
+            var second = first; second.columns.3.x = 3
+            var lifted = second; lifted.columns.3.y += 0.05
+            let capture = AlignmentCapture(spacingMetres: 0.01, segments: [
+                AlignmentCapture.Segment(reference: AlignmentCapture.array(first), end: AlignmentCapture.array(first), startTime: 0),
+                AlignmentCapture.Segment(reference: AlignmentCapture.array(second), end: AlignmentCapture.array(lifted), startTime: 3)
+            ], path: Data(count: 64), pathLengthMetres: 4, trackingJumps: 1, fastTurnSeconds: 2)
+            let bounds = MeshData.bounds(of: vertices)
+            let cloud = MeshData(vertices: vertices, normals: [], faces: [], colors: colors, boundingBoxMin: bounds.0,
+                                 boundingBoxMax: bounds.1, pointSegments: ScanAlignmentDocument.packSegments(segments),
+                                 alignment: capture)
+            check(cloud.segmentIndices == segments && cloud.alignment == capture, "Captured cloud carries its walk segments")
+
+            // Recovery keeps the record; an older checkpoint without it still restores.
+            let draft = CaptureDraft(id: UUID(), startedAt: Date(), checkpointAt: Date(), name: "Drift checkpoint",
+                settings: settings, photoFolderName: nil, location: nil, isFinalized: true)
+            let checkpoint = CaptureCheckpointStore<CaptureDraft, MeshData>(directory: root.appendingPathComponent("checkpoint"))
+            try checkpoint.save(draft, payload: cloud)
+            let recovered = try checkpoint.load().1
+            check(recovered?.vertices == vertices && recovered?.segmentIndices == segments && recovered?.alignment == capture,
+                  "Recovery checkpoint retains points, segments and the drift record")
+            let plain = MeshData(vertices: vertices, normals: [], faces: [], colors: colors, boundingBoxMin: bounds.0, boundingBoxMax: bounds.1)
+            let legacy = try PropertyListDecoder().decode(MeshData.self, from: PropertyListEncoder().encode(plain))
+            check(legacy.vertices == vertices && legacy.pointSegments == nil && legacy.alignment == nil,
+                  "Checkpoints without a drift record stay readable")
+
+            // The save pipeline, as the scanner screen runs it.
+            guard let ids = cloud.segmentIndices,
+                  let prepared = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: capture, enabled: true) else {
+                check(false, "Drift pipeline accepts the capture"); return
+            }
+            check(prepared.summary.corrected && abs(prepared.summary.phoneCorrectionMetres - 0.05) < 0.002
+                  && prepared.summary.overlap == DriftRefiner.Result.noOverlap.rawValue,
+                  "Phone's own 5 cm correction is found and applied")
+            let source = cloud.replacingVertices(prepared.points)
+            var worstLift: Float = 0, worstStill: Float = 0
+            for i in vertices.indices {
+                if segments[i] == 1 { worstLift = max(worstLift, abs(source.vertices[i].y - 0.05)) }
+                else { worstStill = max(worstStill, simd_distance(source.vertices[i], vertices[i])) }
+            }
+            check(worstLift < 1e-4 && worstStill == 0, "Only the corrected stretch moves, by exactly its correction")
+            var frame = matrix_identity_float4x4; frame.columns.3 = SIMD4<Float>(-2, 0, -1, 1)
+            let thinned = MeshProcessor.voxelDownsamplePoints(source, leafSize: 0.01)
+            let points = thinned.transformed(by: frame)
+            guard let savedSegments = points.segmentIndices, points.vertexCount == vertices.count else {
+                check(false, "Segments survive thinning and the saved frame"); return
+            }
+            check(MeshProcessor.makeUniformGrey(points).segmentIndices == savedSegments, "Segments survive recolouring")
+
+            let store = StorageManager(directory: root.appendingPathComponent("library"))
+            guard let project = store.createProject(name: "Drift") else { check(false, "Drift fixture project"); return }
+            let record = StorageManager.AlignmentRecord(prepared: prepared, capture: capture, pointSegments: savedSegments,
+                                                        frame: RigidPose(frame))
+            let scan = try store.savePointCloud(meshData: points, name: "Long walk", toProject: project, alignment: record) {
+                $0.recordCaptureFrame(frame)
+            }
+            let reloaded = StorageManager(directory: root.appendingPathComponent("library")).projects.first?.scans.first
+            check(reloaded?.alignment?.corrected == true && reloaded?.alignment?.segmentCount == 2
+                  && reloaded?.alignment?.trackingJumps == 1, "Drift summary commits with the scan")
+            guard let document = try store.loadAlignment(for: scan, in: project) else {
+                check(false, "Drift record is stored beside the scan"); return
+            }
+            check(document.pointCount == points.vertexCount && ScanAlignmentDocument.unpackSegments(document.pointSegments) == savedSegments,
+                  "Drift record lists each saved point's segment in file order")
+            let model = store.getScanFileURL(scan: scan, project: project)
+            let stored = try PointCloudPLYReader.read(model)
+            check(stored.positions == points.vertices, "Saved point file reads back in the same order")
+
+            // As captured: a NEW scan; the corrected one is untouched.
+            let before = try Data(contentsOf: model)
+            let original = try store.saveAsCapturedCopy(of: scan, in: project)
+            let restored = try PointCloudPLYReader.read(store.getScanFileURL(scan: original, project: project))
+            var worstRestore: Float = 0
+            for i in restored.positions.indices {
+                var expected = points.vertices[i]
+                if savedSegments[i] == 1 { expected.y -= 0.05 }
+                worstRestore = max(worstRestore, simd_distance(restored.positions[i], expected))
+            }
+            check(restored.positions.count == points.vertexCount && worstRestore < 2e-4,
+                  "As-captured copy restores the recorded positions")
+            let afterCopy = try Data(contentsOf: model)
+            check(original.alignment?.asCapturedCopy == true && original.alignment?.corrected == false
+                  && afterCopy == before, "As-captured copy leaves the corrected scan unchanged")
+            let originalRecord = try store.loadAlignment(for: original, in: project)
+            check(originalRecord != nil, "As-captured copy keeps its walk record")
+
+            // Duplicate and delete carry the record.
+            guard let duplicate = store.duplicateScan(scan, from: project, to: project) else {
+                check(false, "Drift duplicate fixture"); return
+            }
+            let duplicateDocument = try store.loadAlignment(for: duplicate, in: project)
+            check(duplicate.alignment == scan.alignment && duplicateDocument != nil, "Duplicate keeps a valid drift record")
+            let duplicateRecord = store.getScanFileURL(scan: duplicate, project: project).deletingPathExtension().path
+                + ScanAlignmentDocument.suffix
+            check(FileManager.default.fileExists(atPath: duplicateRecord), "Duplicate has its own record file")
+            store.deleteScan(duplicate, from: project)
+            check(!FileManager.default.fileExists(atPath: duplicateRecord), "Deleting a scan removes its drift record")
+
+            // References: check, persist, and a fitted copy in control-point coordinates.
+            var references = ScanReferenceDocument()
+            let a = points.vertices[0], b = points.vertices[399]
+            references.distances = [ScanReferenceDocument.KnownDistance(name: "Tape", a: [Double(a.x), Double(a.y), Double(a.z)],
+                b: [Double(b.x), Double(b.y), Double(b.z)], knownMetres: Double(simd_distance(a, b)) + 0.01)]
+            // Three well-spread corners of the saved cloud (its point order is not the capture order).
+            let spread = [points.vertices.min { $0.x + $0.z < $1.x + $1.z }, points.vertices.max { $0.x + $0.z < $1.x + $1.z },
+                          points.vertices.max { $0.x - $0.z < $1.x - $1.z }].compactMap { $0 }
+            for (index, p) in spread.enumerated() {
+                references.controls.append(ScanReferenceDocument.ControlPoint(name: "C\(index + 1)",
+                    point: [Double(p.x), Double(p.y), Double(p.z)],
+                    east: 500_000 + Double(p.x), north: 6_700_000 - Double(p.z), height: 12 + Double(p.y)))
+            }
+            try store.saveReferences(references, for: scan, in: project)
+            let storedReferences = try store.loadReferences(for: scan, in: project)
+            check(storedReferences == references, "References persist beside the scan")
+            let report = DriftReferences.report(references)
+            check(abs(report.distances[0].deviation + 0.01) < 1e-6 && report.worstMetres < 0.011,
+                  "Reference report measures without changing the scan")
+            // Fit to the control points alone (the deliberately wrong tape value above is for the report).
+            var controlsOnly = references; controlsOnly.distances = []
+            let fitted = try store.saveFittedCopy(of: scan, in: project, references: controlsOnly)
+            check(fitted.alignment?.fittedToReferences == true && fitted.alignment?.siteOrigin?.count == 3
+                  && fitted.sceneFrame == nil && fitted.coordinateProvenance?.alignmentMethod.contains("control points") == true,
+                  "Fitted copy records its control-point grid")
+            let fittedPoints = try PointCloudPLYReader.read(store.getScanFileURL(scan: fitted, project: project))
+            if let origin = fitted.alignment?.siteOrigin, origin.count == 3 {
+                let p = points.vertices[0]
+                let expected = SIMD3<Float>(Float(500_000 + Double(p.x) - origin[0]), Float(12 + Double(p.y) - origin[2]),
+                                            Float(-(6_700_000 - Double(p.z) - origin[1])))
+                check(simd_distance(fittedPoints.positions[0], expected) < 0.02, "Fitted copy uses X east, Y height, Z south")
+            } else { check(false, "Fitted copy uses X east, Y height, Z south") }
+            let afterFit = try Data(contentsOf: model)
+            check(afterFit == before, "Fitting leaves the source scan unchanged")
+            let fittedRecord = try store.loadAlignment(for: fitted, in: project)
+            let fittedReferences = try store.loadReferences(for: fitted, in: project)
+            check(fittedRecord != nil && fittedReferences.controls.count == 3, "Fitted copy keeps its walk record and references")
+
+            // Export carries the record; ordinary scans are unaffected.
+            let delivery = try store.exportScan(scan, from: project)
+            let folder = delivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(scan.id.uuidString)
+            let readme = try String(contentsOf: folder.appendingPathComponent("README.txt"), encoding: .utf8)
+            check(FileManager.default.fileExists(atPath: folder.appendingPathComponent("alignment.json").path)
+                  && FileManager.default.fileExists(atPath: folder.appendingPathComponent("references.json").path)
+                  && readme.contains("Drift correction"), "Export includes the drift record and says what was done")
+            let ordinary = try store.savePointCloud(meshData: points, name: "Ordinary", toProject: project)
+            let ordinaryDelivery = try store.exportScan(ordinary, from: project)
+            let ordinaryFolder = ordinaryDelivery.deletingLastPathComponent().appendingPathComponent("Models").appendingPathComponent(ordinary.id.uuidString)
+            let ordinaryRecord = try store.loadAlignment(for: ordinary, in: project)
+            check(ordinary.alignment == nil && ordinaryRecord == nil
+                  && !FileManager.default.fileExists(atPath: ordinaryFolder.appendingPathComponent("alignment.json").path),
+                  "Scans without a walk record gain no invented drift data")
+
+            // Turned off: saved exactly as captured, and recorded as such.
+            guard let off = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: capture, enabled: false) else {
+                check(false, "Drift pipeline can be turned off"); return
+            }
+            check(off.points == cloud.vertices && !off.summary.corrected && off.summary.overlap == "off",
+                  "With correction off the captured points are saved untouched")
+            // A record that no longer matches its model is refused.
+            try Data("ply\n".utf8).write(to: model, options: .atomic)
+            do { _ = try store.loadAlignment(for: scan, in: project); check(false, "Stale drift record is refused") }
+            catch { check(true, "Stale drift record is refused") }
+        } catch { check(false, "Drift native fixtures: \(error)") }
     }
 
     private final class FailingPointCloudSceneStore: StorageManager {
