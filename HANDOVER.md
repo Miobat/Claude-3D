@@ -36,6 +36,11 @@ doubled walls; short scans are accurate and must not change.
   tests but never publishes (any branch). Unit-test and native-check failures
   now appear as run annotations.
 
+Published with the owner's authorization on 2026-11-14 from `17a762a` via
+[release run 43551674862](https://github.com/Miobat/Claude-3D/actions/runs/43551674862):
+version **1.2.0**, build number from 2026-11-14 03:43 UTC, after the unit tests,
+the native simulator checks and both builds passed. TestFlight only.
+
 Not a phone test yet: how much ARKit moves anchors, real drift patterns and
 save time on big clouds are unknown until the owner's long scan. Do not relax
 the do-no-harm gates or apply corrections to Splat without that evidence.
