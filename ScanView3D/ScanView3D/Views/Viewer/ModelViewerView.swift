@@ -281,9 +281,15 @@ struct ModelViewerView: View {
                             Label("Accuracy & alignment", systemImage: "scope")
                         }
                         if let alignment = scan.alignment, alignment.segmentCount > 0 {
-                            Text(alignment.corrected
-                                 ? String(format: "Drift corrected: moved up to %.1f cm", alignment.largestMoveMetres * 100)
-                                 : "Drift checked: saved as captured")
+                            if alignment.corrected {
+                                Text(String(format: "Drift corrected: moved up to %.1f cm", alignment.largestMoveMetres * 100))
+                            } else if alignment.overlap == "off" {
+                                Text("Drift correction off: saved as captured")
+                            } else if alignment.overlap == "tooShort" {
+                                Text("Short scan: saved exactly as captured")
+                            } else {
+                                Text("Drift checked: saved as captured")
+                            }
                         }
                         Text(scan.scaleDescription)
                         if let provenance = scan.coordinateProvenance {

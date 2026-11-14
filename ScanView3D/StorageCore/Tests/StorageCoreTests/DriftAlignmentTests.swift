@@ -283,10 +283,10 @@ final class DriftAlignmentTests: XCTestCase {
             AlignmentCapture.Segment(reference: matrix(base), end: matrix(tiny), startTime: 1),
             AlignmentCapture.Segment(reference: matrix(base), end: matrix(real), startTime: 2),
             AlignmentCapture.Segment(reference: matrix(base), end: matrix(absurd), startTime: 3)
-        ], path: Data(), pathLengthMetres: 5, trackingJumps: 0, fastTurnSeconds: 0)
+        ], path: Data(), pathLengthMetres: 30, trackingJumps: 0, fastTurnSeconds: 0)
         let correction = try XCTUnwrap(DriftPipeline.phoneCorrection(capture))
         XCTAssertEqual(correction.corrected[0], correction.captured[0])
-        XCTAssertEqual(correction.corrected[1], correction.captured[1], "sub-2 mm nudges count as exactly nothing")
+        XCTAssertEqual(correction.corrected[1], correction.captured[1], "nudges under 5 mm count as exactly nothing")
         XCTAssertNotEqual(correction.corrected[2], correction.captured[2])
         XCTAssertEqual(correction.corrected[3], correction.captured[3], "implausible jumps are ignored")
         XCTAssertEqual(correction.ignored, 1)
@@ -310,6 +310,42 @@ final class DriftAlignmentTests: XCTestCase {
         XCTAssertEqual(off.summary.overlap, "off")
         // A segment index without a record is refused rather than guessed.
         XCTAssertNil(DriftPipeline.prepare(points: points, segments: [0, 1, 2, 9], capture: capture, enabled: true))
+
+        // A short walk is never touched, whatever the phone did to its anchors.
+        var short = capture
+        short.pathLengthMetres = 6
+        let untouched = try XCTUnwrap(DriftPipeline.prepare(points: points, segments: [0, 1, 2, 3], capture: short, enabled: true))
+        XCTAssertEqual(untouched.points, points, "a short scan is saved exactly as captured")
+        XCTAssertFalse(untouched.summary.corrected)
+        XCTAssertEqual(untouched.summary.overlap, "tooShort")
+        XCTAssertEqual(untouched.summary.largestMoveMetres, 0)
+    }
+
+    func testAShiftOfTheWholeMapIsNotACorrection() throws {
+        // ARKit moved every anchor by the same turn and shift: the shape is unchanged.
+        let whole = RigidPose(r: DriftMath.yaw(0.03), t: SIMD3(0.4, 0.02, -0.25))
+        let poses = (0..<5).map { RigidPose(r: DriftMath.yaw(0.2 * Double($0)), t: SIMD3(1.5 * Double($0), 1.4, 0.3)) }
+        let capture = AlignmentCapture(spacingMetres: 0.01,
+            segments: poses.enumerated().map { AlignmentCapture.Segment(reference: matrix($1), end: matrix(whole.composed(with: $1)), startTime: Double($0)) },
+            path: Data(), pathLengthMetres: 40, trackingJumps: 0, fastTurnSeconds: 0)
+        let correction = try XCTUnwrap(DriftPipeline.phoneCorrection(capture))
+        XCTAssertEqual(correction.corrected, correction.captured)
+        XCTAssertEqual(correction.largest, 0)
+        let points = (0..<5).map { SIMD3<Float>(Float($0) * 1.5, 0, 0) }
+        let prepared = try XCTUnwrap(DriftPipeline.prepare(points: points, segments: [0, 1, 2, 3, 4], capture: capture, enabled: true))
+        XCTAssertEqual(prepared.points, points)
+        XCTAssertFalse(prepared.summary.corrected)
+
+        // One stretch moved differently from the rest: only that one is corrected.
+        var segments = capture.segments
+        let bent = RigidPose(r: DriftMath.yaw(0.03), t: SIMD3(0.4, 0.08, -0.25)).composed(with: poses[3])
+        segments[3].end = matrix(bent)
+        var uneven = capture
+        uneven.segments = segments
+        let relative = try XCTUnwrap(DriftPipeline.phoneCorrection(uneven))
+        XCTAssertEqual(relative.corrected[2], relative.captured[2])
+        XCTAssertNotEqual(relative.corrected[3], relative.captured[3])
+        XCTAssertEqual(relative.largest, 0.06, accuracy: 0.01)
     }
 
     func testPipelineCorrectsASavedRecordRoundTripsAndRestoresAsCaptured() throws {
@@ -430,12 +466,28 @@ final class DriftAlignmentTests: XCTestCase {
         XCTAssertTrue(segmenter.update(time: t, pose: pose(x: 4.3, yaw: heading), anchorMoved: true))
         t += 0.1
         XCTAssertFalse(segmenter.update(time: t, pose: pose(x: 4.3, yaw: heading), anchorMoved: true),
-                       "a moved anchor does not restart segments more than once a second")
+                       "not on the very next tick")
+        t += 0.1
+        XCTAssertTrue(segmenter.update(time: t, pose: pose(x: 4.3, yaw: heading), anchorMoved: true),
+                      "points recorded after an anchor move get their own record promptly")
         segmenter.noteDiscontinuity()
         t += 5
         XCTAssertTrue(segmenter.update(time: t, pose: pose(x: 4.3, yaw: heading), anchorMoved: false))
         XCTAssertEqual(segmenter.path.count % 32, 0)
         XCTAssertGreaterThan(segmenter.path.count, 32 * 20)
+    }
+
+    func testAJitteryAnchorCannotUseUpEverySegment() {
+        var segmenter = CaptureSegmenter()
+        var t = 0.0
+        _ = segmenter.update(time: t, pose: pose(x: 0), anchorMoved: false)
+        // Standing still for a minute while the anchor is reported as moved on every tick.
+        for _ in 0..<600 {
+            t += 0.1
+            _ = segmenter.update(time: t, pose: pose(x: 0), anchorMoved: true)
+        }
+        XCTAssertGreaterThanOrEqual(segmenter.segmentCount, 61, "prompt restarts while the budget lasts")
+        XCTAssertLessThan(segmenter.segmentCount, 100, "then at most one every two seconds")
     }
 
     func testFastTurnHintAndSegmentBudget() {

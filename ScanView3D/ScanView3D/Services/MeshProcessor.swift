@@ -704,26 +704,35 @@ class MeshProcessor {
     }
 
     /// Terrain keeps one measured sample per sampling cell. After drift correction
-    /// has moved a later pass onto an earlier one, some cells hold two: keep the
-    /// first, unchanged. No position is averaged or moved here.
-    static func keepFirstPerCell(_ cloud: MeshData, spacing: Float) -> MeshData {
-        guard spacing > 0, cloud.faces.isEmpty, !cloud.vertices.isEmpty else { return cloud }
-        let segments = cloud.segmentIndices
-        var seen = Set<SIMD3<Int32>>()
-        seen.reserveCapacity(cloud.vertices.count)
+    /// has laid a later pass onto an earlier one, a cell can hold samples of both.
+    /// The earliest pass in each cell is kept; samples of a clearly later pass
+    /// (three or more walk segments on) are dropped. Samples of the same pass are
+    /// never dropped, and no position is averaged or moved here.
+    static func keepOnePassPerCell(_ cloud: MeshData, spacing: Float) -> MeshData {
+        guard spacing > 0, cloud.faces.isEmpty, !cloud.vertices.isEmpty, let segments = cloud.segmentIndices else { return cloud }
+        var earliest: [SIMD3<Int32>: UInt16] = [:]
+        earliest.reserveCapacity(cloud.vertices.count)
+        var keys = [SIMD3<Int32>?](repeating: nil, count: cloud.vertices.count)
+        for (i, p) in cloud.vertices.enumerated() {
+            guard let key = TerrainCapture.key(p, spacing: spacing) else { continue }
+            keys[i] = key
+            if let known = earliest[key] { if segments[i] < known { earliest[key] = segments[i] } }
+            else { earliest[key] = segments[i] }
+        }
         var vertices: [SIMD3<Float>] = [], colors: [SIMD4<Float>] = [], kept: [UInt16] = []
         vertices.reserveCapacity(cloud.vertices.count)
+        let hasColor = cloud.colors.count == cloud.vertices.count
         for (i, p) in cloud.vertices.enumerated() {
-            guard let key = TerrainCapture.key(p, spacing: spacing), seen.insert(key).inserted else { continue }
+            if let key = keys[i], let first = earliest[key], Int(segments[i]) - Int(first) >= 3 { continue }
             vertices.append(p)
-            if i < cloud.colors.count { colors.append(cloud.colors[i]) }
-            if let segments { kept.append(segments[i]) }
+            if hasColor { colors.append(cloud.colors[i]) }
+            kept.append(segments[i])
         }
         guard vertices.count < cloud.vertices.count, !vertices.isEmpty else { return cloud }
         let bounds = MeshData.bounds(of: vertices)
-        return MeshData(vertices: vertices, normals: [], faces: [], colors: colors.count == vertices.count ? colors : [],
+        return MeshData(vertices: vertices, normals: [], faces: [], colors: colors,
                         boundingBoxMin: bounds.0, boundingBoxMax: bounds.1,
-                        pointSegments: segments == nil ? nil : ScanAlignmentDocument.packSegments(kept))
+                        pointSegments: ScanAlignmentDocument.packSegments(kept))
     }
 
     /// Build a colored point-cloud SceneKit node (Path C foundation / splat init).

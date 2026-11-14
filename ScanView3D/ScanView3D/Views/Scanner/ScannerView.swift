@@ -696,7 +696,7 @@ struct ScannerView: View {
                         Toggle("Correct drift on long scans", isOn: $settings.driftCorrection)
                             .accessibilityIdentifier("driftCorrection")
                     } header: { Text("Long scans") } footer: {
-                        Text("When a place is scanned on more than one pass, saving lines the passes up and follows the phone's own position corrections. Short scans whose passes already agree are saved exactly as captured. The as-captured version can always be saved as a copy from the scan's Info. For best results turn slowly, in an arc rather than on the spot.")
+                        Text("When a place is scanned on more than one pass, saving lines the passes up and follows the phone's own position corrections. Scans with less than about 10 m of walking, and scans whose passes already agree, are saved exactly as captured. The as-captured version can always be saved as a copy from the scan's Info. For best results turn slowly, in an arc rather than on the spot.")
                     }
                 }
                 Section {
@@ -1456,17 +1456,18 @@ struct ScannerView: View {
         let fix = north ? captureLocation : nil
         let correctDrift = settings.driftCorrection
         DispatchQueue.global(qos: .userInitiated).async {
-            do {
+            /// One complete save. `useDriftRecord == false` is the pre-drift path:
+            /// the captured points, untouched, with no record.
+            func save(useDriftRecord: Bool) throws -> Scan {
                 let terrain = try recordedTerrain?.normalized()
                 // Long scans: follow the phone's own position corrections and line
                 // up passes over the same place. Whole stretches of the walk move
                 // rigidly; no point is added, removed, averaged or recoloured here.
                 // A capture without the record (recovered older draft, adaptive
-                // terrain) is saved exactly as before.
+                // terrain) and every short scan is saved exactly as before.
                 var source = cloud
                 var drift: (prepared: DriftPipeline.Prepared, capture: AlignmentCapture)?
-                if let recorded = cloud.alignment, let ids = cloud.segmentIndices {
-                    if correctDrift { DispatchQueue.main.async { self.savingProgress = "Lining up passes…" } }
+                if useDriftRecord, let recorded = cloud.alignment, let ids = cloud.segmentIndices {
                     var shown = -1
                     if let prepared = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: recorded,
                                                             enabled: correctDrift, progress: { fraction in
@@ -1484,16 +1485,16 @@ struct ScannerView: View {
                                      prepared.summary.overlap, prepared.summary.disagreementMetres ?? 0,
                                      prepared.summary.largestMoveMetres), category: "Alignment")
                     }
-                    DispatchQueue.main.async { self.savingProgress = "Saving point cloud…" }
+                    DispatchQueue.main.async { if self.isSaving { self.savingProgress = "Saving point cloud…" } }
                 }
                 // Terrain was already thinned while capturing. A second grid could
                 // merge adjacent bins and drop small breaks; preserve those samples.
                 var points: MeshData
                 if let terrain {
-                    // Only where correction has laid one pass onto another can a
-                    // sampling cell hold two samples; keep the first, unchanged.
+                    // Only where correction has laid one pass onto another does a
+                    // sampling cell hold samples of two passes; keep the earlier pass.
                     points = drift?.prepared.summary.corrected == true
-                        ? MeshProcessor.keepFirstPerCell(source, spacing: terrain.spacing.metres) : source
+                        ? MeshProcessor.keepOnePassPerCell(source, spacing: terrain.spacing.metres) : source
                 } else {
                     points = MeshProcessor.voxelDownsamplePoints(source, leafSize: detailMeters)
                 }
@@ -1511,12 +1512,27 @@ struct ScannerView: View {
                 if let drift, let ids = points.segmentIndices {
                     record = StorageManager.AlignmentRecord(prepared: drift.prepared, capture: drift.capture,
                                                             pointSegments: ids, frame: RigidPose(frame).orthonormalised)
+                } else if drift?.prepared.summary.corrected == true {
+                    // Corrected points are never saved without the record that can undo them.
+                    throw ScanAlignmentError.recordNotSaved
                 }
-                let scan = try storageManager.savePointCloud(meshData: points, name: name, toProject: project,
-                                                             alignment: record) {
+                return try storageManager.savePointCloud(meshData: points, name: name, toProject: project,
+                                                         alignment: record) {
                     $0.recordLocation(fix, compassRequested: north)
                     if let terrain { $0.recordTerrainCapture(terrain, frame: frame) }
                     else { $0.recordCaptureFrame(frame) }
+                }
+            }
+            do {
+                let scan: Scan
+                do {
+                    scan = try save(useDriftRecord: true)
+                } catch ScanAlignmentError.recordNotSaved {
+                    // The drift record is an extra. If it cannot be stored, save the
+                    // capture exactly as recorded rather than fail (or keep
+                    // corrections that could no longer be undone).
+                    DebugLogger.shared.warn("Drift record could not be stored; saving the capture as recorded", category: "Alignment")
+                    scan = try save(useDriftRecord: false)
                 }
                 DispatchQueue.main.async { finishSave(scan: scan, project: project) }
             } catch {

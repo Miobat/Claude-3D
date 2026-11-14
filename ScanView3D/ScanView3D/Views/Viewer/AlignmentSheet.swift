@@ -18,6 +18,9 @@ struct AlignmentSheet: View {
 
     @State private var references = ScanReferenceDocument()
     @State private var loaded = false
+    /// False when the saved references could not be read: they are then left
+    /// exactly as they are on disk instead of being overwritten.
+    @State private var editable = true
     @State private var busy = false
     @State private var failure: String?
     @State private var copy: Scan?
@@ -37,6 +40,7 @@ struct AlignmentSheet: View {
         scan.faceCount == 0 && (scan.fileName as NSString).pathExtension.lowercased() == "ply"
     }
     private var hasWalkRecording: Bool { (scan.alignment?.segmentCount ?? 0) >= 2 }
+    private var canEdit: Bool { editable && !busy && !store.isLibraryReadOnly }
     private var report: DriftReferences.Report { DriftReferences.report(references) }
     private var canFit: Bool {
         isPointCloud && (references.controls.count >= 2
@@ -179,8 +183,9 @@ struct AlignmentSheet: View {
             }
             .onDelete { offsets in
                 let ids = Set(offsets.map { report.distances[$0].id })
-                references.distances.removeAll { ids.contains($0.id) }; persist()
+                change { $0.distances.removeAll { ids.contains($0.id) } }
             }
+            .deleteDisabled(!canEdit)
             Menu {
                 ForEach(distanceCandidates, id: \.measurement.id) { entry in
                     Button("Distance \(entry.index) · \(entry.measurement.summary(unit: .meters))") {
@@ -189,7 +194,7 @@ struct AlignmentSheet: View {
                     }
                 }
             } label: { Label("Add known distance", systemImage: "ruler") }
-            .disabled(distanceCandidates.isEmpty || busy)
+            .disabled(distanceCandidates.isEmpty || !canEdit)
         } header: { Text("Known distances") } footer: {
             Text(distanceCandidates.isEmpty
                  ? "Use Measure → Distance between two marks whose distance you have taped, then add it here."
@@ -209,14 +214,15 @@ struct AlignmentSheet: View {
             }
             .onDelete { offsets in
                 let ids = Set(offsets.map { report.lines[$0].id })
-                references.lines.removeAll { ids.contains($0.id) }; persist()
+                change { $0.lines.removeAll { ids.contains($0.id) } }
             }
+            .deleteDisabled(!canEdit)
             Menu {
                 ForEach(lineCandidates, id: \.measurement.id) { entry in
                     Button("Path \(entry.index) · \(entry.measurement.points.count) points") { addLine(entry.measurement, name: "Path \(entry.index)") }
                 }
             } label: { Label("Add straight line", systemImage: "line.diagonal") }
-            .disabled(lineCandidates.isEmpty || busy)
+            .disabled(lineCandidates.isEmpty || !canEdit)
         } header: { Text("Edges that are straight in reality") } footer: {
             Text(lineCandidates.isEmpty
                  ? "Use Measure → Path to place three or more points along an edge, kerb or string line you know is straight, then add it here."
@@ -244,8 +250,9 @@ struct AlignmentSheet: View {
             }
             .onDelete { offsets in
                 let ids = Set(offsets.map { report.controls[$0].id })
-                references.controls.removeAll { ids.contains($0.id) }; persist()
+                change { $0.controls.removeAll { ids.contains($0.id) } }
             }
+            .deleteDisabled(!canEdit)
             Menu {
                 ForEach(Array(pointCandidates.enumerated()), id: \.offset) { _, entry in
                     Button(entry.name) {
@@ -254,7 +261,7 @@ struct AlignmentSheet: View {
                     }
                 }
             } label: { Label("Add control point", systemImage: "mappin.and.ellipse") }
-            .disabled(pointCandidates.isEmpty || busy)
+            .disabled(pointCandidates.isEmpty || !canEdit)
         } header: { Text("Control points (surveyed coordinates)") } footer: {
             Text("Any measured point can be a control point. Two fix heading and position; three or more also show how well the scan fits. The scan is never tilted: height stays vertical.")
         }
@@ -301,13 +308,26 @@ struct AlignmentSheet: View {
         guard !loaded else { return }
         loaded = true
         do { references = try store.loadReferences(for: scan, in: project) }
-        catch { failure = "Saved references could not be read: " + error.localizedDescription }
+        catch {
+            editable = false
+            failure = "Saved references could not be read, so they cannot be edited here. The file has been left as it is. "
+                + error.localizedDescription
+        }
     }
 
-    private func persist() {
-        failure = nil
-        do { try store.saveReferences(references, for: scan, in: project) }
-        catch { failure = "References were not saved: " + error.localizedDescription }
+    /// An edit only takes effect once it has been stored: what is on screen (and
+    /// used for a fitted copy) is always what is saved with the scan.
+    private func change(_ edit: (inout ScanReferenceDocument) -> Void) {
+        guard canEdit else { return }
+        var candidate = references
+        edit(&candidate)
+        do {
+            try store.saveReferences(candidate, for: scan, in: project)
+            references = candidate
+            failure = nil
+        } catch {
+            failure = "The reference was not saved: " + error.localizedDescription
+        }
     }
 
     private func number(_ text: String) -> Double? {
@@ -325,15 +345,15 @@ struct AlignmentSheet: View {
             failure = "Enter the known length in metres, for example 18.25."
             return
         }
-        references.distances.append(ScanReferenceDocument.KnownDistance(name: pendingName,
-            a: vector(measurement.points[0]), b: vector(measurement.points[1]), knownMetres: known))
-        persist()
+        let entry = ScanReferenceDocument.KnownDistance(name: pendingName,
+            a: vector(measurement.points[0]), b: vector(measurement.points[1]), knownMetres: known)
+        change { $0.distances.append(entry) }
     }
 
     private func addLine(_ measurement: ScanMeasurement, name: String) {
         guard measurement.points.count >= 3 else { return }
-        references.lines.append(ScanReferenceDocument.StraightLine(name: name, points: measurement.points.map(vector)))
-        persist()
+        let entry = ScanReferenceDocument.StraightLine(name: name, points: measurement.points.map(vector))
+        change { $0.lines.append(entry) }
     }
 
     private func addControl() {
@@ -343,9 +363,9 @@ struct AlignmentSheet: View {
             failure = "Enter east, north and height in metres."
             return
         }
-        references.controls.append(ScanReferenceDocument.ControlPoint(name: pendingName, point: vector(point),
-                                                                      east: east, north: north, height: height))
-        persist()
+        let entry = ScanReferenceDocument.ControlPoint(name: pendingName, point: vector(point),
+                                                       east: east, north: north, height: height)
+        change { $0.controls.append(entry) }
     }
 
     private func makeCopy(_ title: String, _ work: @escaping () throws -> Scan) {

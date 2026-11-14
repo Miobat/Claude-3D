@@ -920,8 +920,15 @@ class LiDARScanner: NSObject, ObservableObject {
             guard captureEpoch.isCurrent(token) else { finish(nil); return }
             // Point modes: the depth-sensor cloud is far denser than mesh vertices.
             if let cloudMesh = cloud?.pointCloud() {
-                // Segments without their record (or the reverse) are of no use.
-                finish(cloudMesh.pointSegments != nil && drift != nil ? cloudMesh.withAlignment(drift) : cloudMesh)
+                // Segments without their record (or the reverse) are of no use. While
+                // still scanning, a newer stretch can start between reading the record
+                // (above, on the main thread) and this snapshot: then the record is
+                // left out of this checkpoint rather than stored incomplete.
+                var complete = false
+                if let drift, let ids = cloudMesh.segmentIndices {
+                    complete = Int(ids.max() ?? 0) < drift.segments.count
+                }
+                finish(complete ? cloudMesh.withAlignment(drift) : cloudMesh)
                 return
             }
             if terrain { finish(nil); return }

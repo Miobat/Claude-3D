@@ -76,6 +76,7 @@ struct CaptureSegmenter {
     private var framePosition: SIMD3<Float>?
     private var frameTime = 0.0
     private var pendingBreak = false
+    private var anchorRestarts = 0
     private var recent: [(dt: Double, turn: Float, move: Float)] = []
     private var hintUntil = 0.0
     private static let maximumPathSamples = 20_000
@@ -150,7 +151,13 @@ struct CaptureSegmenter {
             if moved >= 1.5 * stretch { start = true }
             else if turned >= 30 * .pi / 180, age >= 0.4 { start = true }
             else if age >= 12 * Double(stretch), moved >= 0.3 { start = true }
-            else if anchorMoved, age >= 1 { start = true }
+            else if anchorMoved, age >= (anchorRestarts < 60 ? 0.15 : 2) {
+                // Points recorded after the phone moved this stretch's anchor are
+                // already in the corrected frame: they need their own record at
+                // once, or the correction would later be applied to them twice.
+                // The budget keeps a jittery anchor from using up every segment.
+                start = true; anchorRestarts += 1
+            }
         }
         guard start, segmentCount < AlignmentCapture.maximumSegments else {
             pendingBreak = false
@@ -244,7 +251,8 @@ struct ScanAlignmentSummary: Codable, Equatable {
         case DriftRefiner.Result.passesAgree.rawValue: return "Passes already agreed — nothing changed"
         case DriftRefiner.Result.noOverlap.rawValue: return "No place was scanned twice — nothing to line up"
         case DriftRefiner.Result.noImprovement.rawValue: return "No clear improvement found — left as captured"
-        case "off": return "Drift correction was turned off"
+        case "off": return "Drift correction was turned off — saved as captured"
+        case "tooShort": return "Short scan — saved exactly as captured"
         case "tooSparse": return "Point spacing too coarse to line up passes"
         default: return "Not checked"
         }
@@ -252,9 +260,10 @@ struct ScanAlignmentSummary: Codable, Equatable {
 }
 
 enum ScanAlignmentError: LocalizedError {
-    case invalidDocument, staleModel, noSegments, fitFailed, nothingToFit
+    case invalidDocument, staleModel, noSegments, fitFailed, nothingToFit, recordNotSaved
     var errorDescription: String? {
         switch self {
+        case .recordNotSaved: return "The drift record could not be stored with the scan."
         case .invalidDocument: return "This scan's alignment record cannot be read. The scan itself is unchanged."
         case .staleModel: return "The alignment record does not belong to this version of the scan."
         case .noSegments: return "This scan has no walk recording, so it cannot be re-aligned."
@@ -377,21 +386,33 @@ enum DriftPipeline {
         var ignored: Int
     }
 
-    /// Reads what ARKit did to each segment's anchor. Tiny changes (under 2 mm
-    /// and 0.02°) are treated as exactly none, so a short scan saves exactly the
-    /// points that were captured. Implausibly large ones are ignored.
+    /// Walks shorter than this are never touched: a short scan is saved exactly
+    /// as it was captured, whatever the phone did to its anchors.
+    static let minimumPathMetres = 10.0
+
+    /// Reads what ARKit did to each segment's anchor, RELATIVE TO THE FIRST
+    /// SEGMENT: only changes of shape count, so a shift of the whole map is no
+    /// change at all. Relative changes under 5 mm and 0.05° are treated as
+    /// exactly none; implausibly large ones are ignored.
     static func phoneCorrection(_ capture: AlignmentCapture) -> PhoneCorrection? {
         guard capture.isUsable else { return nil }
-        var captured: [RigidPose] = [], corrected: [RigidPose] = []
-        var largest = 0.0
-        var ignored = 0
+        var references: [RigidPose] = [], ends: [RigidPose] = []
         for segment in capture.segments {
             guard let a = AlignmentCapture.matrix(segment.reference), let b = AlignmentCapture.matrix(segment.end) else { return nil }
-            let reference = RigidPose(a).orthonormalised, end = RigidPose(b).orthonormalised
+            references.append(RigidPose(a).orthonormalised)
+            ends.append(RigidPose(b).orthonormalised)
+        }
+        // What happened to the first segment's anchor is taken out of all of them.
+        let gauge = references[0].composed(with: ends[0].inverse)
+        var corrected: [RigidPose] = []
+        var largest = 0.0
+        var ignored = 0
+        for k in 0..<references.count {
+            let reference = references[k]
+            let end = gauge.composed(with: ends[k]).orthonormalised
             let shift = simd_distance(reference.t, end.t)
             let angle = simd_length(DriftMath.logSO3(end.r * reference.r.transpose))
-            captured.append(reference)
-            if shift < 0.002 && angle < 0.00035 {
+            if k == 0 || (shift < 0.005 && angle < 0.00087) {
                 corrected.append(reference)
             } else if shift > 3 || angle > 15 * .pi / 180 || !shift.isFinite || !angle.isFinite {
                 corrected.append(reference); ignored += 1
@@ -400,7 +421,7 @@ enum DriftPipeline {
                 largest = max(largest, shift + angle * 2)      // effect about 2 m from the anchor
             }
         }
-        return PhoneCorrection(captured: captured, corrected: corrected, largest: largest, ignored: ignored)
+        return PhoneCorrection(captured: references, corrected: corrected, largest: largest, ignored: ignored)
     }
 
     struct Prepared {
@@ -423,6 +444,11 @@ enum DriftPipeline {
             trackingJumps: capture.trackingJumps, fastTurnSeconds: capture.fastTurnSeconds,
             phoneCorrectionMetres: 0, overlap: "off", largestMoveMetres: 0, corrected: false)
         guard enabled else {
+            return Prepared(points: points, captured: phone.captured, phone: phone.captured, refined: phone.captured,
+                            links: [], summary: summary.sanitised)
+        }
+        guard capture.pathLengthMetres >= minimumPathMetres else {
+            summary.overlap = "tooShort"
             return Prepared(points: points, captured: phone.captured, phone: phone.captured, refined: phone.captured,
                             links: [], summary: summary.sanitised)
         }

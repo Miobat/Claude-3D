@@ -18,10 +18,12 @@ which do follow them.)
 ## What is recorded while scanning (Point Cloud, fixed-spacing Terrain)
 
 - The walk is cut into **segments**: a new one every 1.5 m, every 30° of
-  turning, after 12 s, when ARKit visibly snaps the position estimate, when
-  ARKit moves the active segment's anchor by more than 5 mm / 0.05°, and after
-  any pause or interruption. At most 200 per capture (stretches get longer
-  after 100 and 150).
+  turning, after 12 s, when ARKit visibly snaps the position estimate, on the
+  next tick after ARKit moves the active segment's anchor by more than
+  5 mm / 0.05° (points recorded after such a move are already in the corrected
+  frame and must not get that correction again; after 60 such restarts at most
+  one every 2 s), and after any pause or interruption. At most 200 per capture
+  (stretches get longer after 100 and 150).
 - Each segment owns a plain `ARAnchor` at the phone's pose when it started.
   ARKit keeps anchors current as it refines its map.
 - Every stored point remembers its segment (`Cell.segment`, two bytes; the
@@ -35,8 +37,11 @@ Auto terrain (own sample store), Fast and High Quality. Those save as before.
 
 ## What happens at save (`DriftPipeline.prepare`)
 
-1. **The phone's own corrections.** For each segment: anchor transform now vs
-   when its points were recorded. Under 2 mm and 0.02° counts as exactly
+0. **Short scans are never touched.** Under 10 m of walking the capture is
+   saved bit-identical, whatever ARKit did to its anchors (`tooShort`).
+1. **The phone's own corrections**, relative to the first segment: a shift of
+   the whole map is no change. For each other segment: anchor transform now vs
+   when its points were recorded. Under 5 mm and 0.05° counts as exactly
    nothing; over 3 m or 15° is ignored as implausible. The segment's points
    move rigidly with their anchor.
 2. **Lining up passes** (`DriftRefiner.refine`, point spacing ≤ 5 cm only).
@@ -56,8 +61,13 @@ Auto terrain (own sample store), Fast and High Quality. Those save as before.
 Whole segments move rigidly. No point is added, removed, averaged or
 recoloured. The usual save steps (thinning to the Detail spacing, level/square
 frame, terrain translation) run afterwards on the corrected points. Terrain
-keeps one sample per cell: where correction lays one pass onto another, the
-first sample of a cell is kept unchanged.
+keeps one pass per sampling cell: where correction lays a later pass (three or
+more segments on) onto an earlier one, the later pass's samples in that cell
+are dropped. Samples of the same pass are never dropped.
+
+Corrected points are never saved without the record that can undo them: if
+the record cannot be stored, the capture is saved exactly as recorded instead
+(`ScanAlignmentError.recordNotSaved` → second pass without drift).
 
 Directions the shape does not constrain are never guessed: sliding along a
 plain wall or canal, turning on a flat floor. Error along the length of a

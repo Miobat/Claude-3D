@@ -671,6 +671,7 @@ class StorageManager: ObservableObject {
                 updated.coordinateProvenance = provenance
                 updated.textureQuality = nil // A new reconstruction has different surfaces/photos.
                 updated.meshRetention = nil; updated.originalMeshSHA256 = nil
+                updated.alignment = nil   // a new reconstruction is not the captured point cloud
                 updated.terrainCapture = nil // This replacement is no longer a measured terrain point cloud.
                 updated.thumbnailData = generateThumbnail(fromModelURL: dest)
                 guard let bounds = StorageManager.transformedBounds(of: dest, by: modelTransform) else {
@@ -770,22 +771,29 @@ class StorageManager: ObservableObject {
         // the segment of each point in file order.
         var alignmentSummary: ScanAlignmentSummary?
         if alignment != nil || alignmentDocument != nil {
-            let hash = try measurementSHA256(fileURL)
-            let document: ScanAlignmentDocument
-            if let alignmentDocument {
-                document = try alignmentDocument(hash)
-            } else if let alignment {
-                document = DriftPipeline.document(prepared: alignment.prepared, capture: alignment.capture,
-                    pointSegments: alignment.pointSegments, frame: alignment.frame, modelSHA256: hash)
-            } else { throw ScanAlignmentError.invalidDocument }
-            guard document.pointCount == meshData.vertexCount, document.modelSHA256 == hash else {
-                throw ScanAlignmentError.invalidDocument
+            // Any failure here is reported as one distinct error, so the caller can
+            // save the capture as recorded instead (the record is an extra).
+            do {
+                let hash = try measurementSHA256(fileURL)
+                let document: ScanAlignmentDocument
+                if let alignmentDocument {
+                    document = try alignmentDocument(hash)
+                } else if let alignment {
+                    document = DriftPipeline.document(prepared: alignment.prepared, capture: alignment.capture,
+                        pointSegments: alignment.pointSegments, frame: alignment.frame, modelSHA256: hash)
+                } else { throw ScanAlignmentError.invalidDocument }
+                guard document.pointCount == meshData.vertexCount, document.modelSHA256 == hash else {
+                    throw ScanAlignmentError.invalidDocument
+                }
+                try document.validate()
+                let bytes = try JSONEncoder().encode(document)
+                guard bytes.count <= ScanAlignmentDocument.maximumBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+                try bytes.write(to: alignmentURL, options: .atomic)
+                alignmentSummary = document.summary.sanitised
+            } catch {
+                DebugLogger.shared.error("Drift record not stored: \(error.localizedDescription)", category: "Alignment")
+                throw ScanAlignmentError.recordNotSaved
             }
-            try document.validate()
-            let bytes = try JSONEncoder().encode(document)
-            guard bytes.count <= ScanAlignmentDocument.maximumBytes else { throw CocoaError(.fileWriteOutOfSpace) }
-            try bytes.write(to: alignmentURL, options: .atomic)
-            alignmentSummary = document.summary.sanitised
         }
         if let references, !references.isEmpty {
             try references.validate()
@@ -1470,7 +1478,14 @@ class StorageManager: ObservableObject {
             var limitations = [scan.scaleDescription, "Local coordinates, not georeferenced. Phone GPS is not survey control.",
                                "Model delivery only: not a project backup. Photos and measurements are not included."]
             if let origin = scan.alignment?.siteOrigin, origin.count == 3 {
-                limitations[1] = String(format: "Fitted to control points entered in the app: X = east − %.0f, Y = height − %.0f, Z = −(north − %.0f). Verify against your control before use.", origin[0], origin[2], origin[1])
+                // Say it in the axes and units of THIS export.
+                let axes: String
+                switch kind {
+                case .native: axes = String(format: "X = east − %.0f, Y = height − %.0f, Z = −(north − %.0f), metres", origin[0], origin[2], origin[1])
+                case .zUpOBJ: axes = String(format: "X = east − %.0f, Y = north − %.0f, Z = height − %.0f, metres", origin[0], origin[1], origin[2])
+                case .stl: axes = String(format: "X = east − %.0f, Y = north − %.0f, Z = height − %.0f (origin in metres; coordinates in millimetres)", origin[0], origin[1], origin[2])
+                }
+                limitations[1] = "Fitted to control points entered in the app: " + axes + ". Verify against your control before use."
             }
             let model: URL
             switch kind {
@@ -1521,11 +1536,18 @@ class StorageManager: ObservableObject {
                 limitations.append("Drift correction: " + summary.overlapDescription
                     + String(format: "; largest move %.3f m over a %.0f m walk. Not a field-accuracy guarantee.",
                              summary.largestMoveMetres, summary.pathLengthMetres))
-                for (suffix, name) in [(ScanAlignmentDocument.suffix, "alignment.json"), (ScanReferenceDocument.suffix, "references.json")] {
-                    let sidecar = sourceDirectory.appendingPathComponent((scan.fileName as NSString).deletingPathExtension + suffix)
-                    if fileManager.fileExists(atPath: sidecar.path) {
-                        try fileManager.copyItem(at: sidecar, to: folder.appendingPathComponent(name))
-                    }
+                // Extras: a missing or unreadable record never fails a delivery, and a
+                // record that no longer matches the model is not shipped.
+                let stem = (scan.fileName as NSString).deletingPathExtension
+                if (try? loadAlignment(for: scan, in: project)) ?? nil != nil,
+                   (try? fileManager.copyItem(at: sourceDirectory.appendingPathComponent(stem + ScanAlignmentDocument.suffix),
+                                              to: folder.appendingPathComponent("alignment.json"))) != nil {
+                    limitations.append("alignment.json: walk segments, their corrections and the segment of each point (same order as the model file).")
+                }
+                let referenceFile = sourceDirectory.appendingPathComponent(stem + ScanReferenceDocument.suffix)
+                if fileManager.fileExists(atPath: referenceFile.path),
+                   (try? fileManager.copyItem(at: referenceFile, to: folder.appendingPathComponent("references.json"))) != nil {
+                    limitations.append("references.json: known distances, straight lines and control points entered in the app.")
                 }
             }
             let factor: Double = kind == .stl ? 1000 : 1

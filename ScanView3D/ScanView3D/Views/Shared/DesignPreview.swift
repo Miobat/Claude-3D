@@ -1040,7 +1040,7 @@ enum DesignPreview {
             let capture = AlignmentCapture(spacingMetres: 0.01, segments: [
                 AlignmentCapture.Segment(reference: AlignmentCapture.array(first), end: AlignmentCapture.array(first), startTime: 0),
                 AlignmentCapture.Segment(reference: AlignmentCapture.array(second), end: AlignmentCapture.array(lifted), startTime: 3)
-            ], path: Data(count: 64), pathLengthMetres: 4, trackingJumps: 1, fastTurnSeconds: 2)
+            ], path: Data(count: 64), pathLengthMetres: 40, trackingJumps: 1, fastTurnSeconds: 2)
             let bounds = MeshData.bounds(of: vertices)
             let cloud = MeshData(vertices: vertices, normals: [], faces: [], colors: colors, boundingBoxMin: bounds.0,
                                  boundingBoxMax: bounds.1, pointSegments: ScanAlignmentDocument.packSegments(segments),
@@ -1191,6 +1191,19 @@ enum DesignPreview {
             }
             check(off.points == cloud.vertices && !off.summary.corrected && off.summary.overlap == "off",
                   "With correction off the captured points are saved untouched")
+            var shortCapture = capture
+            shortCapture.pathLengthMetres = 6
+            let short = DriftPipeline.prepare(points: cloud.vertices, segments: ids, capture: shortCapture, enabled: true)
+            check(short?.points == cloud.vertices && short?.summary.corrected == false && short?.summary.overlap == "tooShort",
+                  "A short scan is saved exactly as captured even when the phone moved its anchors")
+            // Terrain: only a clearly later pass gives way in a shared sampling cell.
+            let cellPoints = [SIMD3<Float>(0.01, 0, 0.01), SIMD3<Float>(0.03, 0, 0.02), SIMD3<Float>(0.04, 0, 0.04), SIMD3<Float>(0.31, 0, 0.02)]
+            let cellBounds = MeshData.bounds(of: cellPoints)
+            let cells = MeshData(vertices: cellPoints, normals: [], faces: [], colors: [], boundingBoxMin: cellBounds.0,
+                                 boundingBoxMax: cellBounds.1, pointSegments: ScanAlignmentDocument.packSegments([2, 3, 9, 9]))
+            let onePass = MeshProcessor.keepOnePassPerCell(cells, spacing: 0.1)
+            check(onePass.vertices == [cellPoints[0], cellPoints[1], cellPoints[3]] && onePass.segmentIndices == [2, 3, 9],
+                  "Terrain keeps same-pass neighbours and drops only the later pass in a shared cell")
             // A record that no longer matches its model is refused.
             try Data("ply\n".utf8).write(to: model, options: .atomic)
             do { _ = try store.loadAlignment(for: scan, in: project); check(false, "Stale drift record is refused") }
