@@ -37,6 +37,8 @@ jobs:
     # Development pushes validate only; publishing a codex branch is manual.
     # A push whose head commit message contains [validate-only] never publishes,
     # so multi-step work can be compiled and tested before one release push.
+    # The release push is then simply a commit WITHOUT that marker (it must
+    # change a path listed under `on.push.paths`, or no run starts at all).
     if: github.event_name == 'workflow_dispatch' || (!startsWith(github.ref, 'refs/heads/codex/') && !contains(github.event.head_commit.message, '[validate-only]'))
     name: Build & Upload to TestFlight
     runs-on: macos-15
